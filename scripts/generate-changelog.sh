@@ -18,9 +18,7 @@ SECTIONS_PERF=()
 
 # Parse conventional commit messages and categorize
 while IFS= read -r line; do
-    # Extract hash and message
-    hash=$(echo "$line" | cut -d'|' -f1)
-    msg=$(echo "$line" | cut -d'|' -f2-)
+    msg="$line"
 
     # Skip merge commits and revert commits
     [[ "$msg" =~ ^Merge ]] && continue
@@ -41,26 +39,24 @@ while IFS= read -r line; do
     elif [[ "$msg" =~ ^docs(\(.+\))?(!)?: ]]; then
         type="docs"
     elif [[ "$msg" =~ ^(chore|test|style|build)(\(.+\))?(!)?: ]]; then
-        continue  # Skip these types
+        continue
     else
-        continue  # Skip non-conventional commits
+        continue
     fi
 
     # Extract description: remove the type prefix
     desc=$(echo "$msg" | sed -E 's/^[a-z]+(\(.+\))?!?:\s*//')
-
-    # Format entry with hash
-    entry="- \`${hash}\` ${desc}"
+    entry="- ${desc}"
 
     case "$type" in
-        feat)   SECTIONS_IMPROVEMENTS+=("$entry") ;;
-        fix)    SECTIONS_BUGFIXES+=("$entry") ;;
-        ci)     SECTIONS_CI+=("$entry") ;;
+        feat)     SECTIONS_IMPROVEMENTS+=("$entry") ;;
+        fix)      SECTIONS_BUGFIXES+=("$entry") ;;
+        ci)       SECTIONS_CI+=("$entry") ;;
         refactor) SECTIONS_REFACTOR+=("$entry") ;;
-        perf)   SECTIONS_PERF+=("$entry") ;;
-        docs)   SECTIONS_DOCS+=("$entry") ;;
+        perf)     SECTIONS_PERF+=("$entry") ;;
+        docs)     SECTIONS_DOCS+=("$entry") ;;
     esac
-done < <(git log "${FROM}..${TO}" --format='%h|%s' --no-merges)
+done < <(git log "${FROM}..${TO}" --format='%s' --no-merges)
 
 # Generate output
 print_section() {
