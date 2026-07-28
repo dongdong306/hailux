@@ -7,5 +7,17 @@
       "include-component-in-tag": false,
       "include-v-in-tag": true
     }
-  }
+  },
+  "changelog-sections": [
+    { "type": "feat", "section": "Improvements" },
+    { "type": "fix", "section": "Bugfixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "ci", "section": "CI" },
+    { "type": "build", "section": "Build" },
+    { "type": "refactor", "section": "Refactor" },
+    { "type": "chore", "hidden": true },
+    { "type": "docs", "section": "Documentation" },
+    { "type": "style", "hidden": true },
+    { "type": "test", "hidden": true }
+  ]
 }
