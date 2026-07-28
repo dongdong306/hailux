@@ -53,7 +53,7 @@ subagent delegation, and custom slash commands.
   - `command_def.rs` — **Custom slash commands**. Discovers `.md` files (YAML frontmatter
     with `description`) from `~/.hailux/commands/` and `<work_dir>/.hailux/commands/`.
     `CommandRegistry` unifies builtin and custom prompt commands; priority: project > global > builtin.
-  - `agent_md.rs` — Discovers `AGENTS.md` (case-insensitive) from `~/.hailux/` (global,
+  - `agents_md.rs` — Discovers `AGENTS.md` (case-insensitive) from `~/.hailux/` (global,
     lowest priority) then ancestor dirs up to 3 levels, with work-dir having highest priority.
   - `utils.rs` — Shared utilities: `compare_mtime` (file modification time sorting),
     `split_frontmatter` / `strip_frontmatter_value` (frontmatter parsing used by skill,
