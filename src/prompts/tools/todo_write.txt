@@ -1,0 +1,167 @@
+Use this tool to create and manage a structured task list for the current coding session. This helps you track progress, organize complex tasks, and provide thoughtful service to the user.
+
+It also helps users understand the progress of each task and their overall request.
+
+## When to use this tool
+
+Proactively use this tool in the following scenarios:
+
+1. **Complex multi-step tasks** — Tasks that require 3 or more distinct steps or operations.
+2. **Non-tr and complex tasks** — Tasks that require careful planning or multiple operations.
+3. **User explicitly requests a task list** — The user directly asks you to use a task list.
+4. **User provides multiple tasks** — The user gives a list of tasks (numbered or comma-separated).
+5. **After receiving new instructions** — Immediately record user requirements as tasks. You can edit the task list at any time based on new information.
+6. **After completing a task** — Mark it as completed and add any new follow-up tasks.
+7. **When you start working on a new task** — Mark that task as "in_progress". Ideally, only one task should be "in_progress" at a time. Finish the current task before starting a new one.
+
+## When not to use this tool
+
+Skip using this tool in the following situations:
+1. There is only a single, simple task.
+2. The task is too trivial, and tracking it provides no organizational benefit.
+3. The task can be completed in fewer than 3 simple steps.
+4. The task is purely conversational or informational.
+
+Note: If there is only a trivial task to complete, you should not use this tool. In such cases, just complete the task directly.
+
+## Examples of using the task list
+
+<Example>
+User: I want to add a dark mode toggle switch in the app settings. Please make sure to run tests and build when done!
+Assistant: Let me help you add a dark mode toggle switch in the app settings. Let me create a task list to track the implementation process.
+*Creates task list with the following items:*
+1. Create dark mode toggle component on the settings page
+2. Add dark mode state management (context/store)
+3. Implement dark theme CSS-in-JS styles
+4. Update existing components to support theme switching
+5. Run tests and build process, handling any failures or errors
+*Starts working on the first task*
+
+<Reason>
+The assistant used the task list because:
+1. Adding dark mode is a multi-step feature involving UI, state management, and style changes
+2. The user explicitly requested running tests and build afterward
+3. The assistant inferred that tests and build must pass, so it added "ensure tests and build succeed" as the last task
+</Reason>
+</Example>
+
+<Example>
+User: Help me rename the function getCwd to getCurrentWorkingDirectory in the project.
+Assistant: Let me first search the codebase for all occurrences of 'getCwd'.
+*Uses grep or search tools to locate all getCwd instances in the codebase*
+Assistant: I found 15 occurrences of 'getCwd' across 8 different files. Let me create a task list to track these changes.
+*Creates task list with specific items for each file that needs updating*
+
+<Reason>
+The assistant used the task list because:
+1. First, the assistant searched to understand the scope of the task
+2. After finding multiple occurrences in multiple files, it determined this was a complex multi-step task
+3. The task list helps ensure every occurrence is systematically tracked and updated
+4. This approach prevents missing any occurrences and maintains code consistency
+</Reason>
+</Example>
+
+<Example>
+User: I need to implement the following features for my e-commerce website: user registration, product catalog, shopping cart, and checkout process.
+Assistant: I will help you implement these features. First, let me add all the features to a task list.
+*Creates task list, breaking each feature into specific tasks based on the project architecture*
+Assistant: Let's start with user registration. This will involve creating database models, API endpoints, and frontend forms integrated with your existing authentication system.
+
+<Reason>
+The assistant used the task list because:
+1. The user provided multiple complex features as a comma-separated list
+2. The task list helps organize these large features into manageable tasks
+3. This approach allows tracking progress throughout the implementation process
+</Reason>
+</Example>
+
+<Example>
+User: Can you help me optimize my React app? It renders slowly and has performance issues.
+Assistant: I will help you optimize your React app. First, let me examine your codebase to identify potential performance bottlenecks.
+*Reviews component structure, rendering patterns, state management, and data fetching*
+Assistant: After analyzing your codebase, I found several performance issues. Let me create a task list to track our optimization work.
+*Creates task list with the following items: 1) Implement memoization for expensive computations in ProductList, 2) Add virtualization for long lists in Dashboard, 3) Optimize image loading in Gallery component, 4) Fix state update loops in ShoppingCart, 5) Check bundle size and implement code splitting*
+Let's start by implementing memoization for expensive computations in the ProductList component.
+
+<Reason>
+The assistant used the task list because:
+1. First, the assistant examined the codebase to identify specific performance issues
+2. Based on that analysis, it identified several optimization opportunities
+3. Performance optimization is a non-trivial task requiring multiple steps
+4. The task list helps systematically track improvements across different components
+5. This systematic approach ensures all performance bottlenecks are addressed
+</Reason>
+</Example>
+
+## Examples when not to use the task list
+
+<Example>
+User: How do I print 'Hello World' in Python?
+Assistant: In Python, you can print "Hello World" with simple code:
+
+python
+print("Hello World")
+
+When executed, this will output the text "Hello World" to the console.
+
+<Reason>
+The assistant did not use the task list because this is a single, trivial task that can be completed in one step. For such a straightforward request, there is no need to track multiple tasks or steps.
+</Reason>
+</Example>
+
+<Example>
+User: What does the git status command do?
+Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes are staged, which are not, and which files are not being tracked by Git. It is a fundamental command for understanding the current state of your repository before making a commit.
+
+<Reason>
+The assistant did not use the task list because this is an informational request with no actual coding tasks to complete. The user is simply asking for an explanation, not asking the assistant to perform multiple steps or tasks.
+</Reason>
+</Example>
+
+<Example>
+User: Can you add a comment to the calculateTotal function to explain what it does?
+Assistant: Sure, let me add a comment to the calculateTotal function to explain what it does.
+*Uses the edit tool to add a comment to the calculateTotal function*
+
+<Reason>
+The assistant did not use the task list because this is a single, simple task involving only one location in the code. Adding a comment does not require tracking multiple steps or systematic organization.
+</Reason>
+</Example>
+
+<Example>
+User: Run npm install for me, then tell me the result.
+Assistant: Let me run the npm install command for you.
+
+*Executes: npm install*
+
+The command completed successfully. Here is the output:
+[Output of npm install command]
+
+All dependencies have been installed according to your package.json file.
+
+<Reason>
+The assistant did not use the task list because this is a single command execution with immediately visible results. There are no multiple steps to track or organize, so there is no need for a task list for this simple request.
+</Reason>
+</Example>
+
+## Task Status and Management
+
+1. **Task Status**: Track progress using the following statuses:
+   - pending: The task has not yet started
+   - in_progress: Currently being worked on (limited to one task at a time)
+   - completed: The task has been successfully completed
+   - cancelled: The task is no longer needed
+
+2. **Task Management**:
+   - Update task status in real-time as you work
+   - Mark tasks as completed immediately after finishing (do not batch complete)
+   - Only one task should be "in_progress" at any time
+   - Finish the current task before starting a new one
+   - Cancel tasks that have become irrelevant
+
+3. **Task Breakdown**:
+   - Create specific, actionable items
+   - Break complex tasks into smaller, manageable steps
+   - Use clear, descriptive task names
+
+When in doubt, use this tool. Proactive task management demonstrates thoughtfulness and ensures all requirements are successfully completed.

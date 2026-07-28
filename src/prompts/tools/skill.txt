@@ -1,0 +1,9 @@
+
+Load a specialized skill when the task matches one of the skills listed in the system prompt.
+Use this tool to inject the skill's instructions and resources into the current conversation. The output may include detailed workflow guidance,
+as well as references to scripts, files, etc. in the skill's directory.
+
+After calling this tool, the skill's full instruction body is returned along with the absolute path of its directory (base directory).
+Relative paths referenced in the skill are relative to this base directory; use the `read` or `glob` tool to load them.
+
+The `name` must match one of the skill names listed in the system prompt's `<available_skills>`.

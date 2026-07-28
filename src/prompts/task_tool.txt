@@ -1,0 +1,21 @@
+
+Start a subagent to handle complex, multi-step tasks.
+
+When using the task tool, you must specify the `subagent` parameter to select the subagent type.
+
+Available subagent types: {agents_list}
+
+## When NOT to use the task tool
+- If you only need to read specific files, use the read or glob tool directly
+- If you only need to search for a specific class definition, use the grep tool directly
+- If you only need to search code in 2-3 files, use the read tool directly
+- If there is no suitable subagent, use other tools directly
+
+## Usage Notes
+1. Launch multiple subagents in parallel to maximize performance; use multiple tool calls in a single message
+2. The subagent returns a message and task_id when completed. The result is not visible to the user; you need to briefly summarize the result for the user
+3. Each subagent invocation uses a fresh context. Your prompt should contain a detailed task description and clearly specify what information you expect the subagent to return
+4. To continue a previous subagent conversation, pass the task_id from the last invocation to resume the same session context without repeating previous context
+5. The subagent's output can generally be trusted
+6. Clearly tell the subagent whether you expect it to write code or only do research (searching, file reading, etc.) — the subagent does not know the user's intent
+7. If the subagent description mentions it should be used proactively, use it proactively without waiting for explicit user request

@@ -1,0 +1,52 @@
+Execute Bash commands and return the output
+
+The current OS is Unix, commands are executed using bash. All commands run in the current working directory by default. To run a command in another directory, use the workdir parameter instead of using cd <directory> && <command> pattern.
+
+This tool is for terminal operations (such as git, cargo, npm, etc.), not for file operations (reading, writing, editing, searching) — please use dedicated tools.
+
+Before executing a command, follow these steps:
+
+1. Directory verification:
+   - If the command will create new directories or files, first use ls to verify the parent directory exists and is in the correct location
+   - For example, before running "mkdir foo/bar", check that "foo" exists
+
+2. Path quoting:
+   - Always use double quotes to reference file paths containing spaces
+   - Correct: mkdir "/Users/name/My Documents"
+   - Wrong: mkdir /Users/name/My Documents (will fail)
+
+3. Command execution:
+   - After ensuring proper quoting, execute the command and capture the output
+
+Usage notes:
+  - Unless explicitly instructed or required by the task, avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo commands. Always prefer dedicated tools:
+    - File search: use glob (not find or ls)
+    - Content search: use grep (not grep or rg)
+    - Read file: use read (not cat/head/tail)
+    - Edit file: use edit (not sed/awk)
+    - Write file: use write (not echo > / cat <<EOF)
+    - Output text: output directly (not echo/printf)
+  - When issuing multiple commands:
+    - If commands are independent and can run in parallel, call the Bash tool multiple times in a single message. For example, you can call the Bash tool twice in parallel to run git status and git diff.
+    - Use && to chain dependent commands, only running the second if the first succeeds
+    - Use ; only when you need to run commands sequentially and don't care if earlier commands fail
+    - Do not use newlines to separate commands (newlines can be used within quoted strings)
+    - Avoid using cd to change directories; use the workdir parameter instead
+     - You can set a command timeout via the timeout parameter (in seconds). After timeout, the process will be terminated and a timeout message will be returned
+
+# Git Operations
+
+Only create commits or PRs when the user requests them. If unsure, ask first.
+
+Safety protocol:
+- Never update git config, never run destructive commands (push --force, hard reset, etc.) unless explicitly requested by the user
+- Do not skip hooks (--no-verify), do not force push to main/master
+- Do not use git commands with the -i flag (requires interactive input)
+- Avoid git commit --amend; if a commit fails or has been pushed, create a new commit after fixing
+- Do not commit files containing secrets (.env, credentials.json, etc.)
+- Do not push to remote repositories unless explicitly requested by the user
+- Do not use the todo_write or task tools
+
+Commit process: Run git status, git diff, git log in parallel to understand changes and commit style, draft a concise message, then add and commit, and finally verify with git status. If there are no changes, do not create an empty commit.
+
+Creating PRs: Use the gh command. Understand branch status, create a branch if needed, push, and execute gh pr create. Return the PR URL when done.

@@ -1,0 +1,39 @@
+# Rust 编译产物
+/target/
+**/*.rs.bk
+# IDE - IntelliJ / RustRover / CLion
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# IDE - VS Code
+.vscode/
+*.code-workspace
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 操作系统生成文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# 日志文件
+*.log
+logs/
+
+# 调试与性能分析
+*.profraw
+*.profdata
+flamegraph.svg
+perf.data
+
+# 其他
+*.swp
+*.swo
+*~

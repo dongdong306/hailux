@@ -1,0 +1,130 @@
+# AGENTS.md
+
+OpenCode instructions for the `hailux` repository. This file is for OpenCode sessions.
+Note: hailux itself loads a separate `AGENTS.md` (case-insensitive) from
+`~/.hailux/` and ancestor directories into its LLM system prompt — that is a different
+feature from this file.
+
+## Build & Test
+
+```sh
+cargo build          # build (edition 2024 — requires Rust 1.96.0+)
+cargo run            # launch the TUI app
+cargo test           # run unit tests (agent/agents_md, agent/skill.rs, agent/subagent.rs, agent/command_def.rs, agent/utils.rs, mcp/config.rs, tui/command.rs)
+cargo clippy         # lint (no config — uses defaults)
+cargo fmt            # format (no config — uses defaults)
+```
+
+CI via GitHub Actions (`.github/workflows/ci.yml`): fmt check, clippy, test, build on Ubuntu + Windows.
+See README.md and CONTRIBUTING.md for project documentation.
+
+## What hailux Is
+
+A terminal-based AI coding assistant (like OpenCode/Claude Code) written in Rust.
+It uses `async-openai` with a **bring-your-own-transport** custom layer to support
+DeepSeek-style `reasoning_content` fields. The TUI is built with `ratatui` + `crossterm`.
+Features streaming chat, tool calling, MCP protocol, a progressive skill system,
+subagent delegation, and custom slash commands.
+
+## Architecture (src/)
+
+- `main.rs` — Entry point. Builds the `Agent`, loads config/MCP/storage, launches TUI.
+  `build_agent()` registers tools, discovers skills/subagents/commands, and delegates
+  system-prompt assembly to `prompts::build_system_prompt()`.
+- `agent/` — Core LLM interaction loop.
+  - `agent.rs` — Streaming chat loop, tool-call dispatch, plan-mode, cancellation.
+  - `models.rs` — **DeepSeek-extended message types**. `DeepSeekChatCompletionRequestMessage`
+    wraps standard async-openai types and adds `reasoning_content` to Assistant messages.
+    Uses custom `Serialize` to inject `thinking` config and `extra` fields into the
+    request JSON. Requests go through `create_stream_byot` (BYOT = bring your own transport).
+  - `tools.rs` — `Tool` trait + built-in tools (`bash`, `read`, `edit`, `write`, `grep`,
+    `glob`, `web_fetch`, `todo_write`, `ask_user`). `ToolRegistry` converts tools to
+    OpenAI function-calling schema. `allowed_in_plan_mode()` gates write tools.
+    `execute_async_with_display()` returns optional UI display data (e.g. diffs).
+  - `skill.rs` — Discovers `SKILL.md` files (YAML frontmatter with `name`/`description`)
+    from `~/.hailux/skills/` and `<work_dir>/.hailux/skills/`. Progressive loading: only
+    summaries go into the system prompt; full content loaded via the `skill` tool.
+  - `subagent.rs` — **Subagent system**. Discovers `AGENTS.md` files (YAML frontmatter with
+    `name`/`description`/`tools`/`skills`/`mcp`/`model`) from `~/.hailux/agents/` and
+    `<work_dir>/.hailux/agents/`. Implements `TaskTool`: launches subagents in isolated
+    sessions, each with its own tool set, skill whitelist, MCP server filter, and model.
+    Supports session resume via `task_id` parameter. A builtin `general` subagent is always
+    available. Tool-call progress is forwarded to the main TUI in real time.
+  - `command_def.rs` — **Custom slash commands**. Discovers `.md` files (YAML frontmatter
+    with `description`) from `~/.hailux/commands/` and `<work_dir>/.hailux/commands/`.
+    `CommandRegistry` unifies builtin and custom prompt commands; priority: project > global > builtin.
+  - `agent_md.rs` — Discovers `AGENTS.md` (case-insensitive) from `~/.hailux/` (global,
+    lowest priority) then ancestor dirs up to 3 levels, with work-dir having highest priority.
+  - `utils.rs` — Shared utilities: `compare_mtime` (file modification time sorting),
+    `split_frontmatter` / `strip_frontmatter_value` (frontmatter parsing used by skill,
+    subagent, and command_def modules).
+- `prompts/` — **System prompt and tool description templates** (all `include_str!` at compile time).
+  - `mod.rs` — `build_system_prompt()` assembles: base system prompt + working directory +
+    available skills summary + AGENTS.md instructions + available subagents summary.
+  - `system.txt` — Base system prompt (Chinese).
+  - `plan_mode.txt` — Plan-mode system reminder injected on cloned last user message.
+  - `general_subagent.txt` — System prompt for the builtin `general` subagent.
+  - `task_tool.txt` — Description template for the `task` tool (includes `{agents_list}` placeholder).
+  - `default_help_skill.md` — Default help skill content written on first run.
+  - `tools/` — Per-tool description templates (`bash_windows.txt` / `bash_unix.txt` selected via `cfg`).
+- `config.rs` — Model/provider config. Reads/writes `~/.hailux/config.toml`.
+  Predefined providers: `deepseek`, `zhipu-coding-plan`. Custom providers/models supported.
+  Model selector format: `provider/model` (e.g. `deepseek/deepseek-v4-pro`).
+  `resolve()` returns `ResolvedModel` with OpenAI config, model ID, max tokens, context window, display name.
+- `mcp/` — MCP (Model Context Protocol) client via `rmcp` crate.
+  - `config.rs` — Reads `~/.hailux/mcp.toml`. Auto-generates a commented sample on first run.
+    Supports stdio (local subprocess) and http (remote) transports.
+  - `client.rs` — Connects servers in background, registers their tools with the agent.
+    `SharedMcpBackends` (`Arc<Mutex<Vec<McpToolBackend>>>`) is shared with `TaskTool` for subagent MCP access.
+- `storage/db.rs` — SQLite chat history at `~/.hailux/db/chat.db`. **Manual migrations**
+    (no sqlx macros or migration files) — schema created via `CREATE TABLE IF NOT EXISTS`
+    with `ALTER TABLE` column-add fallbacks for backward compat. Max pool connections = 1.
+    Supports subsessions (parent/child session relationships for subagent task isolation).
+- `tui/` — Ratatui UI. `app.rs` is the main event loop and state machine.
+  - `command.rs` — Slash commands: UI-action commands (`/sessions`, `/new`, `/models`,
+    `/skills`, `/mcp`, `/tasks`, `/plan`, `/exit`) + custom prompt commands via `CommandRegistry`.
+  - `event.rs` — Async event channel bridging terminal input, agent streaming, MCP.
+    Events include `ToolCallStart`/`ToolResult` (with optional `subagent_name` for task delegation).
+  - `input.rs` — Text input handling with paste detection.
+  - `ask_user.rs` — Interactive question dialog for `ask_user` tool.
+  - `history_cell.rs` — Chat history rendering units.
+  - `terminal.rs` — Terminal init/restore + panic hook.
+  - Other files render specific UI panels (chat, pickers, viewers, setup, markdown).
+
+## Runtime File Locations (all under ~/.hailux/)
+
+| Path | Purpose |
+|------|---------|
+| `config.toml` | Provider API keys, model config, `main_model` selector |
+| `mcp.toml` | MCP server definitions (stdio + http) |
+| `db/chat.db` | SQLite: sessions + messages tables (incl. subsessions for subagent tasks) |
+| `AGENTS.md` | Global instructions injected into LLM system prompt |
+| `skills/<name>/SKILL.md` | Skill definitions with YAML frontmatter |
+| `agents/<name>/AGENTS.md` | Subagent definitions (name, description, tools, skills, mcp, model) |
+| `commands/<name>.md` | Custom slash command templates with `$ARGUMENTS` placeholder |
+
+Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ancestor `AGENTS.md` files.
+
+## Key Quirks
+
+- **Platform**: Primarily developed on Windows. `BashTool` runs `powershell.exe` on Windows
+  and `bash -c` on Unix. The `workdir` parameter only exists on non-Windows. Windows has an
+  extra `crossterm_winapi` dependency and different paste-detection timing constants.
+  Tool description templates are platform-specific (`bash_windows.txt` vs `bash_unix.txt`).
+- **Plan mode** (`/plan` or Shift+Tab): Filters out write/edit tools from the tool list
+  and injects a read-only system-reminder into the last user message (on a clone, not stored).
+- **Subagent isolation**: `TaskTool` creates subsessions in the DB. Subagents get their own
+  event channel; only final text result is returned to the main agent. Tool-call progress is
+  forwarded to the main TUI (truncated to 2000 chars). `ask_user` and `task` tools are never
+  registered for subagents. Subagent tool/skill/MCP access is filtered by `AGENTS.md` frontmatter.
+- **Paste detection**: `PasteBurst` in `app.rs` (via `input.rs`) distinguishes typed vs pasted
+  input via timing heuristics. Complex state machine — be careful when modifying input handling.
+- **CRLF handling**: `EditTool` normalizes line endings to match the file's style before
+  string matching, to avoid LLM-provided `\n` failing on `\r\n` files.
+- **System prompt assembly** is centralized in `prompts/mod.rs::build_system_prompt()`.
+  `main.rs::build_agent()` calls it with discovered skills, AGENTS.md entries, and subagents.
+- **Message sync**: After streaming completes, `Agent::sync_messages()` replaces the
+  in-memory message list with the final streamed messages (which include tool results).
+- **No `clippy` lints configured** — `#[allow(dead_code)]` is used liberally on builder methods.
+- **Frontmatter parsing** is shared via `utils::split_frontmatter()` — used consistently
+  across skill, subagent, and command_def modules for YAML frontmatter extraction.

@@ -1,0 +1,7 @@
+Writes a file to the local file system.
+Usage:
+- If a file already exists at the given path, this tool will overwrite it.
+- If it is an existing file, you **must** first read the file content using the read tool. If you do not read the file first, this tool will fail.
+- In the codebase, **always prefer** using the edit tool to edit existing files. **Never** create new files unless explicitly necessary.
+- **Never** proactively create documentation files (*.md) or README files. Only create documentation files when explicitly requested by the user.
+- Only use emojis when explicitly requested by the user. Unless asked, avoid writing emojis in files.

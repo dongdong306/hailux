@@ -1,0 +1,12 @@
+- Fetch content from a specified URL
+- Takes a URL and an optional format as input
+- Fetches the URL content and converts it to the requested format (defaults to markdown)
+- Returns the content in the specified format
+- Use this tool when you need to retrieve and analyze web page content
+Usage notes:
+  - Important: If another tool exists that provides better web fetching capabilities, is more suitable for the current task, or has fewer restrictions, prefer that tool over this one.
+  - The URL must be a complete and valid address
+  - HTTP links will be automatically upgraded to HTTPS
+  - Format options: "markdown" (default), "text", or "html"
+  - This tool is read-only and will not modify any files
+  - If the content is too large, the result may be truncated

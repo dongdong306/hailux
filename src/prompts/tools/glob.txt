@@ -1,0 +1,5 @@
+- A fast file pattern matching tool, suitable for codebases of any scale
+- Supports glob patterns, e.g., `"**/*.js"` or `"src/**/*.ts"`
+- Returns matching file paths, sorted by modification time
+- Use this tool when you need to find files by name pattern
+- You can call multiple tools in a single response. It's best to proactively batch multiple potentially useful searches

@@ -1,0 +1,6 @@
+- A fast content search tool, suitable for codebases of any scale
+- Uses regular expressions to search file contents
+- Supports full regex syntax (e.g., `"log.*Error"`, `"function\s+\w+"`, etc.)
+- Filter files by pattern using the `include` parameter (e.g., `"*.js"`, `"*.{ts,tsx}"`)
+- Returns file paths and line numbers of at least one match, sorted by modification time
+- Use this tool when you need to find files containing a specific pattern

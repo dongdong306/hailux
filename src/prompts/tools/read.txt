@@ -1,0 +1,13 @@
+
+Read a file or directory from the local file system. Returns an error if the path does not exist.
+Usage:
+- The `file_path` parameter should be an absolute path.
+- By default, this tool returns up to 2000 lines from the beginning of the file.
+- The `offset` parameter indicates which line to start reading from (1-indexed).
+- To read subsequent sections, call this tool again with a larger `offset` value.
+- For large files or files with long lines, use the `grep` tool to find specific content.
+- If unsure about the correct file path, use the `glob` tool to find files by glob pattern.
+- When returning content, each line is prefixed with a line number in the format `<line_number>: <content>`. For example, if the file contains `"foo\n"`, you will receive `"1: foo\n"`. For directories, each entry is returned per line (without line numbers), with subdirectories ending with a `/` symbol.
+- Any line exceeding 2000 characters will be truncated.
+- If you know there are multiple files to read, call this tool in parallel.
+- Avoid reading very small fragments (e.g., 30 lines at a time). If you need more context, read a larger range at once.
