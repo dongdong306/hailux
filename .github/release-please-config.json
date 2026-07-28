@@ -1,6 +1,6 @@
 {
   "release-type": "rust",
-  "bump-minor-pre-major": true,
+  "bump-minor-pre-major": false,
   "packages": {
     ".": {
       "changelog-path": "CHANGELOG.md",
