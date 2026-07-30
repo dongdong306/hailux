@@ -305,6 +305,7 @@ pub enum Message {
         task_call_id: Option<u64>,
     },
     /// 上下文压缩分隔标记（UI 可见，不进入 LLM 上下文）
+    #[allow(dead_code)]
     CompactMarker {
         summary: String,
         compacted_count: usize,
