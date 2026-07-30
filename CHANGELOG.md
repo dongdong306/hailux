@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/dongdong306/hailux/compare/v0.1.1...v0.2.0) (2026-07-30)
+
+
+### Features
+
+* 实现上下文压缩功能，支持自动/手动压缩对话历史 ([#5](https://github.com/dongdong306/hailux/issues/5)) ([e97e433](https://github.com/dongdong306/hailux/commit/e97e4336d59ec7e7d12a988b1f2f65157d1ec9a4))
+* 自定义 changelog 格式化，按 Improvements/Bugfixes 等分类生成 release notes ([bb758bd](https://github.com/dongdong306/hailux/commit/bb758bdd04166602a478d16b39da1e0830e2dcaa))
+
 ## [0.1.1](https://github.com/dongdong306/hailux/compare/v0.1.0...v0.1.1) (2026-07-28)
 
 
