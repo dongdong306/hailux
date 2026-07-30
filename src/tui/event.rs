@@ -75,6 +75,12 @@ pub enum AppEvent {
     MouseClick,
     /// MCP 后台连接完成，携带所有连接结果供 UI 更新与工具注册
     McpReady(Vec<McpConnection>),
+    CompactChunk(String),
+    CompactComplete {
+        summary: String,
+        session_id: String,
+    },
+    CompactError(String),
 }
 
 pub type EventTx = mpsc::Sender<AppEvent>;

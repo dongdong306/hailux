@@ -304,6 +304,13 @@ pub enum Message {
         #[allow(dead_code)]
         task_call_id: Option<u64>,
     },
+    /// 上下文压缩分隔标记（UI 可见，不进入 LLM 上下文）
+    #[allow(dead_code)]
+    CompactMarker {
+        summary: String,
+        compacted_count: usize,
+    },
+    CompactStreaming(String),
 }
 
 enum PickerAction {
@@ -528,12 +535,14 @@ impl App {
         let Some(session_id) = &self.current_session_id else {
             return Ok(());
         };
+
+        let compact_summary = self.storage.get_compact_summary(session_id).await?;
         let stored = self.storage.load_messages(session_id).await?;
+        let active_stored = self.storage.load_active_messages(session_id).await?;
+
         let mut chat_messages = Vec::new();
         let mut display_messages = Vec::new();
 
-        // 预扫描：从 tool 角色消息中按 tool_call_id 收集结果，
-        // 以便在渲染时将 ToolCall 与 ToolResult 交错排列
         let mut tool_results: std::collections::HashMap<String, (String, Option<String>)> =
             std::collections::HashMap::new();
         for msg in &stored {
@@ -546,10 +555,21 @@ impl App {
             }
         }
 
-        for msg in &stored {
-            if let Some(chat_msg) = super::super::storage::from_stored_message(msg) {
-                chat_messages.push(chat_msg);
+        let mut compact_marker_inserted = false;
+        for (idx, msg) in stored.iter().enumerate() {
+            if !compact_marker_inserted
+                && compact_summary.is_some()
+                && idx > 0
+                && stored[idx - 1].compacted
+                && !msg.compacted
+            {
+                display_messages.push(Message::CompactMarker {
+                    summary: compact_summary.clone().unwrap(),
+                    compacted_count: idx,
+                });
+                compact_marker_inserted = true;
             }
+
             match msg.role {
                 MessageRole::User => {
                     display_messages.push(Message::User(msg.content.clone()));
@@ -601,7 +621,6 @@ impl App {
                             }
                         }
                     }
-                    // 如果该 assistant 消息有 runtime_meta（含 total_ms + model + status），恢复 DoneCell
                     if let Some(meta_str) = msg.runtime_meta.as_deref()
                         && let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str)
                         && let Some(total_ms) = meta.get("total_ms").and_then(|v| v.as_u64())
@@ -627,13 +646,22 @@ impl App {
                         });
                     }
                 }
-                MessageRole::Tool => {
-                    // 已在 assistant 分支中通过 tool_call_id 匹配消费
-                }
+                MessageRole::Tool => {}
                 MessageRole::System => {}
             }
         }
-        // 处理未匹配的 orphaned tool results（如中断修复插入的 "Tool execution aborted"）
+
+        if !compact_marker_inserted
+            && compact_summary.is_some()
+            && !stored.is_empty()
+            && stored.iter().all(|m| m.compacted)
+        {
+            display_messages.push(Message::CompactMarker {
+                summary: compact_summary.clone().unwrap(),
+                compacted_count: stored.len(),
+            });
+        }
+
         for (_id, (result, display)) in tool_results {
             display_messages.push(Message::ToolResult {
                 name: String::new(),
@@ -642,20 +670,67 @@ impl App {
             });
         }
         self.messages = display_messages;
+
+        for msg in &active_stored {
+            if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
+                chat_messages.push(chat_msg);
+            }
+        }
+
         if !chat_messages.is_empty() {
             let has_system = chat_messages
                 .iter()
                 .any(|m| crate::storage::compatible_message_role(m) == MessageRole::System);
-            let preserved_system = if has_system {
-                None
+
+            if let Some(ref summary) = compact_summary {
+                let summary_msg: crate::agent::models::CompatibleChatCompletionRequestMessage =
+                    async_openai::types::chat::ChatCompletionRequestUserMessage {
+                        content: async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                            format!("[Context Summary]\n{}", summary),
+                        ),
+                        name: None,
+                    }
+                    .into();
+
+                let preserved_system = if has_system {
+                    None
+                } else {
+                    self.agent.take_system_prompt()
+                };
+
+                let non_system: Vec<_> = chat_messages
+                    .into_iter()
+                    .filter(|m| crate::storage::compatible_message_role(m) != MessageRole::System)
+                    .collect();
+
+                let mut final_messages = Vec::new();
+                if let Some(prompt) = &preserved_system {
+                    final_messages.push(
+                        async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                            content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                                prompt.clone(),
+                            ),
+                            name: None,
+                        }
+                        .into(),
+                    );
+                }
+                final_messages.push(summary_msg);
+                final_messages.extend(non_system);
+                self.agent.sync_messages(final_messages);
             } else {
-                self.agent.take_system_prompt()
-            };
-            self.agent.sync_messages(chat_messages);
-            if let Some(prompt) = preserved_system {
-                self.agent.set_system_prompt(&prompt);
+                let preserved_system = if has_system {
+                    None
+                } else {
+                    self.agent.take_system_prompt()
+                };
+                self.agent.sync_messages(chat_messages);
+                if let Some(prompt) = preserved_system {
+                    self.agent.set_system_prompt(&prompt);
+                }
             }
         }
+
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
         Ok(())
@@ -836,6 +911,8 @@ impl App {
             AppEvent::AgentChunk(_)
                 | AppEvent::AgentReasoningChunk(_)
                 | AppEvent::AgentComplete { .. }
+                | AppEvent::CompactChunk(_)
+                | AppEvent::CompactComplete { .. }
         );
         let is_subagent_result = matches!(
             &event,
@@ -863,6 +940,7 @@ impl App {
                 | AppEvent::ToolCallStart { .. }
                 | AppEvent::ToolResult { .. }
                 | AppEvent::AgentComplete { .. }
+                | AppEvent::CompactChunk(_)
         )
     }
 
@@ -1078,6 +1156,18 @@ impl App {
                 if let Some(session_id) = &self.current_session_id {
                     self.storage.touch_session(session_id).await?;
                 }
+
+                let total_context = self.context_prompt_tokens + self.context_completion_tokens;
+                let threshold =
+                    (self.max_context_tokens as f32 * self.config.compact_threshold) as u32;
+                if total_context > threshold {
+                    let pct = (self.config.compact_threshold * 100.0) as u32;
+                    self.compact_conversation(Some(&format!(
+                        "上下文 token 已达 {}%，自动压缩",
+                        pct
+                    )))
+                    .await?;
+                }
             }
             AppEvent::UsageUpdate {
                 prompt_tokens,
@@ -1247,6 +1337,55 @@ impl App {
             }
             AppEvent::McpReady(_) => {}
             AppEvent::MouseClick => {}
+            AppEvent::CompactChunk(chunk) => {
+                if let Some(Message::CompactStreaming(text)) = self.messages.last_mut() {
+                    text.push_str(&chunk);
+                }
+                if self.should_auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            AppEvent::CompactComplete {
+                summary,
+                session_id,
+            } => {
+                let compact_session = self.current_session_id.as_deref() == Some(&session_id);
+
+                let compacted_count =
+                    self.storage.count_active_messages(&session_id).await? as usize;
+
+                self.storage.mark_messages_compacted(&session_id).await?;
+                self.storage
+                    .set_compact_summary(&session_id, &summary)
+                    .await?;
+
+                if compact_session {
+                    self.agent.apply_compaction(&summary);
+
+                    if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
+                        *self.messages.last_mut().unwrap() = Message::CompactMarker {
+                            summary: summary.clone(),
+                            compacted_count,
+                        };
+                    }
+
+                    self.should_auto_scroll = true;
+                    self.scroll_offset = 0;
+                    self.cells_dirty = true;
+                }
+
+                self.is_processing = false;
+                self.input.set_processing(false);
+            }
+            AppEvent::CompactError(msg) => {
+                if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
+                    *self.messages.last_mut().unwrap() =
+                        Message::Agent(format!("[压缩失败: {}]", msg));
+                }
+                self.is_processing = false;
+                self.input.set_processing(false);
+                self.cells_dirty = true;
+            }
         }
         Ok(())
     }
@@ -2721,6 +2860,9 @@ impl App {
                     command::Command::Plan => {
                         self.toggle_plan_mode();
                     }
+                    command::Command::Compact => {
+                        self.compact_conversation(None).await?;
+                    }
                     command::Command::Exit => {
                         self.should_quit = true;
                     }
@@ -2796,6 +2938,7 @@ impl App {
                 completion_tokens: None,
                 runtime_meta: None,
                 think_ms: None,
+                compacted: false,
             };
             self.storage
                 .append_message(&session_id, &sys_stored)
@@ -2811,6 +2954,7 @@ impl App {
             completion_tokens: None,
             runtime_meta: None,
             think_ms: None,
+            compacted: false,
         };
         self.storage.append_message(&session_id, &stored).await?;
 
@@ -2904,6 +3048,7 @@ impl App {
                     completion_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
+                    compacted: false,
                 };
                 self.storage
                     .append_message(&session_id, &assistant_stored)
@@ -2920,6 +3065,54 @@ impl App {
         let tx = self.event_tx.clone();
         if let Err(e) = self.agent.chat_stream(&input, tx) {
             self.messages.push(Message::Agent(format!("[错误: {}]", e)));
+            self.is_processing = false;
+            self.input.set_processing(false);
+        }
+        Ok(())
+    }
+
+    async fn compact_conversation(&mut self, auto_reason: Option<&str>) -> Result<()> {
+        if self.is_processing {
+            return Ok(());
+        }
+
+        let non_system_count = self.agent.messages_excluding_system_count();
+        // 少于 4 条非 system 消息（不足 2 轮对话）时，压缩没有意义
+        if non_system_count < 4 {
+            self.messages
+                .push(Message::Agent("消息太少，无需压缩".to_string()));
+            self.cells_dirty = true;
+            return Ok(());
+        }
+
+        let session_id = match &self.current_session_id {
+            Some(id) => id.clone(),
+            None => {
+                self.messages
+                    .push(Message::Agent("无活跃会话，无法压缩".to_string()));
+                self.cells_dirty = true;
+                return Ok(());
+            }
+        };
+
+        self.is_processing = true;
+        self.input.set_processing(true);
+        self.should_auto_scroll = true;
+        self.scroll_offset = 0;
+
+        let label = if let Some(reason) = auto_reason {
+            format!("正在压缩上下文（{}）...\n", reason)
+        } else {
+            "正在压缩上下文...\n".to_string()
+        };
+        self.messages.push(Message::CompactStreaming(label));
+        self.cells_dirty = true;
+
+        let tx = self.event_tx.clone();
+        if let Err(e) = self.agent.request_compaction(tx, session_id) {
+            if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
+                *self.messages.last_mut().unwrap() = Message::Agent(format!("[压缩失败: {}]", e));
+            }
             self.is_processing = false;
             self.input.set_processing(false);
         }

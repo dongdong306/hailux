@@ -15,6 +15,7 @@ pub enum Command {
     Mcp,
     Tasks,
     Plan,
+    Compact,
     Exit,
 }
 
@@ -62,6 +63,10 @@ static SLASH_COMMANDS: &[SlashCommand] = &[
         description: "切换规划模式（只读）",
     },
     SlashCommand {
+        name: "compact",
+        description: "压缩上下文（总结历史对话）",
+    },
+    SlashCommand {
         name: "exit",
         description: "退出程序",
     },
@@ -76,6 +81,7 @@ fn match_ui_command(name: &str) -> Option<Command> {
         "mcp" => Some(Command::Mcp),
         "tasks" => Some(Command::Tasks),
         "plan" => Some(Command::Plan),
+        "compact" => Some(Command::Compact),
         "exit" | "quit" | "q" => Some(Command::Exit),
         _ => None,
     }
@@ -187,6 +193,22 @@ mod tests {
             MatchedCommand::Ui(Command::Exit) => {}
             _ => panic!("expected Exit"),
         }
+    }
+
+    #[test]
+    fn match_compact_command() {
+        let reg = empty_registry();
+        match match_command("/compact", &reg).unwrap() {
+            MatchedCommand::Ui(Command::Compact) => {}
+            _ => panic!("expected Compact"),
+        }
+    }
+
+    #[test]
+    fn compact_in_command_entries() {
+        let reg = empty_registry();
+        let entries = build_all_entries(&reg);
+        assert!(entries.iter().any(|e| e.name == "compact"));
     }
 
     #[test]

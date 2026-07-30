@@ -72,12 +72,29 @@ pub(crate) fn find_provider_def(id: &str) -> Option<&'static ProviderDef> {
 
 // ── 运行时配置结构 ───────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub main_model: String,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
+    /// 自动压缩阈值（0.0-1.0），上下文 token 占比超过此值时自动压缩
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            main_model: String::new(),
+            providers: BTreeMap::new(),
+            compact_threshold: default_compact_threshold(),
+        }
+    }
+}
+
+fn default_compact_threshold() -> f32 {
+    0.75
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -425,6 +442,10 @@ pub fn load() -> Result<LoadResult> {
     let mut config: Config = toml::from_str(&content)
         .wrap_err_with(|| format!("无法解析配置文件: {}", path.display()))?;
 
+    if config.compact_threshold <= 0.0 || config.compact_threshold >= 1.0 {
+        config.compact_threshold = default_compact_threshold();
+    }
+
     let has_valid_provider = config.providers.values().any(|e| !e.api_key.is_empty());
     if !has_valid_provider {
         return Ok(LoadResult::NeedsSetup);
@@ -493,6 +514,10 @@ pub fn save_config(config: &Config) -> Result<()> {
         toml::Value::String(config.main_model.clone()),
     );
     root.insert("providers".into(), toml::Value::Table(providers_toml));
+    root.insert(
+        "compact_threshold".into(),
+        toml::Value::Float(config.compact_threshold as f64),
+    );
 
     let path = config_file_path()?;
     let toml_str = toml::to_string_pretty(&toml::Value::Table(root)).wrap_err("无法序列化配置")?;

@@ -613,6 +613,7 @@ impl Tool for TaskTool {
                     completion_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
+                    compacted: false,
                 };
                 let _ = storage.append_message(&existing_id, &user_stored).await;
 
@@ -649,6 +650,7 @@ impl Tool for TaskTool {
                     completion_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
+                    compacted: false,
                 };
                 let _ = storage.append_message(&sub_session_id, &sys_stored).await;
 
@@ -663,6 +665,7 @@ impl Tool for TaskTool {
                     completion_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
+                    compacted: false,
                 };
                 let _ = storage.append_message(&sub_session_id, &user_stored).await;
 

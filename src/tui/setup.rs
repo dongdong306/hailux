@@ -92,6 +92,7 @@ impl SetupForm {
             Ok(Config {
                 main_model: format!("{}/{}", self.provider_id, self.model_id),
                 providers,
+                ..Default::default()
             })
         } else {
             let provider = &config::PROVIDERS[self.provider_index];
@@ -117,6 +118,7 @@ impl SetupForm {
             Ok(Config {
                 main_model: format!("{}/{}", provider.id, self.model_id),
                 providers,
+                ..Default::default()
             })
         }
     }

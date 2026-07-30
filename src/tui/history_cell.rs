@@ -959,6 +959,38 @@ fn explore_item_from(name: &str, arguments: &str, result: Option<&str>) -> Explo
     ExploreItem { label, detail }
 }
 
+struct DividerCell {
+    label: &'static str,
+    hash_seed: u64,
+}
+
+impl HistoryCell for DividerCell {
+    fn cache_key(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.label.hash(&mut h);
+        self.hash_seed.hash(&mut h);
+        finish_hasher(h)
+    }
+
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
+
+        let label_w = UnicodeWidthStr::width(self.label);
+        let total_w = width as usize;
+
+        if label_w >= total_w {
+            vec![Line::from(Span::styled(self.label.to_string(), dim))]
+        } else {
+            vec![Line::from(vec![
+                Span::styled(self.label.to_string(), dim),
+                Span::styled("─".repeat(total_w - label_w), dim),
+            ])]
+        }
+    }
+}
+
 /// 将 Message 列表转换为 HistoryCell 列表
 /// 连续只读工具调用合并为 ExploringCell，其余各自独立展示
 pub(crate) fn messages_to_cells(
@@ -1216,6 +1248,27 @@ pub(crate) fn messages_to_cells(
                 cells.push(Box::new(PlainStepCell {
                     summary: summary.clone(),
                     is_done: *is_done,
+                }));
+                i += 1;
+            }
+            Message::CompactMarker {
+                summary: _,
+                compacted_count,
+            } => {
+                cells.push(Box::new(DividerCell {
+                    label: "─ Context compacted ",
+                    hash_seed: *compacted_count as u64,
+                }));
+                i += 1;
+            }
+            Message::CompactStreaming(text) => {
+                cells.push(Box::new(DividerCell {
+                    label: "─ Compacting context ",
+                    hash_seed: {
+                        let mut h = DefaultHasher::new();
+                        text.hash(&mut h);
+                        h.finish()
+                    },
                 }));
                 i += 1;
             }
