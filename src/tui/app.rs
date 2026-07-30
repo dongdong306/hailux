@@ -1157,7 +1157,8 @@ impl App {
                 }
 
                 let total_context = self.context_prompt_tokens + self.context_completion_tokens;
-                let threshold = (self.max_context_tokens as f32 * self.config.compact_threshold) as u32;
+                let threshold =
+                    (self.max_context_tokens as f32 * self.config.compact_threshold) as u32;
                 if total_context > threshold {
                     let pct = (self.config.compact_threshold * 100.0) as u32;
                     self.compact_conversation(Some(&format!(
@@ -1349,10 +1350,8 @@ impl App {
             } => {
                 let compact_session = self.current_session_id.as_deref() == Some(&session_id);
 
-                let compacted_count = self
-                    .storage
-                    .count_active_messages(&session_id)
-                    .await? as usize;
+                let compacted_count =
+                    self.storage.count_active_messages(&session_id).await? as usize;
 
                 self.storage.mark_messages_compacted(&session_id).await?;
                 self.storage

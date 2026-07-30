@@ -355,7 +355,11 @@ impl ChatStorage {
     /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
     /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
     ///  prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted`
-    async fn query_messages(&self, sql: &'static str, session_id: &str) -> Result<Vec<StoredMessage>> {
+    async fn query_messages(
+        &self,
+        sql: &'static str,
+        session_id: &str,
+    ) -> Result<Vec<StoredMessage>> {
         type MessageRow = (
             i64,
             String,
@@ -428,12 +432,11 @@ impl ChatStorage {
 
     /// 返回 session 中未压缩消息的数量。
     pub async fn count_active_messages(&self, session_id: &str) -> Result<i64> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM messages WHERE session_id = ? AND compacted = 0",
-        )
-        .bind(session_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages WHERE session_id = ? AND compacted = 0")
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(row.0)
     }
 
