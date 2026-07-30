@@ -9,6 +9,7 @@ pub const PLAN_MODE: &str = include_str!("plan_mode.txt");
 pub const GENERAL_SUBAGENT: &str = include_str!("general_subagent.txt");
 pub const TASK_TOOL_TEMPLATE: &str = include_str!("task_tool.txt");
 pub const DEFAULT_HELP_SKILL_MD: &str = include_str!("default_help_skill.md");
+pub const COMPACT: &str = include_str!("compact.txt");
 
 pub mod tools {
     pub const ASK_USER: &str = include_str!("tools/ask_user.txt");

@@ -89,6 +89,7 @@ pub struct StoredMessage {
     pub completion_tokens: Option<i64>,
     pub runtime_meta: Option<String>,
     pub think_ms: Option<i64>,
+    pub compacted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +254,30 @@ impl ChatStorage {
                 .await?;
         }
 
+        // messages.compacted
+        let has_col: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'compacted'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_col.0 == 0 {
+            sqlx::query("ALTER TABLE messages ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0")
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        // sessions.compact_summary
+        let has_col: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'compact_summary'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_col.0 == 0 {
+            sqlx::query("ALTER TABLE sessions ADD COLUMN compact_summary TEXT")
+                .execute(&mut *tx)
+                .await?;
+        }
+
         tx.commit().await?;
         Ok(())
     }
@@ -307,7 +332,7 @@ impl ChatStorage {
     pub async fn append_message(&self, session_id: &str, msg: &StoredMessage) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query(
-            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(msg.role.as_str())
@@ -319,13 +344,18 @@ impl ChatStorage {
         .bind(msg.completion_tokens)
         .bind(&msg.runtime_meta)
         .bind(msg.think_ms)
+        .bind(if msg.compacted { 1 } else { 0 })
         .bind(&now)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    pub async fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
+    /// 执行给定 SQL 查询并将结果映射为 `StoredMessage` 列表。
+    /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
+    /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
+    ///  prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted`
+    async fn query_messages(&self, sql: &'static str, session_id: &str) -> Result<Vec<StoredMessage>> {
         type MessageRow = (
             i64,
             String,
@@ -337,13 +367,12 @@ impl ChatStorage {
             Option<i64>,
             Option<String>,
             Option<i64>,
+            i64,
         );
-        let rows: Vec<MessageRow> = sqlx::query_as(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms FROM messages WHERE session_id = ? ORDER BY id ASC",
-        )
-        .bind(session_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<MessageRow> = sqlx::query_as(sql)
+            .bind(session_id)
+            .fetch_all(&self.pool)
+            .await?;
 
         rows.into_iter()
             .map(
@@ -358,6 +387,7 @@ impl ChatStorage {
                     completion_tokens,
                     runtime_meta,
                     think_ms,
+                    compacted,
                 )| {
                     let role: MessageRole = role
                         .parse()
@@ -372,10 +402,68 @@ impl ChatStorage {
                         completion_tokens,
                         runtime_meta,
                         think_ms,
+                        compacted: compacted != 0,
                     })
                 },
             )
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub async fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
+        self.query_messages(
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? ORDER BY id ASC",
+            session_id,
+        )
+        .await
+    }
+
+    /// 加载活跃上下文消息（仅 compacted=0），按 id 升序。
+    pub async fn load_active_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
+        self.query_messages(
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
+            session_id,
+        )
+        .await
+    }
+
+    /// 返回 session 中未压缩消息的数量。
+    pub async fn count_active_messages(&self, session_id: &str) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ? AND compacted = 0",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// 标记 session 的所有未压缩消息为已压缩。
+    pub async fn mark_messages_compacted(&self, session_id: &str) -> Result<()> {
+        sqlx::query("UPDATE messages SET compacted = 1 WHERE session_id = ? AND compacted = 0")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 设置压缩摘要。
+    pub async fn set_compact_summary(&self, session_id: &str, summary: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET compact_summary = ? WHERE id = ?")
+            .bind(summary)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 获取压缩摘要。
+    pub async fn get_compact_summary(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT compact_summary FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(s,)| s))
     }
 
     pub async fn list_sessions(&self, work_dir: &str) -> Result<Vec<SessionSummary>> {
@@ -572,6 +660,7 @@ impl ChatStorage {
                     completion_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
+                    compacted: false,
                 };
                 self.append_message(session_id, &stored).await?;
             }
@@ -719,6 +808,7 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
         completion_tokens: None,
         runtime_meta: None,
         think_ms: None,
+        compacted: false,
     }
 }
 
@@ -768,5 +858,211 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
             }
             .into(),
         ),
+    }
+}
+
+#[cfg(test)]
+impl ChatStorage {
+    async fn new_in_memory() -> Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let storage = Self { pool };
+        storage.run_migration().await?;
+        Ok(storage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_message(role: MessageRole, content: &str) -> StoredMessage {
+        StoredMessage {
+            role,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            runtime_meta: None,
+            think_ms: None,
+            compacted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_adds_compacted_column() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let session_id = storage.create_session("test-model", "/tmp").await.unwrap();
+        storage
+            .append_message(&session_id, &make_message(MessageRole::User, "hi"))
+            .await
+            .unwrap();
+        let msgs = storage.load_messages(&session_id).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(!msgs[0].compacted);
+    }
+
+    #[tokio::test]
+    async fn migration_adds_compact_summary_column() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let session_id = storage.create_session("test-model", "/tmp").await.unwrap();
+        let summary = storage.get_compact_summary(&session_id).await.unwrap();
+        assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_compacted_sets_all_uncompacted() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::System, "sys"))
+            .await
+            .unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "u1"))
+            .await
+            .unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::Assistant, "a1"))
+            .await
+            .unwrap();
+
+        storage.mark_messages_compacted(&sid).await.unwrap();
+
+        let msgs = storage.load_messages(&sid).await.unwrap();
+        assert!(msgs.iter().all(|m| m.compacted));
+    }
+
+    #[tokio::test]
+    async fn mark_compacted_only_affects_uncompacted() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "old"))
+            .await
+            .unwrap();
+        storage.mark_messages_compacted(&sid).await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "new"))
+            .await
+            .unwrap();
+
+        storage.mark_messages_compacted(&sid).await.unwrap();
+
+        let msgs = storage.load_messages(&sid).await.unwrap();
+        assert!(msgs.iter().all(|m| m.compacted));
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn set_and_get_compact_summary() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage.set_compact_summary(&sid, "摘要文本").await.unwrap();
+        let summary = storage.get_compact_summary(&sid).await.unwrap();
+        assert_eq!(summary.as_deref(), Some("摘要文本"));
+    }
+
+    #[tokio::test]
+    async fn load_active_excludes_compacted() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::System, "sys"))
+            .await
+            .unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "u1"))
+            .await
+            .unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::Assistant, "a1"))
+            .await
+            .unwrap();
+
+        storage.mark_messages_compacted(&sid).await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "u2"))
+            .await
+            .unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::Assistant, "a2"))
+            .await
+            .unwrap();
+
+        let active = storage.load_active_messages(&sid).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].content, "u2");
+        assert_eq!(active[1].content, "a2");
+        assert!(active.iter().all(|m| !m.compacted));
+    }
+
+    #[tokio::test]
+    async fn load_active_returns_all_when_no_compaction() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "u1"))
+            .await
+            .unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::Assistant, "a1"))
+            .await
+            .unwrap();
+
+        let active = storage.load_active_messages(&sid).await.unwrap();
+        assert_eq!(active.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn multiple_compactions_active_messages() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "u1"))
+            .await
+            .unwrap();
+        storage.mark_messages_compacted(&sid).await.unwrap();
+
+        storage
+            .append_message(&sid, &make_message(MessageRole::Assistant, "a1"))
+            .await
+            .unwrap();
+        storage.mark_messages_compacted(&sid).await.unwrap();
+
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "u2"))
+            .await
+            .unwrap();
+
+        let active = storage.load_active_messages(&sid).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "u2");
+
+        let all = storage.load_messages(&sid).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all[0].compacted);
+        assert!(all[1].compacted);
+        assert!(!all[2].compacted);
+    }
+
+    #[tokio::test]
+    async fn append_message_defaults_uncompacted() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        let stored = make_message(MessageRole::User, "hello");
+        storage.append_message(&sid, &stored).await.unwrap();
+
+        let loaded = storage.load_messages(&sid).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].compacted);
     }
 }

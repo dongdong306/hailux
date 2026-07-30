@@ -198,6 +198,140 @@ impl Agent {
     pub fn sync_messages(&mut self, messages: Vec<CompatibleChatCompletionRequestMessage>) {
         self.messages = messages;
     }
+
+    /// 返回非 System 消息的数量（用于判断是否可以压缩）
+    pub fn messages_excluding_system_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| !matches!(m, CompatibleChatCompletionRequestMessage::System(_)))
+            .count()
+    }
+
+    /// 应用压缩结果：保留 System 消息，替换其余为摘要 User 消息
+    pub fn apply_compaction(&mut self, summary: &str) {
+        self.messages
+            .retain(|m| matches!(m, CompatibleChatCompletionRequestMessage::System(_)));
+        self.messages.push(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(format!(
+                    "[Context Summary]\n{summary}"
+                )),
+                name: None,
+            }
+            .into(),
+        );
+    }
+
+    /// 启动压缩 LLM 调用（无工具），流式输出摘要。
+    /// 摘要 chunk 通过 `CompactChunk` 事件发送，完成后发送 `CompactComplete`。
+    pub fn request_compaction(
+        &self,
+        event_tx: EventTx,
+        session_id: String,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client = self.client.clone();
+        let model = self.model.clone();
+        let max_tokens = self.max_tokens;
+
+        let conversation: Vec<CompatibleChatCompletionRequestMessage> = self
+            .messages
+            .iter()
+            .filter(|m| !matches!(m, CompatibleChatCompletionRequestMessage::System(_)))
+            .cloned()
+            .collect();
+
+        if conversation.len() < 2 {
+            return Err("Not enough messages to compact".into());
+        }
+
+        let compact_system = ChatCompletionRequestSystemMessage {
+            content: ChatCompletionRequestSystemMessageContent::Text(
+                crate::prompts::COMPACT.to_string(),
+            ),
+            name: None,
+        }
+        .into();
+
+        let mut compact_messages = vec![compact_system];
+        compact_messages.extend(conversation);
+        compact_messages.push(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(
+                    "请总结以上对话".to_string(),
+                ),
+                name: None,
+            }
+            .into(),
+        );
+
+        let tx = event_tx.clone();
+        self.cancel.store(false, Ordering::Relaxed);
+        let cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            let mut builder = {
+                let mut b = CompatibleCreateChatCompletionRequestArgs::default();
+                b.max_completion_tokens(max_tokens)
+                    .model(&model)
+                    .stream(true)
+                    .messages(compact_messages)
+                    .extra("stream_options", serde_json::json!({"include_usage": true}));
+                b
+            };
+
+            let request = match builder.build() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.try_send(AppEvent::CompactError(e.to_string()));
+                    return;
+                }
+            };
+
+            let mut stream = match client
+                .chat()
+                .create_stream_byot::<_, CompatibleCreateChatCompletionStreamResponse>(request)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.try_send(AppEvent::CompactError(e.to_string()));
+                    return;
+                }
+            };
+
+            let mut summary = String::new();
+            while let Some(chunk_result) = stream.next().await {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = tx.try_send(AppEvent::CompactError("压缩已取消".to_string()));
+                    return;
+                }
+                match chunk_result {
+                    Ok(chunk) => {
+                        for choice in chunk.choices {
+                            if let Some(content) = choice.delta.base.content {
+                                let _ = tx.try_send(AppEvent::CompactChunk(content.clone()));
+                                summary.push_str(&content);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.try_send(AppEvent::CompactError(e.to_string()));
+                        return;
+                    }
+                }
+            }
+
+            if summary.trim().is_empty() {
+                let _ = tx.try_send(AppEvent::CompactError("压缩结果为空".to_string()));
+            } else {
+                let _ = tx.try_send(AppEvent::CompactComplete {
+                    summary,
+                    session_id,
+                });
+            }
+        });
+
+        Ok(())
+    }
 }
 
 /// 流式处理过程中的 Agent 状态，用于在独立 tokio task 中运行
@@ -757,4 +891,87 @@ async fn handle_tool_calls_stream(
         emit_persist_message(event_tx, &pushed_msg, None, display);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_agent() -> Agent {
+        let config = OpenAIConfig::new().with_api_base("http://localhost:0");
+        Agent::new(config, "test-model", 4096)
+    }
+
+    #[test]
+    fn apply_compaction_keeps_system_adds_summary() {
+        let mut agent = make_test_agent();
+        agent.set_system_prompt("You are test");
+
+        agent.messages.push(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("hello".into()),
+                name: None,
+            }
+            .into(),
+        );
+
+        agent.apply_compaction("这是摘要");
+
+        assert_eq!(agent.messages.len(), 2);
+        assert!(matches!(
+            agent.messages[0],
+            CompatibleChatCompletionRequestMessage::System(_)
+        ));
+        match &agent.messages[1] {
+            CompatibleChatCompletionRequestMessage::User(u) => {
+                let text = match &u.content {
+                    ChatCompletionRequestUserMessageContent::Text(t) => t.clone(),
+                    _ => panic!("expected text content"),
+                };
+                assert!(text.contains("这是摘要"));
+                assert!(text.contains("[Context Summary]"));
+            }
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn apply_compaction_without_system() {
+        let mut agent = make_test_agent();
+        agent.apply_compaction("摘要");
+        assert_eq!(agent.messages.len(), 1);
+        assert!(matches!(
+            agent.messages[0],
+            CompatibleChatCompletionRequestMessage::User(_)
+        ));
+    }
+
+    #[test]
+    fn apply_compaction_then_append() {
+        let mut agent = make_test_agent();
+        agent.set_system_prompt("sys");
+        agent.apply_compaction("摘要");
+
+        agent.messages.push(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("新问题".into()),
+                name: None,
+            }
+            .into(),
+        );
+
+        assert_eq!(agent.messages.len(), 3);
+        assert!(matches!(
+            agent.messages[0],
+            CompatibleChatCompletionRequestMessage::System(_)
+        ));
+        assert!(matches!(
+            agent.messages[1],
+            CompatibleChatCompletionRequestMessage::User(_)
+        ));
+        assert!(matches!(
+            agent.messages[2],
+            CompatibleChatCompletionRequestMessage::User(_)
+        ));
+    }
 }
