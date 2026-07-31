@@ -20,9 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * 修正 AGENTS.md 中 agents_md.rs 的模块名拼写 ([0e14735](https://github.com/dongdong306/hailux/commit/0e147351d66bddd4a1df7b0f2aa06a17f0ebcc59))
 
-## [Unreleased]
-
-## [v0.1.0](https://github.com/dongdong306/hailux/releases/tag/v0.1.0) (2026-07-28)
+## [0.1.0](https://github.com/dongdong306/hailux/releases/tag/v0.1.0) (2026-07-28)
 
 ### Added
 
