@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR_NAME: &str = ".hailux";
 const COMMAND_DIR_NAME: &str = "commands";
 
+/// 内建 `/init` 命令名（app.rs 中 plan 模式守卫会引用）。
+pub const INIT_COMMAND_NAME: &str = "init";
+
 /// 公共 trait：所有提示词命令（内建与自定义）的统一抽象。
 pub trait PromptCommand: Send + Sync {
     fn name(&self) -> &str;
@@ -17,7 +20,7 @@ pub trait PromptCommand: Send + Sync {
 pub struct BuiltinPromptCommand {
     pub name: &'static str,
     pub description: &'static str,
-    pub template: &'static str,
+    pub template: String,
 }
 
 impl PromptCommand for BuiltinPromptCommand {
@@ -149,7 +152,7 @@ impl CommandRegistry {
 
     /// `discover_from` 接受显式的 home 路径，便于测试注入。
     fn discover_from(work_dir: &Path, home: Option<&Path>) -> Result<Self> {
-        let builtins: Vec<BuiltinPromptCommand> = builtin_prompt_commands();
+        let builtins: Vec<BuiltinPromptCommand> = builtin_prompt_commands(work_dir);
         let mut by_name: HashMap<String, Box<dyn PromptCommand>> = HashMap::new();
 
         for cmd in builtins {
@@ -189,9 +192,15 @@ impl CommandRegistry {
     }
 }
 
-/// 内建 prompt 命令列表（当前为空，框架已就位，随时可添加）。
-fn builtin_prompt_commands() -> Vec<BuiltinPromptCommand> {
-    vec![]
+/// 内建 prompt 命令列表。`init` 模板中会注入工作目录路径，
+/// 让 LLM 知道 AGENTS.md 应写入/更新的位置。
+fn builtin_prompt_commands(work_dir: &Path) -> Vec<BuiltinPromptCommand> {
+    let init_template = crate::prompts::INIT.replace("{path}", &work_dir.display().to_string());
+    vec![BuiltinPromptCommand {
+        name: INIT_COMMAND_NAME,
+        description: "生成 AGENTS.md 总结当前项目",
+        template: init_template,
+    }]
 }
 
 #[cfg(test)]
@@ -219,7 +228,7 @@ mod tests {
         let cmd = BuiltinPromptCommand {
             name: "test",
             description: "test desc",
-            template: "Do: $ARGUMENTS",
+            template: "Do: $ARGUMENTS".to_string(),
         };
         assert_eq!(cmd.render("hello world"), "Do: hello world");
     }
@@ -229,9 +238,44 @@ mod tests {
         let cmd = BuiltinPromptCommand {
             name: "test",
             description: "test desc",
-            template: "Static content",
+            template: "Static content".to_string(),
         };
         assert_eq!(cmd.render("ignored"), "Static content");
+    }
+
+    #[test]
+    fn discover_includes_builtin_init() {
+        let tmp =
+            std::env::temp_dir().join(format!("hailux-command-init-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let registry = CommandRegistry::discover(&tmp).unwrap();
+        let cmd = registry.find(INIT_COMMAND_NAME).expect("init command");
+        assert_eq!(cmd.description(), "生成 AGENTS.md 总结当前项目");
+        assert!(cmd.render("").contains(&tmp.display().to_string()));
+        assert!(cmd.render("只生成精简版").contains("只生成精简版"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn project_command_overrides_builtin_init() {
+        let tmp =
+            std::env::temp_dir().join(format!("hailux-command-init-test-{}", uuid::Uuid::new_v4()));
+        let cmd_dir = tmp.join(CONFIG_DIR_NAME).join(COMMAND_DIR_NAME);
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(
+            cmd_dir.join("init.md"),
+            "---\ndescription: project init\n---\nProject: $ARGUMENTS",
+        )
+        .unwrap();
+
+        let registry = CommandRegistry::discover(&tmp).unwrap();
+        let cmd = registry.find(INIT_COMMAND_NAME).unwrap();
+        assert_eq!(cmd.description(), "project init");
+        assert_eq!(cmd.render("x"), "Project: x");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

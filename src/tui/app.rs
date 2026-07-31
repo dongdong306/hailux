@@ -23,6 +23,7 @@ use super::terminal;
 use crate::agent::Agent;
 use crate::agent::CommandRegistry;
 use crate::agent::Tool;
+use crate::agent::command_def::INIT_COMMAND_NAME;
 use crate::agent::skill::SkillInfo;
 use crate::agent::subagent::{self, SharedConfig, SubagentConfig, TaskTool};
 use crate::config::{self, ModelEntry};
@@ -2870,6 +2871,18 @@ impl App {
             }
             command::MatchedCommand::Prompt { name, args } => {
                 if let Some(cmd) = self.command_registry.find(&name) {
+                    // /init 需要写入 AGENTS.md，但规划模式会过滤 write/edit 工具，
+                    // 直接执行会导致 LLM 静默失败（只能输出文本，写不了文件）。
+                    if name == INIT_COMMAND_NAME && self.plan_mode {
+                        self.input.clear();
+                        self.show_suggestions = false;
+                        self.command_suggestions.clear();
+                        self.messages.push(Message::Agent(
+                            "当前为只读规划模式，无法创建 AGENTS.md。请先 /plan 退出规划模式，再运行 /init。".to_string(),
+                        ));
+                        self.cells_dirty = true;
+                        return Ok(());
+                    }
                     let rendered = cmd.render(&args);
                     self.input.clear();
                     self.show_suggestions = false;
