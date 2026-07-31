@@ -5,6 +5,11 @@ Note: hailux itself loads a separate `AGENTS.md` (case-insensitive) from
 `~/.hailux/` and ancestor directories into its LLM system prompt — that is a different
 feature from this file.
 
+## Commit Convention
+
+- All commit messages **must be in English**.
+- Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, etc.
+
 ## Build & Test
 
 ```sh
