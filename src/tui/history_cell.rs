@@ -184,7 +184,7 @@ impl HistoryCell for SessionHeaderCell {
     }
 }
 
-/// 用户消息：▌ 前缀 + 白色文本
+/// 用户消息：> 前缀 + 白色文本
 pub(crate) struct UserMessageCell {
     pub text: String,
     pub plan_mode: bool,
@@ -199,35 +199,32 @@ impl HistoryCell for UserMessageCell {
     }
 
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let prefix = "▌ ";
+        let prefix = "> ";
         let prefix_w = UnicodeWidthStr::width(prefix) as u16;
         let content_w = width.saturating_sub(prefix_w);
 
         let bar_color = if self.plan_mode {
             PLAN_BADGE
         } else {
-            CHAT_PREFIX_BLUE
+            CHAT_FG
         };
 
         let mut lines = Vec::new();
         let wrapped = wrap_text(&self.text, content_w);
 
-        // 上下各补一行背景 + 标记，让用户消息块呈现卡片效果
-        let padding = Line::from(vec![Span::styled(
-            prefix.to_string(),
-            Style::default().fg(bar_color).bg(INPUT_BG),
-        )]);
-        lines.push(padding.clone());
-        for line in wrapped.iter() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    prefix.to_string(),
-                    Style::default().fg(bar_color).bg(INPUT_BG),
-                ),
-                Span::styled(line.clone(), Style::default().fg(CHAT_FG).bg(INPUT_BG)),
-            ]));
+        for (i, line) in wrapped.iter().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix.to_string(), Style::default().fg(bar_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(line.clone(), Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line.clone(), Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD)),
+                ]));
+            }
         }
-        lines.push(padding);
         lines
     }
 }
@@ -1327,10 +1324,6 @@ const MAX_DISPLAY_DIFF_LINES: usize = 40;
 const ADD_LINE_BG: Color = Color::Rgb(33, 58, 43); // #213A2B
 const DEL_LINE_BG: Color = Color::Rgb(74, 34, 29); // #4A221D
 
-/// 聊天框表面色（输入面板 + 用户消息背景），比终端默认背景略亮的淡灰
-pub(crate) const INPUT_BG: Color = Color::Rgb(30, 30, 30); // #1E1E1E
-/// 输入框/用户消息前缀 `▌` 的蓝色
-pub(crate) const CHAT_PREFIX_BLUE: Color = Color::Rgb(59, 130, 246); // #3B82F6
 /// 聊天正文前景色
 pub(crate) const CHAT_FG: Color = Color::Rgb(248, 250, 252); // #F8FAFC
 /// 输入占位符（中性灰，不带蓝调）
