@@ -3779,7 +3779,8 @@ impl App {
         let (total_visual_rows, cursor_visual_row, cursor_visual_col) =
             self.input.compute_visual_info();
 
-        let visible_input_rows: u16 = 2;
+        let visible_input_rows: u16 = total_visual_rows.clamp(1, 6);
+        let input_area_height: u16 = visible_input_rows + 2;
 
         let scroll_row = self.input.input_scroll_row();
         let new_scroll = if cursor_visual_row < scroll_row {
@@ -3826,6 +3827,7 @@ impl App {
             is_processing: self.is_processing,
             model_name: &self.model_name,
             input_scroll_row: self.input.input_scroll_row(),
+            input_area_height,
             directory: &self.work_dir,
             plan_mode: self.plan_mode,
             show_suggestions: self.show_suggestions,
@@ -3863,12 +3865,12 @@ impl App {
         };
 
         if show_cursor {
-            let input_area_height: u16 = 3;
+            let gap_height: u16 = 1;
             let status_height: u16 = 1;
             let input_content_y = area.y
                 + area
                     .height
-                    .saturating_sub(input_area_height + status_height)
+                    .saturating_sub(input_area_height + gap_height + status_height)
                 + 1;
 
             let display_row = cursor_visual_row.saturating_sub(self.input.input_scroll_row());

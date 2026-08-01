@@ -203,19 +203,23 @@ impl HistoryCell for UserMessageCell {
 
         let mut lines = Vec::new();
         let wrapped = wrap_text(&self.text, content_w);
-        for (i, line) in wrapped.iter().enumerate() {
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(Color::Blue)),
-                    Span::styled(line.clone(), Style::default().fg(Color::White)),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(line.clone(), Style::default().fg(Color::White)),
-                ]));
-            }
+
+        // 上下各补一行背景 + 蓝色标记，让用户消息块呈现卡片效果
+        let padding = Line::from(vec![Span::styled(
+            prefix.to_string(),
+            Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG),
+        )]);
+        lines.push(padding.clone());
+        for line in wrapped.iter() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    prefix.to_string(),
+                    Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG),
+                ),
+                Span::styled(line.clone(), Style::default().fg(CHAT_FG).bg(INPUT_BG)),
+            ]));
         }
+        lines.push(padding);
         lines
     }
 }
@@ -1297,6 +1301,21 @@ const MAX_DISPLAY_DIFF_LINES: usize = 40;
 /// 背景色常量（暗色终端调色板）
 const ADD_LINE_BG: Color = Color::Rgb(33, 58, 43); // #213A2B
 const DEL_LINE_BG: Color = Color::Rgb(74, 34, 29); // #4A221D
+
+/// 聊天框表面色（输入面板 + 用户消息背景），比终端默认背景略亮的淡灰
+pub(crate) const INPUT_BG: Color = Color::Rgb(30, 30, 30); // #1E1E1E
+/// 输入框/用户消息前缀 `▌` 的蓝色
+pub(crate) const CHAT_PREFIX_BLUE: Color = Color::Rgb(59, 130, 246); // #3B82F6
+/// 聊天正文前景色
+pub(crate) const CHAT_FG: Color = Color::Rgb(248, 250, 252); // #F8FAFC
+/// 输入占位符（中性灰，不带蓝调）
+pub(crate) const CHAT_PLACEHOLDER: Color = Color::Rgb(130, 130, 130); // #828282
+/// 粘贴元素高亮
+pub(crate) const CHAT_PASTE: Color = Color::Rgb(34, 211, 238); // #22D3EE
+/// 文件引用 `@file` 高亮
+pub(crate) const CHAT_FILE_MENTION: Color = Color::Rgb(251, 191, 36); // #FBBF24
+/// Plan 模式徽标
+pub(crate) const PLAN_BADGE: Color = Color::Rgb(96, 165, 250); // #60A5FA
 
 struct DiffData {
     old: Option<String>,
