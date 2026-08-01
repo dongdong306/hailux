@@ -548,7 +548,11 @@ impl<'a> ChatWidget<'a> {
             ratio * 100.0,
         );
 
-        let mut left_spans = vec![Span::styled(format!(" {} ", self.directory), gray)];
+        let mut left_spans = vec![
+            Span::styled(format!(" {} ", self.directory), gray),
+            Span::styled("· ", gray),
+            Span::styled(format!("{} ", self.model_name), gray),
+        ];
 
         if self.scroll_offset > 0 {
             left_spans.push(Span::styled(format!("↑{} ", self.scroll_offset), gray));
@@ -562,8 +566,6 @@ impl<'a> ChatWidget<'a> {
         }
 
         let right_spans = vec![
-            Span::styled(format!("{} ", self.model_name), gray),
-            Span::styled("· ", gray),
             Span::styled(format!("{} ", bar), gray),
             Span::styled(ctx_text, gray),
         ];
