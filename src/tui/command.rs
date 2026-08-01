@@ -8,14 +8,14 @@ pub struct SlashCommand {
 
 /// UI-action 命令（触发界面操作，不发送消息给 LLM）。
 pub enum Command {
-    Session,
     New,
+    Session,
+    Plan,
     Models,
+    Compact,
     Skills,
     Mcp,
     Tasks,
-    Plan,
-    Compact,
     Exit,
 }
 
@@ -35,16 +35,24 @@ pub enum MatchedCommand {
 
 static SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
-        name: "sessions",
-        description: "打开会话选择器",
-    },
-    SlashCommand {
         name: "new",
         description: "新建会话",
     },
     SlashCommand {
+        name: "sessions",
+        description: "打开会话选择器",
+    },
+    SlashCommand {
+        name: "plan",
+        description: "切换规划模式（只读）",
+    },
+    SlashCommand {
         name: "models",
         description: "切换模型",
+    },
+    SlashCommand {
+        name: "compact",
+        description: "压缩上下文（总结历史对话）",
     },
     SlashCommand {
         name: "skills",
@@ -59,14 +67,6 @@ static SLASH_COMMANDS: &[SlashCommand] = &[
         description: "查看子代理执行情况",
     },
     SlashCommand {
-        name: "plan",
-        description: "切换规划模式（只读）",
-    },
-    SlashCommand {
-        name: "compact",
-        description: "压缩上下文（总结历史对话）",
-    },
-    SlashCommand {
         name: "exit",
         description: "退出程序",
     },
@@ -74,14 +74,14 @@ static SLASH_COMMANDS: &[SlashCommand] = &[
 
 fn match_ui_command(name: &str) -> Option<Command> {
     match name {
-        "sessions" => Some(Command::Session),
         "new" => Some(Command::New),
+        "sessions" => Some(Command::Session),
+        "plan" => Some(Command::Plan),
         "models" => Some(Command::Models),
+        "compact" => Some(Command::Compact),
         "skills" => Some(Command::Skills),
         "mcp" => Some(Command::Mcp),
         "tasks" => Some(Command::Tasks),
-        "plan" => Some(Command::Plan),
-        "compact" => Some(Command::Compact),
         "exit" | "quit" | "q" => Some(Command::Exit),
         _ => None,
     }
@@ -122,7 +122,13 @@ pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedC
     None
 }
 
-/// 构建所有可用命令的展示列表（UI 命令在前，prompt 命令在后）。
+/// UI 命令与内建 prompt 命令的统一展示优先级。
+/// 不在此列表中的自定义命令按字母排序追加在末尾。
+const COMMAND_PRIORITY: &[&str] = &[
+    "new", "sessions", "init", "plan", "models", "compact", "skills", "mcp", "tasks", "exit",
+];
+
+/// 构建所有可用命令的展示列表（UI 命令 + prompt 命令按优先级混合排序）。
 pub fn build_all_entries(registry: &CommandRegistry) -> Vec<CommandEntry> {
     let mut entries: Vec<CommandEntry> = SLASH_COMMANDS
         .iter()
@@ -142,6 +148,13 @@ pub fn build_all_entries(registry: &CommandRegistry) -> Vec<CommandEntry> {
             });
         }
     }
+
+    entries.sort_by_key(|e| {
+        COMMAND_PRIORITY
+            .iter()
+            .position(|p| *p == e.name)
+            .unwrap_or(usize::MAX)
+    });
 
     entries
 }
