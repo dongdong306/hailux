@@ -29,6 +29,10 @@ use std::time::Duration;
 /// 作为软约束提醒模型处于只读阶段。改编自 opencode 的 plan.txt。
 const PLAN_MODE_PROMPT: &str = crate::prompts::PLAN_MODE;
 
+/// 取消标志轮询间隔。通过定时 sleep 轮询 `AtomicBool` 实现取消，
+/// 该间隔即为取消响应的最大延迟上限。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// 用于在流式响应中累加 tool_calls 的分片
 #[derive(Default)]
 struct PartialToolCall {
@@ -449,7 +453,7 @@ async fn run_stream_loop(
                         result_stream = result;
                         break;
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
                         if cancel.load(Ordering::Relaxed) {
                             let _ = event_tx.try_send(AppEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
                             finalize_cancelled(&state, event_tx, all_usages).await?;
@@ -516,7 +520,7 @@ async fn run_stream_loop(
                         Some(Err(e)) => return Err(Box::new(e)),
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
                     if cancel.load(Ordering::Relaxed) {
                         stream_cancelled = true;
                         break;
@@ -891,7 +895,7 @@ async fn handle_tool_calls_stream(
                     }
                     _ = async {
                         while !cancel_clone.load(Ordering::Relaxed) {
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
                         }
                     } => {
                         ("Tool execution aborted".to_string(), None)
