@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -66,6 +66,7 @@ impl<'a> TasksViewer<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Gray))
+            .border_type(BorderType::Rounded)
             .title(Span::styled(
                 format!(" Subagent Tasks ({}/{}) ", running_count, total),
                 Style::default()

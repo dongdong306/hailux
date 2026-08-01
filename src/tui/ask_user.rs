@@ -1,6 +1,7 @@
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
+use ratatui::widgets::BorderType;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
@@ -383,6 +384,7 @@ pub(crate) fn render_ask_user(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             " ? ",
             Style::default()

@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{self, ModelEntry};
@@ -118,6 +118,7 @@ pub fn render_model_picker(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             " 切换模型 ",
             Style::default()
@@ -356,6 +357,7 @@ pub fn render_add_model(area: Rect, buf: &mut Buffer, form: &AddModelForm) -> (u
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             title,
             Style::default()

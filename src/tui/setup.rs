@@ -1,6 +1,6 @@
 use color_eyre::{Result, eyre::eyre};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{self, Config, CustomModelEntry, ProviderEntry};
@@ -244,6 +244,7 @@ pub(crate) fn render_setup(area: Rect, buf: &mut Buffer, form: &SetupForm) -> Op
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             title,
             Style::default()
