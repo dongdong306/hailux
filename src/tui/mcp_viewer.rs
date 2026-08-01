@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::mcp::{McpServerStatus, SharedMcpBackends, config::config_path_display};
@@ -32,6 +32,7 @@ pub fn render_mcp_viewer(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             format!(" MCP 服务器 ({}/{}) ", connected_count, servers.len()),
             Style::default()
@@ -294,6 +295,7 @@ pub fn render_mcp_detail(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             format!(" {} ", server.name),
             Style::default()
@@ -607,6 +609,7 @@ pub fn render_mcp_item_detail(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             title,
             Style::default()

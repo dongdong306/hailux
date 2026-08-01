@@ -23,6 +23,7 @@ use super::terminal;
 use crate::agent::Agent;
 use crate::agent::CommandRegistry;
 use crate::agent::Tool;
+use crate::agent::command_def::INIT_COMMAND_NAME;
 use crate::agent::skill::SkillInfo;
 use crate::agent::subagent::{self, SharedConfig, SubagentConfig, TaskTool};
 use crate::config::{self, ModelEntry};
@@ -272,7 +273,10 @@ fn retro_start_index(before: &str, retro_chars: usize) -> usize {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    User(String),
+    User {
+        text: String,
+        plan_mode: bool,
+    },
     Agent(String),
     AgentStreaming(String),
     AgentThinking {
@@ -572,7 +576,16 @@ impl App {
 
             match msg.role {
                 MessageRole::User => {
-                    display_messages.push(Message::User(msg.content.clone()));
+                    let plan_mode = msg
+                        .runtime_meta
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| v.get("plan_mode").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    display_messages.push(Message::User {
+                        text: msg.content.clone(),
+                        plan_mode,
+                    });
                 }
                 MessageRole::Assistant => {
                     if let Some(reasoning) = msg.reasoning_content.as_ref()
@@ -1196,7 +1209,7 @@ impl App {
                             .rposition(|m| {
                                 matches!(
                                     m,
-                                    Message::User(_)
+                                    Message::User { .. }
                                         | Message::ToolCall { .. }
                                         | Message::ToolResult { .. }
                                         | Message::Agent(_)
@@ -2664,8 +2677,9 @@ impl App {
         }
         let mut result = text.to_string();
         for (display, abs) in &self.pending_file_mentions {
-            result = result.replace(&format!(" {} ", display), abs);
-            result = result.replace(display, abs);
+            let abs_spaced = format!("{} ", abs);
+            result = result.replace(&format!("{} ", display), &abs_spaced);
+            result = result.replace(display, &abs_spaced);
         }
         self.pending_file_mentions.clear();
         result
@@ -2821,7 +2835,7 @@ impl App {
             if let Some(at_idx) = before_cursor.rfind('@') {
                 self.input.drain_raw(at_idx..self.input.cursor());
                 let display = format!("@{}", rel_path);
-                let element_text = format!(" {} ", display);
+                let element_text = format!("{} ", display);
                 self.input
                     .insert_element(&element_text, ElementKind::FileMention);
                 self.pending_file_mentions
@@ -2870,6 +2884,18 @@ impl App {
             }
             command::MatchedCommand::Prompt { name, args } => {
                 if let Some(cmd) = self.command_registry.find(&name) {
+                    // /init 需要写入 AGENTS.md，但规划模式会过滤 write/edit 工具，
+                    // 直接执行会导致 LLM 静默失败（只能输出文本，写不了文件）。
+                    if name == INIT_COMMAND_NAME && self.plan_mode {
+                        self.input.clear();
+                        self.show_suggestions = false;
+                        self.command_suggestions.clear();
+                        self.messages.push(Message::Agent(
+                            "当前为只读规划模式，无法创建 AGENTS.md。请先 /plan 退出规划模式，再运行 /init。".to_string(),
+                        ));
+                        self.cells_dirty = true;
+                        return Ok(());
+                    }
                     let rendered = cmd.render(&args);
                     self.input.clear();
                     self.show_suggestions = false;
@@ -2911,7 +2937,10 @@ impl App {
         self.pending_file_mentions.clear();
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
-        self.messages.push(Message::User(input.clone()));
+        self.messages.push(Message::User {
+            text: input.clone(),
+            plan_mode: self.plan_mode,
+        });
 
         let new_session = self.current_session_id.is_none();
         if new_session {
@@ -2952,7 +2981,11 @@ impl App {
             reasoning_content: None,
             prompt_tokens: None,
             completion_tokens: None,
-            runtime_meta: None,
+            runtime_meta: if self.plan_mode {
+                Some(r#"{"plan_mode":true}"#.to_string())
+            } else {
+                None
+            },
             think_ms: None,
             compacted: false,
         };
@@ -3766,7 +3799,8 @@ impl App {
         let (total_visual_rows, cursor_visual_row, cursor_visual_col) =
             self.input.compute_visual_info();
 
-        let visible_input_rows: u16 = 2;
+        let visible_input_rows: u16 = total_visual_rows.clamp(1, 6);
+        let input_area_height: u16 = visible_input_rows + 2;
 
         let scroll_row = self.input.input_scroll_row();
         let new_scroll = if cursor_visual_row < scroll_row {
@@ -3813,6 +3847,7 @@ impl App {
             is_processing: self.is_processing,
             model_name: &self.model_name,
             input_scroll_row: self.input.input_scroll_row(),
+            input_area_height,
             directory: &self.work_dir,
             plan_mode: self.plan_mode,
             show_suggestions: self.show_suggestions,
@@ -3850,12 +3885,12 @@ impl App {
         };
 
         if show_cursor {
-            let input_area_height: u16 = 3;
+            let gap_height: u16 = 1;
             let status_height: u16 = 1;
             let input_content_y = area.y
                 + area
                     .height
-                    .saturating_sub(input_area_height + status_height)
+                    .saturating_sub(input_area_height + gap_height + status_height)
                 + 1;
 
             let display_row = cursor_visual_row.saturating_sub(self.input.input_scroll_row());

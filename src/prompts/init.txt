@@ -1,0 +1,69 @@
+# Task
+
+Write an `AGENTS.md` file for the repository rooted at `{path}`.
+
+hailux reads `AGENTS.md` files at startup and injects them into the model's system prompt as standing instructions, so this file becomes the contract between this repository and every future coding session. Keep it dense: each line must change how an agent behaves, or it does not belong.
+
+User-provided focus or constraints (honor these):
+$ARGUMENTS
+
+# Workflow
+
+## 1. Survey the repository
+
+Use the `glob` tool to map the top-level layout, then the `read` tool on the files that define the project:
+
+- manifest and metadata files (Cargo.toml, package.json, pyproject.toml, go.mod, ...)
+- README and any documentation describing the project
+- build, test, lint, and formatting configuration
+- CI workflow definitions and task runner configs
+- existing instruction files (AGENTS.md, CLAUDE.md, .cursor/rules/, .cursorrules, .github/copilot-instructions.md, ...)
+
+When a file's role is unclear, use `grep` to find how it is referenced elsewhere.
+
+## 2. Understand the architecture
+
+Identify the real entrypoints and the boundaries between major components. For each component, record its responsibility and how it connects to the others. Capture the wiring, not the file inventory: an agent can list files by itself.
+
+## 3. Verify before asserting
+
+Use the `bash` tool for read-only checks of anything you plan to write down (for example, that the documented test command actually works). If a claim cannot be verified, omit it. When documentation contradicts executable behavior, trust the executable behavior.
+
+## 4. Write or update the file
+
+If no `AGENTS.md` exists at `{path}`, create it with the `write` tool. If one exists, read it first and refine it in place with the `edit` tool: keep what is accurate, correct what has drifted, remove what is stale.
+
+# What to capture
+
+Include only information that would change how an agent works in this repository:
+
+- **Commands** — exact build, test, lint, and format commands; how to run a single test or a single package; command sequences that must not be reordered
+- **Architecture** — entrypoints, module boundaries, data flow, key abstractions, locations of generated code
+- **Conventions** — style and structure rules that deviate from what the language or framework does by default
+- **Quirks** — environment setup, platform-specific behavior, test prerequisites, flaky suites, services or credentials needed to run the project
+- **Constraints** — rules carried over from existing instruction files that still matter
+
+Leave out:
+
+- generic engineering advice that any agent already knows
+- long tutorials and exhaustive file trees
+- obvious facts the code structure itself reveals
+- speculation that cannot be backed by the code
+
+# Format
+
+Prefer short sections with headings and bullets. The length should scale with the repository: a small project gets a small file; a large project gets only the structural facts that matter. A workable skeleton:
+
+```
+# Project
+
+Short overview: what this is and the stack.
+
+## Build & Test
+
+## Architecture
+
+## Conventions
+
+## Quirks
+```

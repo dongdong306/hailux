@@ -15,9 +15,9 @@ feature from this file.
 ```sh
 cargo build          # build (edition 2024 — requires Rust 1.96.0+)
 cargo run            # launch the TUI app
-cargo test           # run unit tests (agent/agents_md, agent/skill.rs, agent/subagent.rs, agent/command_def.rs, agent/utils.rs, mcp/config.rs, tui/command.rs)
-cargo clippy         # lint (no config — uses defaults)
-cargo fmt            # format (no config — uses defaults)
+cargo test           # run unit tests (inline #[cfg(test)] modules in agent/*, mcp/config.rs, storage/db.rs, tui/command.rs)
+cargo clippy         # lint locally; CI runs `cargo clippy -- -D warnings` — match that before pushing
+cargo fmt            # format (no config — uses defaults); CI runs `cargo fmt --check`
 ```
 
 CI via GitHub Actions (`.github/workflows/ci.yml`): fmt check, clippy, test, build on Ubuntu + Windows.
@@ -38,6 +38,8 @@ subagent delegation, and custom slash commands.
   system-prompt assembly to `prompts::build_system_prompt()`.
 - `agent/` — Core LLM interaction loop.
   - `agent.rs` — Streaming chat loop, tool-call dispatch, plan-mode, cancellation.
+    Context compaction: `apply_compaction()` swaps the message list for a summary message;
+    `request_compaction()` drives it from the TUI on a cloned list (not stored directly).
   - `models.rs` — **DeepSeek-extended message types**. `DeepSeekChatCompletionRequestMessage`
     wraps standard async-openai types and adds `reasoning_content` to Assistant messages.
     Uses custom `Serialize` to inject `thinking` config and `extra` fields into the
@@ -71,6 +73,8 @@ subagent delegation, and custom slash commands.
   - `general_subagent.txt` — System prompt for the builtin `general` subagent.
   - `task_tool.txt` — Description template for the `task` tool (includes `{agents_list}` placeholder).
   - `default_help_skill.md` — Default help skill content written on first run.
+  - `compact.txt` — System prompt for the compaction call (summary of history).
+  - `init.txt` — Template for the builtin `/init` prompt command (`{path}` → work dir).
   - `tools/` — Per-tool description templates (`bash_windows.txt` / `bash_unix.txt` selected via `cfg`).
 - `config.rs` — Model/provider config. Reads/writes `~/.hailux/config.toml`.
   Predefined providers: `deepseek`, `zhipu-coding-plan`. Custom providers/models supported.
@@ -85,9 +89,13 @@ subagent delegation, and custom slash commands.
     (no sqlx macros or migration files) — schema created via `CREATE TABLE IF NOT EXISTS`
     with `ALTER TABLE` column-add fallbacks for backward compat. Max pool connections = 1.
     Supports subsessions (parent/child session relationships for subagent task isolation).
+    `messages.compacted` + `sessions.compact_summary` support context compaction; active-context
+    queries filter `compacted = 0`.
 - `tui/` — Ratatui UI. `app.rs` is the main event loop and state machine.
   - `command.rs` — Slash commands: UI-action commands (`/sessions`, `/new`, `/models`,
-    `/skills`, `/mcp`, `/tasks`, `/plan`, `/exit`) + custom prompt commands via `CommandRegistry`.
+    `/skills`, `/mcp`, `/tasks`, `/plan`, `/compact`, `/exit`; `quit`/`q` alias exit) +
+    custom prompt commands via `CommandRegistry` (incl. builtin `/init`, which generates
+    an AGENTS.md template for the work dir).
   - `event.rs` — Async event channel bridging terminal input, agent streaming, MCP.
     Events include `ToolCallStart`/`ToolResult` (with optional `subagent_name` for task delegation).
   - `input.rs` — Text input handling with paste detection.
@@ -126,6 +134,10 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   input via timing heuristics. Complex state machine — be careful when modifying input handling.
 - **CRLF handling**: `EditTool` normalizes line endings to match the file's style before
   string matching, to avoid LLM-provided `\n` failing on `\r\n` files.
+- **Context compaction**: `/compact` or auto-trigger when usage crosses
+  `compact_threshold` (config.toml) × max context tokens. Compaction marks messages
+  `compacted=1` in SQLite (never deletes rows), stores the summary in
+  `sessions.compact_summary`, and renders a "Context compacted" marker in the TUI.
 - **System prompt assembly** is centralized in `prompts/mod.rs::build_system_prompt()`.
   `main.rs::build_agent()` calls it with discovered skills, AGENTS.md entries, and subagents.
 - **Message sync**: After streaming completes, `Agent::sync_messages()` replaces the

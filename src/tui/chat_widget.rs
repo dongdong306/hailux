@@ -8,7 +8,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::Message;
 use super::command;
-use super::history_cell::HistoryCell;
+use super::history_cell::{
+    CHAT_FG, CHAT_FILE_MENTION, CHAT_PASTE, CHAT_PLACEHOLDER, CHAT_PREFIX_BLUE, HistoryCell,
+    INPUT_BG, PLAN_BADGE,
+};
 use super::input::ElementKind;
 
 pub struct RenderCache {
@@ -75,6 +78,7 @@ pub struct ChatWidget<'a> {
     pub is_processing: bool,
     pub model_name: &'a str,
     pub input_scroll_row: u16,
+    pub input_area_height: u16,
     pub directory: &'a str,
     pub plan_mode: bool,
     pub show_suggestions: bool,
@@ -155,10 +159,19 @@ fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
 
 impl<'a> ChatWidget<'a> {
     pub fn render(mut self, area: Rect, buf: &mut Buffer) -> RenderResult {
-        let [messages_area, timing_area, input_area, status_area] = Layout::vertical([
+        let [
+            messages_area,
+            timing_area,
+            _timing_gap,
+            input_area,
+            _gap_area,
+            status_area,
+        ] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(self.input_area_height),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -312,27 +325,29 @@ impl<'a> ChatWidget<'a> {
         let input_prefix = Span::styled(
             prefix_text,
             if self.is_processing {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+            } else if self.plan_mode {
+                Style::default().fg(PLAN_BADGE).bg(INPUT_BG)
             } else {
-                Style::default().fg(Color::Blue)
+                Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG)
             },
         );
         let area_w = input_render_area.width;
 
         let text_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(CHAT_FG).bg(INPUT_BG)
         };
         let element_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(CHAT_PASTE).bg(INPUT_BG)
         };
         let file_mention_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
         } else {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(CHAT_FILE_MENTION).bg(INPUT_BG)
         };
 
         if self.input_buffer.is_empty() && !self.is_processing {
@@ -340,10 +355,11 @@ impl<'a> ChatWidget<'a> {
                 input_prefix,
                 Span::styled(
                     "输入消息... (Shift+Enter 换行)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(CHAT_PLACEHOLDER).bg(INPUT_BG),
                 ),
             ]));
             input_paragraph.render(input_render_area, buf);
+            self.paint_input_panel(input_area, buf);
             return;
         }
 
@@ -366,7 +382,7 @@ impl<'a> ChatWidget<'a> {
                     visual_lines.push(Line::from(vec![input_prefix.clone()]));
                 } else {
                     visual_lines.push(Line::from(vec![
-                        Span::raw("  "),
+                        Span::styled("  ", Style::default().bg(INPUT_BG)),
                         Span::styled(String::new(), text_style),
                     ]));
                 }
@@ -412,7 +428,7 @@ impl<'a> ChatWidget<'a> {
                     let mut line_spans = if is_first_chunk {
                         vec![input_prefix.clone()]
                     } else {
-                        vec![Span::raw("  ")]
+                        vec![Span::styled("  ", Style::default().bg(INPUT_BG))]
                     };
                     line_spans.append(&mut spans);
                     visual_lines.push(Line::from(line_spans));
@@ -432,7 +448,7 @@ impl<'a> ChatWidget<'a> {
                 let mut line_spans = if is_first_chunk {
                     vec![input_prefix.clone()]
                 } else {
-                    vec![Span::raw("  ")]
+                    vec![Span::styled("  ", Style::default().bg(INPUT_BG))]
                 };
                 line_spans.append(&mut spans);
                 visual_lines.push(Line::from(line_spans));
@@ -445,6 +461,33 @@ impl<'a> ChatWidget<'a> {
 
         let input_paragraph = Paragraph::new(visual_lines).scroll((self.input_scroll_row, 0));
         input_paragraph.render(input_render_area, buf);
+        self.paint_input_panel(input_area, buf);
+    }
+
+    /// 将输入区（含顶部间隔行）中未着色的 cell 统一涂上 INPUT_BG，
+    /// 并在左侧空白行补画 ▌ 标记，使蓝色竖条贯穿整个面板高度
+    fn paint_input_panel(&self, area: Rect, buf: &mut Buffer) {
+        let bar_color = if self.is_processing {
+            Color::DarkGray
+        } else if self.plan_mode {
+            PLAN_BADGE
+        } else {
+            CHAT_PREFIX_BLUE
+        };
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.right() {
+                let cell = &mut buf[(x, y)];
+                if cell.bg == Color::Reset {
+                    cell.set_bg(INPUT_BG);
+                }
+            }
+            let left = &mut buf[(area.x, y)];
+            if left.symbol() == " " {
+                left.set_char('▌');
+                left.set_fg(bar_color);
+                left.set_bg(INPUT_BG);
+            }
+        }
     }
 
     /// 渲染状态横幅（输入框上方）
@@ -486,40 +529,55 @@ impl<'a> ChatWidget<'a> {
     }
 
     fn render_status(&self, status_area: Rect, buf: &mut Buffer) {
-        let scroll_indicator = if self.scroll_offset > 0 {
-            format!(" ↑{}", self.scroll_offset)
-        } else {
-            String::new()
-        };
+        let gray = Style::default().fg(Color::Rgb(160, 160, 160));
 
-        let plan_badge = if self.plan_mode {
-            " [规划模式·只读]"
-        } else {
-            ""
-        };
-
-        let ctx_pct = if self.max_context_tokens > 0 {
-            self.context_tokens as f64 / self.max_context_tokens as f64 * 100.0
+        let ratio = if self.max_context_tokens > 0 {
+            (self.context_tokens as f64 / self.max_context_tokens as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let ctx = format!(
-            " | Context {}/{} ({:.1}%){}",
-            self.context_tokens, self.max_context_tokens, ctx_pct, plan_badge
+
+        const BAR_WIDTH: usize = 10;
+        let bar_spans = build_progress_bar(ratio, BAR_WIDTH);
+
+        let ctx_text = format!(
+            " {}/{} ({:.0}%)",
+            format_tokens(self.context_tokens as i64),
+            format_tokens(self.max_context_tokens as i64),
+            ratio * 100.0,
         );
 
-        let status_text = if self.is_processing {
-            format!(" {}{}", self.model_name, ctx)
-        } else {
-            format!(" {}{}{}", self.model_name, ctx, scroll_indicator)
-        };
-        let status_color = if self.plan_mode {
-            Color::Yellow
-        } else {
-            Color::Gray
-        };
-        let status_line = Line::from(Span::styled(status_text, Style::default().fg(status_color)));
-        status_line.render(status_area, buf);
+        let mut left_spans = vec![
+            Span::styled(format!(" {} ", self.directory), gray),
+            Span::styled("· ", gray),
+            Span::styled(format!("{} ", self.model_name), gray),
+        ];
+
+        if self.scroll_offset > 0 {
+            left_spans.push(Span::styled(format!("↑{} ", self.scroll_offset), gray));
+        }
+
+        if self.plan_mode {
+            left_spans.push(Span::styled(
+                "[● 规划模式·只读] ",
+                Style::default().fg(PLAN_BADGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let mut right_spans = vec![Span::styled(" ", gray)];
+        right_spans.extend(bar_spans);
+        right_spans.push(Span::styled(" ", gray));
+        right_spans.push(Span::styled(ctx_text, gray));
+
+        let left_line = Line::from(left_spans);
+        let right_line = Line::from(right_spans);
+        let left_width = left_line.width() as u16;
+        let right_width = right_line.width() as u16;
+
+        left_line.render(Rect::new(status_area.x, status_area.y, left_width, 1), buf);
+
+        let right_x = status_area.x + status_area.width.saturating_sub(right_width);
+        right_line.render(Rect::new(right_x, status_area.y, right_width, 1), buf);
     }
 
     fn render_suggestions(&self, full_area: Rect, input_area: Rect, buf: &mut Buffer) {
@@ -648,4 +706,58 @@ impl<'a> ChatWidget<'a> {
         let paragraph = Paragraph::new(lines);
         paragraph.render(inner, buf);
     }
+}
+
+fn format_tokens(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+const BLOCK_PARTIALS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+fn build_progress_bar(ratio: f64, width: usize) -> Vec<Span<'static>> {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let total_steps = width * 8;
+    let steps = (ratio * total_steps as f64).round() as usize;
+    let full_cells = steps / 8;
+    let remainder = steps % 8;
+
+    let color = if ratio < 0.5 {
+        Color::Rgb(98, 190, 68)
+    } else if ratio < 0.75 {
+        Color::Rgb(220, 180, 50)
+    } else if ratio < 0.9 {
+        Color::Rgb(240, 140, 40)
+    } else {
+        Color::Rgb(230, 80, 70)
+    };
+
+    let track_bg = Color::Rgb(60, 60, 60);
+    let full_style = Style::default().fg(color).bg(track_bg);
+    let empty_style = Style::default().bg(track_bg);
+
+    let mut spans = Vec::with_capacity(3);
+
+    // Filled full cells with track background
+    if full_cells > 0 {
+        spans.push(Span::styled("█".repeat(full_cells), full_style));
+    }
+
+    // Partial cell using foreground color on track background
+    if remainder > 0 && full_cells < width {
+        spans.push(Span::styled(BLOCK_PARTIALS[remainder], full_style));
+    }
+
+    // Empty cells with track background only
+    let filled_count = full_cells + (if remainder > 0 { 1 } else { 0 });
+    if filled_count < width {
+        spans.push(Span::styled(" ".repeat(width - filled_count), empty_style));
+    }
+
+    spans
 }

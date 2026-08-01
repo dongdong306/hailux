@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::storage::SessionSummary;
@@ -31,6 +31,7 @@ impl<'a> SessionPicker<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Gray))
+            .border_type(BorderType::Rounded)
             .title(Span::styled(
                 " Sessions ",
                 Style::default()

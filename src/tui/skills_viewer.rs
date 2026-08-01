@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::agent::skill::SkillInfo;
@@ -36,6 +36,7 @@ pub fn render_skills_viewer(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             format!(" 已加载的 Skills ({}) ", skills.len()),
             Style::default()
@@ -205,6 +206,7 @@ pub fn render_skill_detail(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             format!(" {} ", skill.name),
             Style::default()
