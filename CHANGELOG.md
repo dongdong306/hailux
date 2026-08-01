@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/dongdong306/hailux/compare/v0.2.0...v0.3.0) (2026-08-01)
+
+
+### Features
+
+* TUI redesign, /init command, and visual enhancements ([1860eac](https://github.com/dongdong306/hailux/commit/1860eacde76c396d93a8132a44ac49d504c8539f))
+* TUI redesign, /init command, and visual enhancements ([#8](https://github.com/dongdong306/hailux/issues/8)) ([1860eac](https://github.com/dongdong306/hailux/commit/1860eacde76c396d93a8132a44ac49d504c8539f))
+
 ## [0.2.0](https://github.com/dongdong306/hailux/compare/v0.1.1...v0.2.0) (2026-07-30)
 
 
