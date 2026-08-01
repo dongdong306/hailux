@@ -203,7 +203,11 @@ impl HistoryCell for UserMessageCell {
         let prefix_w = UnicodeWidthStr::width(prefix) as u16;
         let content_w = width.saturating_sub(prefix_w);
 
-        let bar_color = if self.plan_mode { PLAN_BADGE } else { CHAT_PREFIX_BLUE };
+        let bar_color = if self.plan_mode {
+            PLAN_BADGE
+        } else {
+            CHAT_PREFIX_BLUE
+        };
 
         let mut lines = Vec::new();
         let wrapped = wrap_text(&self.text, content_w);
@@ -571,7 +575,11 @@ impl HistoryCell for DoneCell {
             TaskStatus::Completed => (
                 "◆",
                 "Done",
-                if self.plan_mode { PLAN_BADGE } else { Color::Cyan },
+                if self.plan_mode {
+                    PLAN_BADGE
+                } else {
+                    Color::Cyan
+                },
                 Color::DarkGray,
             ),
             TaskStatus::Interrupted => ("◇", "Interrupted", Color::Yellow, Color::DarkGray),

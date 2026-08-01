@@ -538,8 +538,7 @@ impl<'a> ChatWidget<'a> {
         };
 
         const BAR_WIDTH: usize = 10;
-        let filled = (ratio * BAR_WIDTH as f64).round() as usize;
-        let bar: String = "■".repeat(filled) + &"□".repeat(BAR_WIDTH - filled);
+        let bar_spans = build_progress_bar(ratio, BAR_WIDTH);
 
         let ctx_text = format!(
             " {}/{} ({:.0}%)",
@@ -565,20 +564,17 @@ impl<'a> ChatWidget<'a> {
             ));
         }
 
-        let right_spans = vec![
-            Span::styled(format!("{} ", bar), gray),
-            Span::styled(ctx_text, gray),
-        ];
+        let mut right_spans = vec![Span::styled(" ", gray)];
+        right_spans.extend(bar_spans);
+        right_spans.push(Span::styled(" ", gray));
+        right_spans.push(Span::styled(ctx_text, gray));
 
         let left_line = Line::from(left_spans);
         let right_line = Line::from(right_spans);
         let left_width = left_line.width() as u16;
         let right_width = right_line.width() as u16;
 
-        left_line.render(
-            Rect::new(status_area.x, status_area.y, left_width, 1),
-            buf,
-        );
+        left_line.render(Rect::new(status_area.x, status_area.y, left_width, 1), buf);
 
         let right_x = status_area.x + status_area.width.saturating_sub(right_width);
         right_line.render(Rect::new(right_x, status_area.y, right_width, 1), buf);
@@ -720,4 +716,48 @@ fn format_tokens(n: i64) -> String {
     } else {
         n.to_string()
     }
+}
+
+const BLOCK_PARTIALS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+fn build_progress_bar(ratio: f64, width: usize) -> Vec<Span<'static>> {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let total_steps = width * 8;
+    let steps = (ratio * total_steps as f64).round() as usize;
+    let full_cells = steps / 8;
+    let remainder = steps % 8;
+
+    let color = if ratio < 0.5 {
+        Color::Rgb(98, 190, 68)
+    } else if ratio < 0.75 {
+        Color::Rgb(220, 180, 50)
+    } else if ratio < 0.9 {
+        Color::Rgb(240, 140, 40)
+    } else {
+        Color::Rgb(230, 80, 70)
+    };
+
+    let track_bg = Color::Rgb(60, 60, 60);
+    let full_style = Style::default().fg(color).bg(track_bg);
+    let empty_style = Style::default().bg(track_bg);
+
+    let mut spans = Vec::with_capacity(3);
+
+    // Filled full cells with track background
+    if full_cells > 0 {
+        spans.push(Span::styled("█".repeat(full_cells), full_style));
+    }
+
+    // Partial cell using foreground color on track background
+    if remainder > 0 && full_cells < width {
+        spans.push(Span::styled(BLOCK_PARTIALS[remainder], full_style));
+    }
+
+    // Empty cells with track background only
+    let filled_count = full_cells + (if remainder > 0 { 1 } else { 0 });
+    if filled_count < width {
+        spans.push(Span::styled(" ".repeat(width - filled_count), empty_style));
+    }
+
+    spans
 }
