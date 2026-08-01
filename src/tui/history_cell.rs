@@ -187,12 +187,14 @@ impl HistoryCell for SessionHeaderCell {
 /// 用户消息：▌ 前缀 + 白色文本
 pub(crate) struct UserMessageCell {
     pub text: String,
+    pub plan_mode: bool,
 }
 
 impl HistoryCell for UserMessageCell {
     fn cache_key(&self) -> u64 {
         let mut h = DefaultHasher::new();
         self.text.hash(&mut h);
+        self.plan_mode.hash(&mut h);
         finish_hasher(h)
     }
 
@@ -201,20 +203,22 @@ impl HistoryCell for UserMessageCell {
         let prefix_w = UnicodeWidthStr::width(prefix) as u16;
         let content_w = width.saturating_sub(prefix_w);
 
+        let bar_color = if self.plan_mode { PLAN_BADGE } else { CHAT_PREFIX_BLUE };
+
         let mut lines = Vec::new();
         let wrapped = wrap_text(&self.text, content_w);
 
-        // 上下各补一行背景 + 蓝色标记，让用户消息块呈现卡片效果
+        // 上下各补一行背景 + 标记，让用户消息块呈现卡片效果
         let padding = Line::from(vec![Span::styled(
             prefix.to_string(),
-            Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG),
+            Style::default().fg(bar_color).bg(INPUT_BG),
         )]);
         lines.push(padding.clone());
         for line in wrapped.iter() {
             lines.push(Line::from(vec![
                 Span::styled(
                     prefix.to_string(),
-                    Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG),
+                    Style::default().fg(bar_color).bg(INPUT_BG),
                 ),
                 Span::styled(line.clone(), Style::default().fg(CHAT_FG).bg(INPUT_BG)),
             ]));
@@ -549,6 +553,7 @@ pub(crate) struct DoneCell {
     pub total_ms: u64,
     pub model: String,
     pub status: TaskStatus,
+    pub plan_mode: bool,
 }
 
 impl HistoryCell for DoneCell {
@@ -557,12 +562,18 @@ impl HistoryCell for DoneCell {
         self.total_ms.hash(&mut h);
         self.model.hash(&mut h);
         self.status.hash(&mut h);
+        self.plan_mode.hash(&mut h);
         finish_hasher(h)
     }
 
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let (icon, label, icon_color, text_color) = match self.status {
-            TaskStatus::Completed => ("◆", "Done", Color::Cyan, Color::DarkGray),
+            TaskStatus::Completed => (
+                "◆",
+                "Done",
+                if self.plan_mode { PLAN_BADGE } else { Color::Cyan },
+                Color::DarkGray,
+            ),
             TaskStatus::Interrupted => ("◇", "Interrupted", Color::Yellow, Color::DarkGray),
             TaskStatus::Error => ("◆", "Error", Color::Red, Color::DarkGray),
         };
@@ -1003,11 +1014,16 @@ pub(crate) fn messages_to_cells(
 ) -> Vec<Box<dyn HistoryCell>> {
     let mut cells: Vec<Box<dyn HistoryCell>> = Vec::new();
     let mut i = 0;
+    let mut last_plan_mode = false;
 
     while i < messages.len() {
         match &messages[i] {
-            Message::User(text) => {
-                cells.push(Box::new(UserMessageCell { text: text.clone() }));
+            Message::User { text, plan_mode } => {
+                last_plan_mode = *plan_mode;
+                cells.push(Box::new(UserMessageCell {
+                    text: text.clone(),
+                    plan_mode: *plan_mode,
+                }));
                 i += 1;
             }
             Message::Agent(text) => {
@@ -1046,6 +1062,7 @@ pub(crate) fn messages_to_cells(
                     total_ms: *total_ms,
                     model: model.clone(),
                     status: *status,
+                    plan_mode: last_plan_mode,
                 }));
                 i += 1;
             }
@@ -1315,7 +1332,7 @@ pub(crate) const CHAT_PASTE: Color = Color::Rgb(34, 211, 238); // #22D3EE
 /// 文件引用 `@file` 高亮
 pub(crate) const CHAT_FILE_MENTION: Color = Color::Rgb(251, 191, 36); // #FBBF24
 /// Plan 模式徽标
-pub(crate) const PLAN_BADGE: Color = Color::Rgb(96, 165, 250); // #60A5FA
+pub(crate) const PLAN_BADGE: Color = Color::Rgb(217, 159, 7); // #D99F07
 
 struct DiffData {
     old: Option<String>,

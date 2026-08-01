@@ -221,7 +221,10 @@ fn stored_messages_to_chat(messages: &[StoredMessage]) -> Vec<Message> {
             MessageRole::System => {}
             MessageRole::User => {
                 if !msg.content.is_empty() {
-                    result.push(Message::User(msg.content.clone()));
+                    result.push(Message::User {
+                        text: msg.content.clone(),
+                        plan_mode: false,
+                    });
                 }
             }
             MessageRole::Assistant => {

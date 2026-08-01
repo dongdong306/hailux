@@ -273,7 +273,10 @@ fn retro_start_index(before: &str, retro_chars: usize) -> usize {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    User(String),
+    User {
+        text: String,
+        plan_mode: bool,
+    },
     Agent(String),
     AgentStreaming(String),
     AgentThinking {
@@ -573,7 +576,16 @@ impl App {
 
             match msg.role {
                 MessageRole::User => {
-                    display_messages.push(Message::User(msg.content.clone()));
+                    let plan_mode = msg
+                        .runtime_meta
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| v.get("plan_mode").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    display_messages.push(Message::User {
+                        text: msg.content.clone(),
+                        plan_mode,
+                    });
                 }
                 MessageRole::Assistant => {
                     if let Some(reasoning) = msg.reasoning_content.as_ref()
@@ -1197,7 +1209,7 @@ impl App {
                             .rposition(|m| {
                                 matches!(
                                     m,
-                                    Message::User(_)
+                                    Message::User { .. }
                                         | Message::ToolCall { .. }
                                         | Message::ToolResult { .. }
                                         | Message::Agent(_)
@@ -2924,7 +2936,10 @@ impl App {
         self.pending_file_mentions.clear();
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
-        self.messages.push(Message::User(input.clone()));
+        self.messages.push(Message::User {
+            text: input.clone(),
+            plan_mode: self.plan_mode,
+        });
 
         let new_session = self.current_session_id.is_none();
         if new_session {
@@ -2965,7 +2980,11 @@ impl App {
             reasoning_content: None,
             prompt_tokens: None,
             completion_tokens: None,
-            runtime_meta: None,
+            runtime_meta: if self.plan_mode {
+                Some(r#"{"plan_mode":true}"#.to_string())
+            } else {
+                None
+            },
             think_ms: None,
             compacted: false,
         };

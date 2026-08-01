@@ -326,6 +326,8 @@ impl<'a> ChatWidget<'a> {
             prefix_text,
             if self.is_processing {
                 Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+            } else if self.plan_mode {
+                Style::default().fg(PLAN_BADGE).bg(INPUT_BG)
             } else {
                 Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG)
             },
@@ -467,6 +469,8 @@ impl<'a> ChatWidget<'a> {
     fn paint_input_panel(&self, area: Rect, buf: &mut Buffer) {
         let bar_color = if self.is_processing {
             Color::DarkGray
+        } else if self.plan_mode {
+            PLAN_BADGE
         } else {
             CHAT_PREFIX_BLUE
         };
@@ -525,39 +529,57 @@ impl<'a> ChatWidget<'a> {
     }
 
     fn render_status(&self, status_area: Rect, buf: &mut Buffer) {
-        let scroll_indicator = if self.scroll_offset > 0 {
-            format!(" ↑{}", self.scroll_offset)
-        } else {
-            String::new()
-        };
+        let gray = Style::default().fg(Color::Rgb(160, 160, 160));
 
-        let ctx_pct = if self.max_context_tokens > 0 {
-            self.context_tokens as f64 / self.max_context_tokens as f64 * 100.0
+        let ratio = if self.max_context_tokens > 0 {
+            (self.context_tokens as f64 / self.max_context_tokens as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let ctx = format!(
-            " | Context {}/{} ({:.1}%)",
-            self.context_tokens, self.max_context_tokens, ctx_pct
+
+        const BAR_WIDTH: usize = 10;
+        let filled = (ratio * BAR_WIDTH as f64).round() as usize;
+        let bar: String = "■".repeat(filled) + &"□".repeat(BAR_WIDTH - filled);
+
+        let ctx_text = format!(
+            " {}/{} ({:.0}%)",
+            format_tokens(self.context_tokens as i64),
+            format_tokens(self.max_context_tokens as i64),
+            ratio * 100.0,
         );
 
-        let status_text = if self.is_processing {
-            format!(" {}{}", self.model_name, ctx)
-        } else {
-            format!(" {}{}{}", self.model_name, ctx, scroll_indicator)
-        };
+        let mut left_spans = vec![Span::styled(format!(" {} ", self.directory), gray)];
 
-        let mut spans = vec![Span::styled(
-            status_text,
-            Style::default().fg(Color::Rgb(160, 160, 160)),
-        )];
+        if self.scroll_offset > 0 {
+            left_spans.push(Span::styled(format!("↑{} ", self.scroll_offset), gray));
+        }
+
         if self.plan_mode {
-            spans.push(Span::styled(
-                " [● 规划模式·只读]",
+            left_spans.push(Span::styled(
+                "[● 规划模式·只读] ",
                 Style::default().fg(PLAN_BADGE).add_modifier(Modifier::BOLD),
             ));
         }
-        Line::from(spans).render(status_area, buf);
+
+        let right_spans = vec![
+            Span::styled(format!("{} ", self.model_name), gray),
+            Span::styled("· ", gray),
+            Span::styled(format!("{} ", bar), gray),
+            Span::styled(ctx_text, gray),
+        ];
+
+        let left_line = Line::from(left_spans);
+        let right_line = Line::from(right_spans);
+        let left_width = left_line.width() as u16;
+        let right_width = right_line.width() as u16;
+
+        left_line.render(
+            Rect::new(status_area.x, status_area.y, left_width, 1),
+            buf,
+        );
+
+        let right_x = status_area.x + status_area.width.saturating_sub(right_width);
+        right_line.render(Rect::new(right_x, status_area.y, right_width, 1), buf);
     }
 
     fn render_suggestions(&self, full_area: Rect, input_area: Rect, buf: &mut Buffer) {
@@ -685,5 +707,15 @@ impl<'a> ChatWidget<'a> {
 
         let paragraph = Paragraph::new(lines);
         paragraph.render(inner, buf);
+    }
+}
+
+fn format_tokens(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
