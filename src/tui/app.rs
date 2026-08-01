@@ -2677,8 +2677,9 @@ impl App {
         }
         let mut result = text.to_string();
         for (display, abs) in &self.pending_file_mentions {
-            result = result.replace(&format!(" {} ", display), abs);
-            result = result.replace(display, abs);
+            let abs_spaced = format!("{} ", abs);
+            result = result.replace(&format!("{} ", display), &abs_spaced);
+            result = result.replace(display, &abs_spaced);
         }
         self.pending_file_mentions.clear();
         result
@@ -2834,7 +2835,7 @@ impl App {
             if let Some(at_idx) = before_cursor.rfind('@') {
                 self.input.drain_raw(at_idx..self.input.cursor());
                 let display = format!("@{}", rel_path);
-                let element_text = format!(" {} ", display);
+                let element_text = format!("{} ", display);
                 self.input
                     .insert_element(&element_text, ElementKind::FileMention);
                 self.pending_file_mentions
