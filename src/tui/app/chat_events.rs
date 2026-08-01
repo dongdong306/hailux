@@ -2,12 +2,12 @@ use color_eyre::Result;
 use std::time::Instant;
 
 use super::{App, AppState, Message};
-use crate::tui::command;
-use crate::tui::event::{AppEvent, TaskStatus};
+use crate::agent::Tool;
 use crate::agent::command_def::INIT_COMMAND_NAME;
 use crate::agent::subagent::{self, TaskTool};
-use crate::agent::Tool;
 use crate::storage::{MessageRole, StoredMessage};
+use crate::tui::command;
+use crate::tui::event::{AppEvent, TaskStatus};
 use crate::tui::tasks_viewer::{TaskRecord, TaskRunStatus};
 
 impl App {

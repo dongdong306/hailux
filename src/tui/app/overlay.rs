@@ -1,16 +1,16 @@
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{App, AppState};
 use super::types::{ModelPickerAction, PickerAction};
+use super::{App, AppState};
 use super::{DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS};
+use crate::config::{self, ModelEntry};
+use crate::mcp::{McpConnection, McpToolBackend};
+use crate::storage::SessionSummary;
 use crate::tui::event::AppEvent;
 use crate::tui::model_picker::{AddModelForm, AddModelStep};
 use crate::tui::setup::{SetupForm, SetupStep};
 use crate::tui::tasks_viewer::{TaskEntry, TaskRunStatus};
-use crate::config::{self, ModelEntry};
-use crate::mcp::{McpConnection, McpToolBackend};
-use crate::storage::SessionSummary;
 
 impl App {
     pub(super) async fn handle_picker_event_inner(&mut self, event: AppEvent) -> Result<()> {

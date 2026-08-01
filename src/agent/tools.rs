@@ -47,17 +47,13 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError>;
 
-    /// 异步执行，默认委托给同步 `execute`。
-    /// 需要真正中断能力的工具（bash、web_fetch、MCP）覆写此方法。
+    /// 异步执行工具。所有工具都必须实现真正的异步执行，
+    /// 避免在 executor 线程上做阻塞 I/O 或绕过 timeout。
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
-        let result = self.execute(arguments);
-        Box::pin(std::future::ready(result))
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>>;
 
     /// 异步执行并返回用于 UI 展示的额外数据（如 diff）。
     /// 默认委托给 `execute_async`，display 返回 `None`。
@@ -148,71 +144,75 @@ impl Tool for AskTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let raw_questions = args["questions"]
-            .as_array()
-            .ok_or_else(|| ToolExecuteError {
-                message: "missing 'questions' array".to_string(),
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
+                message: format!("Invalid JSON parameter: {e}"),
+            })?;
+            let raw_questions = args["questions"]
+                .as_array()
+                .ok_or_else(|| ToolExecuteError {
+                    message: "missing 'questions' array".to_string(),
+                })?;
+
+            if raw_questions.is_empty() {
+                return Err(ToolExecuteError {
+                    message: "'questions' must not be empty".to_string(),
+                });
+            }
+
+            let questions: Vec<QuestionInfo> = raw_questions
+                .iter()
+                .map(|q| {
+                    let question = q["question"]
+                        .as_str()
+                        .unwrap_or("Please enter your response:")
+                        .to_string();
+                    let header = q["header"].as_str().unwrap_or("Question").to_string();
+                    let options = q["options"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|o| QuestionOption {
+                                    label: o["label"].as_str().unwrap_or("").to_string(),
+                                    description: o["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    QuestionInfo {
+                        question,
+                        header,
+                        options,
+                    }
+                })
+                .collect();
+
+            let (tx, rx) = oneshot::channel::<String>();
+
+            let _ = self.event_tx.try_send(AppEvent::AskUser {
+                questions,
+                response_tx: tx,
+            });
+
+            let response = rx.await.map_err(|_| ToolExecuteError {
+                message: "sender dropped".to_string(),
             })?;
 
-        if raw_questions.is_empty() {
-            return Err(ToolExecuteError {
-                message: "'questions' must not be empty".to_string(),
-            });
-        }
+            if response == "[User Cancelled]" {
+                return Ok(response);
+            }
 
-        let questions: Vec<QuestionInfo> = raw_questions
-            .iter()
-            .map(|q| {
-                let question = q["question"]
-                    .as_str()
-                    .unwrap_or("Please enter your response:")
-                    .to_string();
-                let header = q["header"].as_str().unwrap_or("Question").to_string();
-                let options = q["options"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .map(|o| QuestionOption {
-                                label: o["label"].as_str().unwrap_or("").to_string(),
-                                description: o["description"].as_str().unwrap_or("").to_string(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                QuestionInfo {
-                    question,
-                    header,
-                    options,
-                }
-            })
-            .collect();
-
-        let (tx, rx) = oneshot::channel::<String>();
-
-        let _ = self.event_tx.try_send(AppEvent::AskUser {
-            questions,
-            response_tx: tx,
-        });
-
-        let response = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                rx.await.map_err(|_| ToolExecuteError {
-                    message: "sender dropped".to_string(),
-                })
-            })
-        })?;
-
-        if response == "[User Cancelled]" {
-            return Ok(response);
-        }
-
-        Ok(format!(
-            "User has answered your questions: {response}. You can now continue with the user's answers in mind."
-        ))
+            Ok(format!(
+                "User has answered your questions: {response}. You can now continue with the user's answers in mind."
+            ))
+        })
     }
 
     fn cancellable(&self) -> bool {
@@ -265,137 +265,41 @@ impl Tool for BashTool {
     }
 
     #[cfg(windows)]
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let command = args["command_string"]
-            .as_str()
-            .ok_or_else(|| ToolExecuteError {
-                message: "Missing 'command_string' parameter".to_string(),
-            })?;
-        let workdir = args["workdir"].as_str();
-
-        let mut cmd = std::process::Command::new("powershell.exe");
-        cmd.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        let args: Value = match serde_json::from_str(arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return Box::pin(std::future::ready(Err(ToolExecuteError {
+                    message: format!("Invalid JSON parameter: {e}"),
+                })));
+            }
+        };
+        let command = match args["command_string"].as_str() {
+            Some(c) => c.to_string(),
+            None => {
+                return Box::pin(std::future::ready(Err(ToolExecuteError {
+                    message: "Missing 'command_string' parameter".to_string(),
+                })));
+            }
+        };
+        let workdir = args["workdir"].as_str().map(|s| s.to_string());
+        let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
+        let cmd_args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
             command,
-        ]);
-        if let Some(dir) = workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd.output().map_err(|e| ToolExecuteError {
-            message: format!("Failed to execute process: {e}"),
-        })?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Ok(combine_output(&output.stdout, &output.stderr))
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let command = args["command_string"]
-            .as_str()
-            .ok_or_else(|| ToolExecuteError {
-                message: "Missing 'command_string' parameter".to_string(),
-            })?;
-        let workdir = args["workdir"].as_str();
-
-        let mut cmd = std::process::Command::new("bash");
-        cmd.args(["-c", command]);
-
-        if let Some(dir) = workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd.output().map_err(|e| ToolExecuteError {
-            message: format!("Failed to execute process: {e}"),
-        })?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Ok(combine_output(&output.stdout, &output.stderr))
-        }
-    }
-
-    #[cfg(windows)]
-    fn execute_async<'a>(
-        &'a self,
-        arguments: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
-        let args: Value = match serde_json::from_str(arguments) {
-            Ok(v) => v,
-            Err(e) => {
-                return Box::pin(std::future::ready(Err(ToolExecuteError {
-                    message: format!("Invalid JSON parameter: {e}"),
-                })));
-            }
-        };
-        let command = match args["command_string"].as_str() {
-            Some(c) => c.to_string(),
-            None => {
-                return Box::pin(std::future::ready(Err(ToolExecuteError {
-                    message: "Missing 'command_string' parameter".to_string(),
-                })));
-            }
-        };
-        let workdir = args["workdir"].as_str().map(|s| s.to_string());
-        let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
-        Box::pin(async move {
-            let mut cmd = tokio::process::Command::new("powershell.exe");
-            cmd.kill_on_drop(true);
-            cmd.args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &command,
-            ]);
-            if let Some(dir) = &workdir {
-                cmd.current_dir(dir);
-            }
-            let child = cmd
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?;
-            let output_fut = child.wait_with_output();
-            let output = if let Some(secs) = timeout_secs {
-                match tokio::time::timeout(Duration::from_secs(secs), output_fut).await {
-                    Ok(result) => result.map_err(|e| ToolExecuteError {
-                        message: e.to_string(),
-                    })?,
-                    Err(_) => {
-                        return Ok(format!(
-                            "[Command timed out ({}s), process terminated]",
-                            secs
-                        ));
-                    }
-                }
-            } else {
-                output_fut.await.map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?
-            };
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Ok(combine_output(&output.stdout, &output.stderr))
-            }
-        })
+        ];
+        Box::pin(run_shell_command(
+            "powershell.exe",
+            cmd_args,
+            workdir,
+            timeout_secs,
+        ))
     }
 
     #[cfg(not(windows))]
@@ -421,44 +325,56 @@ impl Tool for BashTool {
         };
         let workdir = args["workdir"].as_str().map(|s| s.to_string());
         let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
-        Box::pin(async move {
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.kill_on_drop(true);
-            cmd.args(["-c", &command]);
-            if let Some(dir) = &workdir {
-                cmd.current_dir(dir);
+        Box::pin(run_shell_command(
+            "bash",
+            vec!["-c".to_string(), command],
+            workdir,
+            timeout_secs,
+        ))
+    }
+}
+
+async fn run_shell_command(
+    program: &'static str,
+    args: Vec<String>,
+    workdir: Option<String>,
+    timeout_secs: Option<u64>,
+) -> Result<String, ToolExecuteError> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.kill_on_drop(true);
+    cmd.args(&args);
+    if let Some(dir) = &workdir {
+        cmd.current_dir(dir);
+    }
+    let child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ToolExecuteError {
+            message: e.to_string(),
+        })?;
+    let output_fut = child.wait_with_output();
+    let output = if let Some(secs) = timeout_secs {
+        match tokio::time::timeout(Duration::from_secs(secs), output_fut).await {
+            Ok(result) => result.map_err(|e| ToolExecuteError {
+                message: e.to_string(),
+            })?,
+            Err(_) => {
+                return Ok(format!(
+                    "[Command timed out ({}s), process terminated]",
+                    secs
+                ));
             }
-            let child = cmd
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?;
-            let output_fut = child.wait_with_output();
-            let output = if let Some(secs) = timeout_secs {
-                match tokio::time::timeout(Duration::from_secs(secs), output_fut).await {
-                    Ok(result) => result.map_err(|e| ToolExecuteError {
-                        message: e.to_string(),
-                    })?,
-                    Err(_) => {
-                        return Ok(format!(
-                            "[Command timed out ({}s), process terminated]",
-                            secs
-                        ));
-                    }
-                }
-            } else {
-                output_fut.await.map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?
-            };
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Ok(combine_output(&output.stdout, &output.stderr))
-            }
-        })
+        }
+    } else {
+        output_fut.await.map_err(|e| ToolExecuteError {
+            message: e.to_string(),
+        })?
+    };
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Ok(combine_output(&output.stdout, &output.stderr))
     }
 }
 
@@ -494,92 +410,97 @@ impl Tool for ReadTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let file_path = match args["file_path"].as_str() {
-            Some(file_path) => file_path,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "file_path is empty".to_string(),
-                });
-            }
-        };
-        let offset: usize = args["offset"]
-            .as_u64()
-            .unwrap_or(1)
-            .try_into()
-            .unwrap_or(1)
-            .max(1);
-        let limit: usize = args["limit"]
-            .as_u64()
-            .unwrap_or(2000)
-            .try_into()
-            .unwrap_or(2000);
-
-        let path = Path::new(file_path);
-        let mut result = String::new();
-        if path.is_dir() {
-            let entries = fs::read_dir(path)?;
-            result.push_str(
-                format!(
-                    indoc! { r#"
-                <path>{}</path>
-                <type>directory</type>
-            "#},
-                    path.canonicalize()?.display()
-                )
-                .as_str(),
-            );
-            result.push_str("<entries>\n");
-            for entry in entries {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    result.push_str(
-                        format!(
-                            "{}{}\n",
-                            entry.path().canonicalize()?.display().to_string().as_str(),
-                            std::path::MAIN_SEPARATOR
-                        )
-                        .as_str(),
-                    );
-                } else {
-                    result.push_str(
-                        format!(
-                            "{}\n",
-                            entry.path().canonicalize()?.display().to_string().as_str()
-                        )
-                        .as_str(),
-                    );
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
+                message: format!("Invalid JSON parameter: {e}"),
+            })?;
+            let file_path = match args["file_path"].as_str() {
+                Some(file_path) => file_path,
+                None => {
+                    return Err(ToolExecuteError {
+                        message: "file_path is empty".to_string(),
+                    });
                 }
-            }
-            result.push_str("</entries>");
-        } else {
-            let content = fs::read_to_string(path)?;
-            let content = content
-                .lines()
-                .skip(offset - 1)
-                .take(limit)
-                .collect::<Vec<_>>();
-            result.push_str(
-                format!(
-                    indoc! { r#"
-                <path>{}</path>
-                <type>file</type>
-            "#},
-                    path.canonicalize()?.display()
-                )
-                .as_str(),
-            );
-            result.push_str("<content>");
-            for (line_number, line) in (offset..).zip(content) {
-                result.push_str(format!("{}: {}\n", line_number, line).as_str());
-            }
-            result.push_str("</content>");
-        }
+            };
+            let offset: usize = args["offset"]
+                .as_u64()
+                .unwrap_or(1)
+                .try_into()
+                .unwrap_or(1)
+                .max(1);
+            let limit: usize = args["limit"]
+                .as_u64()
+                .unwrap_or(2000)
+                .try_into()
+                .unwrap_or(2000);
 
-        Ok(result)
+            let path = Path::new(file_path);
+            let mut result = String::new();
+            if path.is_dir() {
+                let entries = fs::read_dir(path)?;
+                result.push_str(
+                    format!(
+                        indoc! { r#"
+                    <path>{}</path>
+                    <type>directory</type>
+                "#},
+                        path.canonicalize()?.display()
+                    )
+                    .as_str(),
+                );
+                result.push_str("<entries>\n");
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        result.push_str(
+                            format!(
+                                "{}{}\n",
+                                entry.path().canonicalize()?.display().to_string().as_str(),
+                                std::path::MAIN_SEPARATOR
+                            )
+                            .as_str(),
+                        );
+                    } else {
+                        result.push_str(
+                            format!(
+                                "{}\n",
+                                entry.path().canonicalize()?.display().to_string().as_str()
+                            )
+                            .as_str(),
+                        );
+                    }
+                }
+                result.push_str("</entries>");
+            } else {
+                let content = fs::read_to_string(path)?;
+                let content = content
+                    .lines()
+                    .skip(offset - 1)
+                    .take(limit)
+                    .collect::<Vec<_>>();
+                result.push_str(
+                    format!(
+                        indoc! { r#"
+                    <path>{}</path>
+                    <type>file</type>
+                "#},
+                        path.canonicalize()?.display()
+                    )
+                    .as_str(),
+                );
+                result.push_str("<content>");
+                for (line_number, line) in (offset..).zip(content) {
+                    result.push_str(format!("{}: {}\n", line_number, line).as_str());
+                }
+                result.push_str("</content>");
+            }
+
+            Ok(result)
+        })
     }
 }
 
@@ -632,73 +553,14 @@ impl Tool for EditTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let file_path = match args["file_path"].as_str() {
-            Some(file_path) => file_path,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "file_path is empty".to_string(),
-                });
-            }
-        };
-        let old_string = match args["old_string"].as_str() {
-            Some(old_string) => old_string,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "old_string is empty".to_string(),
-                });
-            }
-        };
-        let new_string = match args["new_string"].as_str() {
-            Some(new_string) => new_string,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "new_string is empty".to_string(),
-                });
-            }
-        };
-        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-        let content = fs::read_to_string(file_path)?;
-
-        // 检测文件行尾风格，将 old_string/new_string 的行尾统一到文件的风格，
-        // 避免 LLM 传入 \n 而文件是 \r\n（或反过来）导致匹配失败
-        let (old_string, new_string): (String, String) = if content.contains("\r\n") {
-            (
-                old_string.replace("\r\n", "\n").replace('\n', "\r\n"),
-                new_string.replace("\r\n", "\n").replace('\n', "\r\n"),
-            )
-        } else {
-            (
-                old_string.replace("\r\n", "\n"),
-                new_string.replace("\r\n", "\n"),
-            )
-        };
-
-        let count = content.matches(old_string.as_str()).count();
-        if count == 0 {
-            return Err(ToolExecuteError {
-                message: "old_string not found in content".to_string(),
-            });
-        }
-        if !replace_all && count > 1 {
-            return Err(ToolExecuteError {
-                message: format!(
-                    "Found {} matches for old_string. Provide more surrounding lines in old_string to identify the correct match.",
-                    count
-                ),
-            });
-        }
-        let res = if replace_all {
-            content.replace(old_string.as_str(), new_string.as_str())
-        } else {
-            content.replacen(old_string.as_str(), new_string.as_str(), 1)
-        };
-        fs::write(file_path, res)?;
-
-        Ok("Edit successful".to_string())
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let (content, _display) = self.execute_async_with_display(arguments).await?;
+            Ok(content)
+        })
     }
 
     fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
@@ -812,29 +674,14 @@ impl Tool for WriteTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let file_path = match args["file_path"].as_str() {
-            Some(file_path) => file_path,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "file_path is empty".to_string(),
-                });
-            }
-        };
-        let content = match args["content"].as_str() {
-            Some(old_string) => old_string,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "content is empty".to_string(),
-                });
-            }
-        };
-        fs::write(file_path, content)?;
-
-        Ok("File written successfully".to_string())
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let (content, _display) = self.execute_async_with_display(arguments).await?;
+            Ok(content)
+        })
     }
 
     fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
@@ -920,36 +767,6 @@ impl Tool for WebFetchTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let url = match args["url"].as_str() {
-            Some(url) => url.to_string(),
-            None => {
-                return Err(ToolExecuteError {
-                    message: "url is empty".to_string(),
-                });
-            }
-        };
-        let format = args["format"].as_str().unwrap_or("markdown");
-
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let response = self.client.get(&url).send().await?;
-                let res = response.text().await?;
-
-                match format.to_lowercase().as_str() {
-                    "markdown" => Ok(html_to_markdown(&res)),
-                    "html" => Ok(res),
-                    f => Err(ToolExecuteError {
-                        message: format!("Unsupported format type: {}", f),
-                    }),
-                }
-            })
-        })
-    }
-
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
@@ -1019,99 +836,108 @@ impl Tool for GrepTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let pattern = match args["pattern"].as_str() {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => {
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
+                message: format!("Invalid JSON parameter: {e}"),
+            })?;
+            let pattern = match args["pattern"].as_str() {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => {
+                    return Err(ToolExecuteError {
+                        message: "pattern must not be empty".to_string(),
+                    });
+                }
+            };
+            if pattern.len() > 500 {
                 return Err(ToolExecuteError {
-                    message: "pattern must not be empty".to_string(),
+                    message: "Regex pattern too long (max 500 characters)".to_string(),
                 });
             }
-        };
-        if pattern.len() > 500 {
-            return Err(ToolExecuteError {
-                message: "Regex pattern too long (max 500 characters)".to_string(),
+            let path = args["path"].as_str().unwrap_or(".");
+            let include = args["include"].as_str();
+
+            let matcher = RegexMatcher::new(&pattern).map_err(|err| ToolExecuteError {
+                message: format!("Invalid regex: {}", err),
+            })?;
+
+            let mut walk_builder = WalkBuilder::new(path);
+            walk_builder.sort_by_file_path(compare_mtime);
+            walk_builder.hidden(false);
+            walk_builder.filter_entry(|entry| {
+                !crate::agent::IGNORED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
             });
-        }
-        let path = args["path"].as_str().unwrap_or(".");
-        let include = args["include"].as_str();
-
-        let matcher = RegexMatcher::new(&pattern).map_err(|err| ToolExecuteError {
-            message: format!("Invalid regex: {}", err),
-        })?;
-
-        let mut walk_builder = WalkBuilder::new(path);
-        walk_builder.sort_by_file_path(compare_mtime);
-        walk_builder.hidden(false);
-        walk_builder.filter_entry(|entry| {
-            !crate::agent::IGNORED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
-        });
-        if let Some(glob) = include {
-            let mut override_builder = ignore::overrides::OverrideBuilder::new(path);
-            override_builder.add(glob).map_err(|err| ToolExecuteError {
-                message: format!("Invalid include pattern: {}", err),
-            })?;
-            let overrides = override_builder.build().map_err(|err| ToolExecuteError {
-                message: format!("Failed to build include filter: {}", err),
-            })?;
-            walk_builder.overrides(overrides);
-        }
-
-        let mut searcher = Searcher::new();
-        let mut results = String::new();
-        let mut match_count = 0u64;
-        const MAX_MATCHES: u64 = 100;
-
-        for entry in walk_builder.build() {
-            let entry = entry.map_err(|e| ToolExecuteError {
-                message: e.to_string(),
-            })?;
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                continue;
+            if let Some(glob) = include {
+                let mut override_builder = ignore::overrides::OverrideBuilder::new(path);
+                override_builder.add(glob).map_err(|err| ToolExecuteError {
+                    message: format!("Invalid include pattern: {}", err),
+                })?;
+                let overrides = override_builder.build().map_err(|err| ToolExecuteError {
+                    message: format!("Failed to build include filter: {}", err),
+                })?;
+                walk_builder.overrides(overrides);
             }
 
-            let file_path = entry.path().to_path_buf();
-            let mut file_lines = Vec::new();
-            if let Err(e) = searcher.search_path(
-                &matcher,
-                &file_path,
-                UTF8(|lnum, line| {
-                    if match_count >= MAX_MATCHES {
-                        return Ok(false);
-                    }
-                    match_count += 1;
-                    file_lines.push(format!("  Line {}: {}\n", lnum, line.trim_end()));
-                    Ok(true)
-                }),
-            ) {
-                if file_lines.is_empty() {
+            let mut searcher = Searcher::new();
+            let mut results = String::new();
+            let mut match_count = 0u64;
+            const MAX_MATCHES: u64 = 100;
+
+            for entry in walk_builder.build() {
+                let entry = entry.map_err(|e| ToolExecuteError {
+                    message: e.to_string(),
+                })?;
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                     continue;
                 }
-                if !e.to_string().contains("invalid utf-8") {
-                    results.push_str(&format!("{}: (search error: {})\n", file_path.display(), e));
+
+                let file_path = entry.path().to_path_buf();
+                let mut file_lines = Vec::new();
+                if let Err(e) = searcher.search_path(
+                    &matcher,
+                    &file_path,
+                    UTF8(|lnum, line| {
+                        if match_count >= MAX_MATCHES {
+                            return Ok(false);
+                        }
+                        match_count += 1;
+                        file_lines.push(format!("  Line {}: {}\n", lnum, line.trim_end()));
+                        Ok(true)
+                    }),
+                ) {
+                    if file_lines.is_empty() {
+                        continue;
+                    }
+                    if !e.to_string().contains("invalid utf-8") {
+                        results.push_str(&format!(
+                            "{}: (search error: {})\n",
+                            file_path.display(),
+                            e
+                        ));
+                    }
+                }
+
+                if !file_lines.is_empty() {
+                    results.push_str(&format!("{}:\n", file_path.canonicalize()?.display()));
+                    results.push_str(&file_lines.join(""));
                 }
             }
 
-            if !file_lines.is_empty() {
-                results.push_str(&format!("{}:\n", file_path.canonicalize()?.display()));
-                results.push_str(&file_lines.join(""));
+            if results.is_empty() {
+                Ok("No matches found".to_string())
+            } else if match_count >= MAX_MATCHES {
+                results.push_str(&format!(
+                    "\n... Too many results, truncated (showing at most {} matches)",
+                    MAX_MATCHES
+                ));
+                Ok(results)
+            } else {
+                Ok(results)
             }
-        }
-
-        if results.is_empty() {
-            Ok("No matches found".to_string())
-        } else if match_count >= MAX_MATCHES {
-            results.push_str(&format!(
-                "\n... Too many results, truncated (showing at most {} matches)",
-                MAX_MATCHES
-            ));
-            Ok(results)
-        } else {
-            Ok(results)
-        }
+        })
     }
 }
 
@@ -1143,51 +969,56 @@ impl Tool for GlobTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let pattern = match args["pattern"].as_str() {
-            Some(p) => p.to_string(),
-            None => {
-                return Err(ToolExecuteError {
-                    message: "pattern must not be empty".to_string(),
-                });
-            }
-        };
-        let path = args["path"].as_str().unwrap_or(".");
-
-        let mut walk_builder = WalkBuilder::new(path);
-        walk_builder.sort_by_file_path(compare_mtime);
-        walk_builder.hidden(false);
-        walk_builder.filter_entry(|entry| {
-            !crate::agent::IGNORED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
-        });
-
-        let glob_matcher = globset::Glob::new(&pattern)
-            .map_err(|err| ToolExecuteError {
-                message: format!("Invalid glob pattern: {}", err),
-            })?
-            .compile_matcher();
-
-        let mut results = String::new();
-        for entry in walk_builder.build() {
-            let entry = entry.map_err(|e| ToolExecuteError {
-                message: e.to_string(),
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
+                message: format!("Invalid JSON parameter: {e}"),
             })?;
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                continue;
-            }
-            if glob_matcher.is_match(entry.path()) {
-                results.push_str(&format!("{}\n", entry.path().canonicalize()?.display()));
-            }
-        }
+            let pattern = match args["pattern"].as_str() {
+                Some(p) => p.to_string(),
+                None => {
+                    return Err(ToolExecuteError {
+                        message: "pattern must not be empty".to_string(),
+                    });
+                }
+            };
+            let path = args["path"].as_str().unwrap_or(".");
 
-        if results.is_empty() {
-            Ok("No matching files found".to_string())
-        } else {
-            Ok(results)
-        }
+            let mut walk_builder = WalkBuilder::new(path);
+            walk_builder.sort_by_file_path(compare_mtime);
+            walk_builder.hidden(false);
+            walk_builder.filter_entry(|entry| {
+                !crate::agent::IGNORED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+            });
+
+            let glob_matcher = globset::Glob::new(&pattern)
+                .map_err(|err| ToolExecuteError {
+                    message: format!("Invalid glob pattern: {}", err),
+                })?
+                .compile_matcher();
+
+            let mut results = String::new();
+            for entry in walk_builder.build() {
+                let entry = entry.map_err(|e| ToolExecuteError {
+                    message: e.to_string(),
+                })?;
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
+                if glob_matcher.is_match(entry.path()) {
+                    results.push_str(&format!("{}\n", entry.path().canonicalize()?.display()));
+                }
+            }
+
+            if results.is_empty() {
+                Ok("No matching files found".to_string())
+            } else {
+                Ok(results)
+            }
+        })
     }
 }
 
@@ -1235,46 +1066,51 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
-            message: format!("Invalid JSON parameter: {e}"),
-        })?;
-        let todos = args["todos"].as_array();
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
+                message: format!("Invalid JSON parameter: {e}"),
+            })?;
+            let todos = args["todos"].as_array();
 
-        match todos {
-            Some(items) if !items.is_empty() => {
-                let mut result = String::from("Task list updated:\n");
-                for (i, item) in items.iter().enumerate() {
-                    let content = item["content"].as_str().unwrap_or("Unknown task");
-                    let status = item["status"].as_str().unwrap_or("pending");
-                    let priority = item["priority"].as_str().unwrap_or("medium");
+            match todos {
+                Some(items) if !items.is_empty() => {
+                    let mut result = String::from("Task list updated:\n");
+                    for (i, item) in items.iter().enumerate() {
+                        let content = item["content"].as_str().unwrap_or("Unknown task");
+                        let status = item["status"].as_str().unwrap_or("pending");
+                        let priority = item["priority"].as_str().unwrap_or("medium");
 
-                    let status_icon = match status {
-                        "completed" => "✓",
-                        "in_progress" => "→",
-                        "cancelled" => "✗",
-                        _ => "○",
-                    };
-                    let priority_label = match priority {
-                        "high" => "[high]",
-                        "low" => "[low]",
-                        _ => "[med]",
-                    };
-                    result.push_str(&format!(
-                        "  {}. {} {} {} {}\n",
-                        i + 1,
-                        status_icon,
-                        content,
-                        priority_label,
-                        status
-                    ));
+                        let status_icon = match status {
+                            "completed" => "✓",
+                            "in_progress" => "→",
+                            "cancelled" => "✗",
+                            _ => "○",
+                        };
+                        let priority_label = match priority {
+                            "high" => "[high]",
+                            "low" => "[low]",
+                            _ => "[med]",
+                        };
+                        result.push_str(&format!(
+                            "  {}. {} {} {} {}\n",
+                            i + 1,
+                            status_icon,
+                            content,
+                            priority_label,
+                            status
+                        ));
+                    }
+                    Ok(result)
                 }
-                Ok(result)
+                _ => Err(ToolExecuteError {
+                    message: "todos parameter must not be empty".to_string(),
+                }),
             }
-            _ => Err(ToolExecuteError {
-                message: "todos parameter must not be empty".to_string(),
-            }),
-        }
+        })
     }
 }
 

@@ -203,11 +203,7 @@ impl HistoryCell for UserMessageCell {
         let prefix_w = UnicodeWidthStr::width(prefix) as u16;
         let content_w = width.saturating_sub(prefix_w);
 
-        let bar_color = if self.plan_mode {
-            PLAN_BADGE
-        } else {
-            CHAT_FG
-        };
+        let bar_color = if self.plan_mode { PLAN_BADGE } else { CHAT_FG };
 
         let mut lines = Vec::new();
         let wrapped = wrap_text(&self.text, content_w);
@@ -215,13 +211,22 @@ impl HistoryCell for UserMessageCell {
         for (i, line) in wrapped.iter().enumerate() {
             if i == 0 {
                 lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(bar_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(line.clone(), Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        prefix.to_string(),
+                        Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        line.clone(),
+                        Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD),
+                    ),
                 ]));
             } else {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(line.clone(), Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        line.clone(),
+                        Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD),
+                    ),
                 ]));
             }
         }

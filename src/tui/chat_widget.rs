@@ -158,12 +158,7 @@ fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
 
 impl<'a> ChatWidget<'a> {
     pub fn render(mut self, area: Rect, buf: &mut Buffer) -> RenderResult {
-        let [
-            messages_area,
-            timing_area,
-            input_area,
-            status_area,
-        ] = Layout::vertical([
+        let [messages_area, timing_area, input_area, status_area] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(self.input_area_height),
@@ -287,7 +282,12 @@ impl<'a> ChatWidget<'a> {
             let header_lines = &all_lines[..header_visible.min(all_lines.len())];
             if !header_lines.is_empty() {
                 Clear.render(
-                    Rect::new(header_area.x, header_area.y, header_area.width, header_lines.len() as u16),
+                    Rect::new(
+                        header_area.x,
+                        header_area.y,
+                        header_area.width,
+                        header_lines.len() as u16,
+                    ),
                     buf,
                 );
                 Paragraph::new(header_lines.to_vec()).render(header_area, buf);
