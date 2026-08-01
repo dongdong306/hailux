@@ -1,14 +1,14 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::tui::event::{self, TaskStatus};
-use crate::tui::model_picker::AddModelForm;
-use crate::tui::setup::SetupForm;
-use crate::tui::tasks_viewer::TaskEntry;
 use crate::agent::subagent::SharedConfig;
 use crate::config::ModelEntry;
 use crate::mcp::SharedMcpBackends;
 use crate::storage::SessionSummary;
+use crate::tui::event::{self, TaskStatus};
+use crate::tui::model_picker::AddModelForm;
+use crate::tui::setup::SetupForm;
+use crate::tui::tasks_viewer::TaskEntry;
 
 #[derive(Debug, Clone)]
 pub enum Message {

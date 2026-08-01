@@ -1,12 +1,12 @@
-pub(crate) mod types;
-mod chat_input;
+mod app_render;
 mod chat_events;
+mod chat_input;
 mod overlay;
 mod session_ops;
-mod app_render;
+pub(crate) mod types;
 
-pub use types::{Message, AppSharedState};
 pub(crate) use types::AppState;
+pub use types::{AppSharedState, Message};
 
 use chat_input::PasteBurst;
 
@@ -16,16 +16,16 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use super::ask_user::AskUserState;
 use super::command;
 use super::event::{self, AppEvent, EventTx};
 #[allow(unused_imports)]
 use super::history_cell::{self, HistoryCell, SessionHeaderCell, TooltipCell};
 use super::input::InputHandler;
+use super::setup::SetupForm;
 #[allow(unused_imports)]
 use super::tasks_viewer::{TaskEntry, TaskRecord, TaskRunStatus};
 use super::terminal;
-use super::setup::SetupForm;
-use super::ask_user::AskUserState;
 use crate::agent::Agent;
 use crate::agent::CommandRegistry;
 use crate::agent::skill::SkillInfo;

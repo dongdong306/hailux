@@ -482,12 +482,6 @@ impl Tool for TaskTool {
         })
     }
 
-    fn execute(&self, _arguments: &str) -> Result<String, ToolExecuteError> {
-        Err(ToolExecuteError {
-            message: "The task tool only supports async execution".to_string(),
-        })
-    }
-
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,

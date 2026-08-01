@@ -4,7 +4,9 @@ use color_eyre::{Result, eyre::Context};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 const CONFIG_DIR_NAME: &str = ".hailux";
 const SKILL_DIR_NAME: &str = "skills";
@@ -251,52 +253,60 @@ impl Tool for SkillTool {
         })
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).unwrap_or_default();
-        let name = match args["name"].as_str() {
-            Some(n) => n,
-            None => {
-                return Err(ToolExecuteError {
-                    message: "name must not be empty".to_string(),
-                });
-            }
-        };
+    fn execute_async<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Value = serde_json::from_str(arguments).unwrap_or_default();
+            let name = match args["name"].as_str() {
+                Some(n) => n,
+                None => {
+                    return Err(ToolExecuteError {
+                        message: "name must not be empty".to_string(),
+                    });
+                }
+            };
 
-        let info = match self.find(name) {
-            Some(info) => info,
-            None => {
-                let available: Vec<&str> = self.skills.iter().map(|s| s.name.as_str()).collect();
-                return Err(ToolExecuteError {
-                    message: format!(
-                        "Skill \"{}\" not found. Available skills: {}",
-                        name,
-                        if available.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            available.join(", ")
-                        }
-                    ),
-                });
-            }
-        };
+            let info = match self.find(name) {
+                Some(info) => info,
+                None => {
+                    let available: Vec<&str> =
+                        self.skills.iter().map(|s| s.name.as_str()).collect();
+                    return Err(ToolExecuteError {
+                        message: format!(
+                            "Skill \"{}\" not found. Available skills: {}",
+                            name,
+                            if available.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                available.join(", ")
+                            }
+                        ),
+                    });
+                }
+            };
 
-        let base = info.base_dir();
-        let mut output = String::new();
-        output.push_str(&format!("<skill_content name=\"{}\">\n", info.name));
-        output.push_str(&format!("# Skill: {}\n\n", info.name));
-        output.push_str(info.content.trim());
-        output.push_str("\n\n");
-        output.push_str(&format!(
-            "Base directory for this skill: {}\n",
-            base.display()
-        ));
-        output.push_str(
-            "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.\n",
-        );
-        output.push_str("Use the `read` or `glob` tool to load any referenced scripts or files.\n");
-        output.push_str("</skill_content>");
+            let base = info.base_dir();
+            let mut output = String::new();
+            output.push_str(&format!("<skill_content name=\"{}\">\n", info.name));
+            output.push_str(&format!("# Skill: {}\n\n", info.name));
+            output.push_str(info.content.trim());
+            output.push_str("\n\n");
+            output.push_str(&format!(
+                "Base directory for this skill: {}\n",
+                base.display()
+            ));
+            output.push_str(
+                "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.\n",
+            );
+            output.push_str(
+                "Use the `read` or `glob` tool to load any referenced scripts or files.\n",
+            );
+            output.push_str("</skill_content>");
 
-        Ok(output)
+            Ok(output)
+        })
     }
 }
 
@@ -353,8 +363,8 @@ mod tests {
         fs::remove_dir_all(&tmp).ok();
     }
 
-    #[test]
-    fn skill_tool_returns_content_and_base_dir() {
+    #[tokio::test]
+    async fn skill_tool_returns_content_and_base_dir() {
         use std::fs;
         let tmp = std::env::temp_dir().join(format!("hailux-skill-tool-{}", uuid::Uuid::new_v4()));
         let skill_dir = tmp.join(CONFIG_DIR_NAME).join(SKILL_DIR_NAME).join("wf");
@@ -367,7 +377,7 @@ mod tests {
 
         let skills = discover_skills(&tmp).unwrap();
         let tool = SkillTool::new(skills);
-        let out = tool.execute(r#"{"name":"wf"}"#).unwrap();
+        let out = tool.execute_async(r#"{"name":"wf"}"#).await.unwrap();
         assert!(out.contains("Base directory for this skill:"));
         assert!(out.contains("run scripts/x.sh"));
         assert!(out.contains("<skill_content name=\"wf\">"));

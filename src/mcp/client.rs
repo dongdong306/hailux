@@ -386,26 +386,6 @@ impl Tool for McpTool {
         self.schema.clone()
     }
 
-    fn execute(&self, arguments: &str) -> Result<String, ToolExecuteError> {
-        let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
-        let mut params = CallToolRequestParams::new(self.tool_name.clone());
-        if let Some(obj) = args.as_object() {
-            params = params.with_arguments(obj.clone());
-        }
-        let backend = self.backend.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                let result = backend
-                    .call_tool(params)
-                    .await
-                    .map_err(|e| ToolExecuteError {
-                        message: format!("MCP 调用失败: {e}"),
-                    })?;
-                convert_call_tool_result(result)
-            })
-        })
-    }
-
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
