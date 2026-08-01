@@ -15,4 +15,6 @@ pub mod tasks_viewer;
 pub mod terminal;
 
 pub use app::App;
+#[allow(unused_imports)]
+pub use app::AppSharedState;
 pub use event::AppEvent;

@@ -1,0 +1,514 @@
+pub(crate) mod types;
+mod chat_input;
+mod chat_events;
+mod overlay;
+mod session_ops;
+mod app_render;
+
+pub use types::{Message, AppSharedState};
+pub(crate) use types::AppState;
+
+use chat_input::PasteBurst;
+
+use color_eyre::Result;
+#[allow(unused_imports)]
+use crossterm::event::{KeyCode, KeyModifiers};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+use super::command;
+use super::event::{self, AppEvent, EventTx};
+#[allow(unused_imports)]
+use super::history_cell::{self, HistoryCell, SessionHeaderCell, TooltipCell};
+use super::input::InputHandler;
+#[allow(unused_imports)]
+use super::tasks_viewer::{TaskEntry, TaskRecord, TaskRunStatus};
+use super::terminal;
+use super::setup::SetupForm;
+use super::ask_user::AskUserState;
+use crate::agent::Agent;
+use crate::agent::CommandRegistry;
+use crate::agent::skill::SkillInfo;
+use crate::agent::subagent::SubagentConfig;
+use crate::config::{self, ResolvedModel};
+use crate::mcp::McpServerStatus;
+use crate::storage::ChatStorage;
+
+use super::chat_widget::RenderCache;
+
+/// 批量消费积压事件的时间预算，超时后立即渲染，避免高速输出时 UI 卡顿
+pub(super) const BATCH_RENDER_BUDGET: Duration = Duration::from_millis(50);
+/// 单次批量消费的事件上限，防止极端积压下长时间占用
+pub(super) const BATCH_MAX_EVENTS: usize = 128;
+pub(super) const DEFAULT_CONTEXT_WINDOW: u32 = 131072;
+pub(super) const DEFAULT_OUTPUT_TOKENS: u32 = 65536;
+
+/// 文件选择器状态
+#[derive(Default)]
+pub(super) struct FilePickerState {
+    pub(super) active: bool,
+    pub(super) results: Vec<String>,
+    pub(super) selected: usize,
+    pub(super) pending_mentions: Vec<(String, String)>,
+}
+
+/// 命令补全建议
+#[derive(Default)]
+pub(super) struct CommandSuggestion {
+    pub(super) show: bool,
+    pub(super) items: Vec<command::CommandEntry>,
+    pub(super) selected: usize,
+}
+
+/// Task 跟踪
+#[derive(Default)]
+pub(super) struct TaskTracker {
+    pub(super) records: Vec<TaskRecord>,
+    pub(super) call_counter: u64,
+    pub(super) active_call_id: Option<u64>,
+}
+
+/// Spinner 动画
+#[derive(Default)]
+pub(super) struct Spinner {
+    pub(super) frame: usize,
+    pub(super) last_tick: Option<Instant>,
+}
+
+/// 请求计时统计
+#[derive(Default)]
+pub(super) struct TimingStats {
+    pub(super) user_msg_sent_at: Option<Instant>,
+    pub(super) last_total_ms: Option<u64>,
+}
+
+/// 渲染缓存与脏标记
+pub(super) struct RenderState {
+    pub(super) cache: RenderCache,
+    pub(super) cells: Vec<Box<dyn HistoryCell>>,
+    pub(super) dirty: bool,
+    pub(super) force_clear: bool,
+}
+
+impl Default for RenderState {
+    fn default() -> Self {
+        Self {
+            cache: RenderCache::new(),
+            cells: Vec::new(),
+            dirty: true,
+            force_clear: false,
+        }
+    }
+}
+
+pub struct App {
+    pub(super) messages: Vec<Message>,
+    pub(super) input: InputHandler,
+    pub(super) scroll_offset: u16,
+    pub(super) should_auto_scroll: bool,
+    pub(super) is_processing: bool,
+    pub(super) plan_mode: bool,
+    pub(super) should_quit: bool,
+    pub(super) agent: Agent,
+    pub(super) events: (EventTx, event::EventRx),
+    pub(super) resolved: ResolvedModel,
+    pub(super) state: AppState,
+    pub(super) storage: ChatStorage,
+    pub(super) current_session_id: Option<String>,
+    pub(super) work_dir: String,
+    pub(super) command_registry: CommandRegistry,
+    pub(super) command_entries: Vec<command::CommandEntry>,
+    pub(super) cmd_suggestion: CommandSuggestion,
+    pub(super) paste_burst: PasteBurst,
+    pub(super) last_esc_time: Option<Instant>,
+    pub(super) esc_hint_active: bool,
+    pub(super) pending_pastes: Vec<(String, String)>,
+    pub(super) config: config::Config,
+    pub(super) skills: Vec<SkillInfo>,
+    pub(super) home_dir: std::path::PathBuf,
+    pub(super) mcp_servers: Vec<McpServerStatus>,
+    pub(super) context_prompt_tokens: u32,
+    pub(super) context_completion_tokens: u32,
+    pub(super) spinner: Spinner,
+    pub(super) file_picker: FilePickerState,
+    pub(super) subagents: Vec<SubagentConfig>,
+    pub(super) tasks: TaskTracker,
+    pub(super) shared: AppSharedState,
+    pub(super) thinking_collapsed: bool,
+    pub(super) timing: TimingStats,
+    pub(super) render: RenderState,
+    pub(super) is_jediterm: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl App {
+    pub fn new(
+        agent: Agent,
+        resolved: ResolvedModel,
+        storage: ChatStorage,
+        config: config::Config,
+        skills: Vec<SkillInfo>,
+        command_registry: CommandRegistry,
+        mcp_servers: Vec<McpServerStatus>,
+        subagents: Vec<SubagentConfig>,
+        shared: AppSharedState,
+        events: (EventTx, event::EventRx),
+    ) -> Self {
+        let work_dir = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let command_entries = command::build_all_entries(&command_registry);
+        Self {
+            messages: Vec::new(),
+            input: InputHandler::new(),
+            scroll_offset: 0,
+            should_auto_scroll: true,
+            is_processing: false,
+            plan_mode: false,
+            should_quit: false,
+            agent,
+            events,
+            resolved,
+            state: AppState::Chat,
+            storage,
+            current_session_id: None,
+            work_dir,
+            command_registry,
+            command_entries,
+            cmd_suggestion: CommandSuggestion::default(),
+            paste_burst: PasteBurst::new(),
+            last_esc_time: None,
+            esc_hint_active: false,
+            pending_pastes: Vec::new(),
+            config,
+            skills,
+            home_dir,
+            mcp_servers,
+            context_prompt_tokens: 0,
+            context_completion_tokens: 0,
+            spinner: Spinner::default(),
+            file_picker: FilePickerState::default(),
+            subagents,
+            tasks: TaskTracker::default(),
+            shared,
+            thinking_collapsed: true,
+            timing: TimingStats::default(),
+            render: RenderState::default(),
+            is_jediterm: std::env::var("TERMINAL_EMULATOR")
+                .map(|v| v.contains("JediTerm"))
+                .unwrap_or(false),
+        }
+    }
+
+    pub fn enter_setup(&mut self) {
+        self.state = AppState::Setup(SetupForm::new());
+    }
+
+    pub async fn run(&mut self, terminal: &mut terminal::Tui) -> Result<()> {
+        let tx = self.events.0.clone();
+        let event_collector = tokio::spawn(async move {
+            event::collect_terminal_events(tx).await;
+        });
+
+        terminal.draw(|f| self.render(f))?;
+
+        let mut pending_input_events: VecDeque<AppEvent> = VecDeque::new();
+
+        loop {
+            let timeout = if self.is_processing {
+                Duration::from_millis(80)
+            } else {
+                self.paste_burst
+                    .flush_timeout()
+                    .map(|d| d + Duration::from_millis(5))
+                    .unwrap_or(Duration::from_secs(3600))
+            };
+
+            if let Some(event) = pending_input_events.pop_front() {
+                self.process_event(event).await?;
+            } else {
+                match tokio::time::timeout(timeout, self.events.1.recv()).await {
+                    Ok(Some(app_event)) => {
+                        self.process_event(app_event).await?;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        if !self.is_processing {
+                            self.handle_paste_burst_flush(Instant::now());
+                        }
+                    }
+                }
+            }
+
+            if self.should_quit {
+                break;
+            }
+
+            // 批量消费积压的流式事件（chunk/tool 等），用户交互事件暂存后逐个处理
+            if self.is_processing {
+                let batch_start = Instant::now();
+                let mut batch_count = 0usize;
+                loop {
+                    if self.should_quit {
+                        break;
+                    }
+                    if batch_count >= BATCH_MAX_EVENTS
+                        || batch_start.elapsed() >= BATCH_RENDER_BUDGET
+                    {
+                        break;
+                    }
+                    match self.events.1.try_recv() {
+                        Ok(event) if Self::is_batchable_event(&event) => {
+                            self.process_event(event).await?;
+                            batch_count += 1;
+                            if !self.is_processing {
+                                break;
+                            }
+                        }
+                        Ok(event) => {
+                            pending_input_events.push_back(event);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+
+            if self.is_processing {
+                let now = Instant::now();
+                let should_tick = self
+                    .spinner
+                    .last_tick
+                    .map(|t| now.duration_since(t) >= Duration::from_millis(80))
+                    .unwrap_or(true);
+                if should_tick {
+                    self.spinner.frame = self.spinner.frame.wrapping_add(1);
+                    self.spinner.last_tick = Some(now);
+                }
+                // 5 秒后自动重置 esc 提示
+                if self.esc_hint_active
+                    && self
+                        .last_esc_time
+                        .is_some_and(|t| now.duration_since(t) >= Duration::from_secs(5))
+                {
+                    self.last_esc_time = None;
+                    self.esc_hint_active = false;
+                }
+            }
+
+            if !self.paste_burst.is_active() {
+                if self.render.force_clear {
+                    terminal.clear()?;
+                    self.render.force_clear = false;
+                }
+                terminal.draw(|f| self.render(f))?;
+            }
+        }
+
+        event_collector.abort();
+
+        // 如果任务仍在进行中，执行清理：标记为中断并修复 orphaned tool calls
+        if self.is_processing {
+            self.cleanup_on_quit().await;
+        }
+
+        Ok(())
+    }
+
+    /// 退出时清理：中断 agent，尝试等待 AgentComplete（2s 超时），
+    /// 超时则手动修复存储中的 orphaned tool calls 并写入 interrupted 状态。
+    ///
+    /// 竞态安全：stream task 通过事件通道通信，cleanup 退出后其事件无人读取；
+    /// `repair_orphaned_tool_calls` 幂等（检查 existing_ids），不会产生重复记录。
+    /// 仅处理 PersistMessage 和 AgentComplete，其余 UI 事件在退出路径无需处理。
+    async fn cleanup_on_quit(&mut self) {
+        self.agent.interrupt();
+
+        // 尝试等待 AgentComplete 事件（最多 2 秒）
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(100), self.events.1.recv()).await
+            {
+                match &event {
+                    AppEvent::AgentComplete { .. } => {
+                        if let Err(e) = self.handle_event(event).await {
+                            eprintln!("[warn] cleanup handle_event error: {e}");
+                        }
+                        return;
+                    }
+                    AppEvent::PersistMessage { .. } => {
+                        if let Err(e) = self.handle_event(event).await {
+                            eprintln!("[warn] cleanup persist error: {e}");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 超时 fallback：手动修复存储
+        if let Some(session_id) = &self.current_session_id {
+            if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
+                eprintln!("[warn] repair_orphaned_tool_calls: {e}");
+            }
+            // 写入 interrupted runtime_meta
+            let total_ms = self
+                .timing
+                .user_msg_sent_at
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let meta = serde_json::json!({
+                "total_ms": total_ms,
+                "model": self.resolved.display,
+                "status": "interrupted",
+            })
+            .to_string();
+            if let Err(e) = self
+                .storage
+                .update_last_assistant_runtime_meta(session_id, &meta)
+                .await
+            {
+                eprintln!("[warn] cleanup runtime_meta: {e}");
+            }
+        }
+    }
+
+    /// 包装 handle_event，自动检测消息变更并标记 cells 缓存失效
+    async fn process_event(&mut self, event: AppEvent) -> Result<()> {
+        let streaming = matches!(
+            &event,
+            AppEvent::AgentChunk(_)
+                | AppEvent::AgentReasoningChunk(_)
+                | AppEvent::AgentComplete { .. }
+                | AppEvent::CompactChunk(_)
+                | AppEvent::CompactComplete { .. }
+        );
+        let is_subagent_result = matches!(
+            &event,
+            AppEvent::ToolResult {
+                subagent_name: Some(_),
+                ..
+            }
+        );
+        let len_before = self.messages.len();
+        self.handle_event(event).await?;
+        if self.messages.len() != len_before || streaming || is_subagent_result {
+            self.render.dirty = true;
+        }
+        Ok(())
+    }
+
+    /// 判断事件是否为可批量消费的高频流式事件
+    fn is_batchable_event(event: &AppEvent) -> bool {
+        matches!(
+            event,
+            AppEvent::AgentChunk(_)
+                | AppEvent::AgentReasoningChunk(_)
+                | AppEvent::UsageUpdate { .. }
+                | AppEvent::PersistMessage { .. }
+                | AppEvent::ToolCallStart { .. }
+                | AppEvent::ToolResult { .. }
+                | AppEvent::AgentComplete { .. }
+                | AppEvent::CompactChunk(_)
+        )
+    }
+
+    async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
+        // MCP 后台连接完成事件，不受当前 state 限制
+        if let AppEvent::McpReady(connections) = event {
+            self.handle_mcp_ready(connections).await?;
+            return Ok(());
+        }
+
+        // 非 Chat 覆盖层状态下，非键盘事件仍需转发给 Chat 处理器，
+        // 确保 agent 响应、工具结果等不被丢弃。
+        let is_overlay = !matches!(&self.state, AppState::Chat | AppState::AskUser { .. });
+        let is_local_input = matches!(
+            &event,
+            AppEvent::InputKey(_)
+                | AppEvent::InputPaste(_)
+                | AppEvent::UserSubmit(_)
+                | AppEvent::Resize
+                | AppEvent::ScrollUp
+                | AppEvent::ScrollDown
+                | AppEvent::MouseClick
+        );
+
+        if is_overlay && !is_local_input {
+            self.handle_chat_event(event).await?;
+            return Ok(());
+        }
+
+        match &self.state {
+            AppState::Chat => {
+                self.handle_chat_event(event).await?;
+            }
+            AppState::SessionPicker { .. } => {
+                self.handle_picker_event_inner(event).await?;
+            }
+            AppState::ModelPicker { .. } => {
+                self.handle_model_picker_event(event)?;
+            }
+            AppState::AddModel(_) => {
+                self.handle_add_model_event(event)?;
+            }
+            AppState::Skills { .. } => {
+                self.handle_skills_event(event)?;
+            }
+            AppState::SkillDetail { .. } => {
+                self.handle_skill_detail_event(event)?;
+            }
+            AppState::Mcp { .. } => {
+                self.handle_mcp_event(event)?;
+            }
+            AppState::McpDetail { .. } => {
+                self.handle_mcp_detail_event(event)?;
+            }
+            AppState::McpItemDetail { .. } => {
+                self.handle_mcp_item_detail_event(event)?;
+            }
+            AppState::Tasks { .. } => {
+                self.handle_tasks_event(event).await?;
+            }
+            AppState::TaskDetail { .. } => {
+                self.handle_task_detail_event(event).await?;
+            }
+            AppState::Setup(_) => {
+                self.handle_setup_event(event)?;
+            }
+            AppState::AskUser { .. } => {
+                let mut st = match std::mem::replace(&mut self.state, AppState::Chat) {
+                    AppState::AskUser {
+                        questions,
+                        response_tx,
+                        current_tab,
+                        selected,
+                        answers,
+                        custom_inputs,
+                        custom_cursor,
+                        editing_custom,
+                        last_paste,
+                    } => AskUserState {
+                        questions,
+                        response_tx: Some(response_tx),
+                        current_tab,
+                        selected,
+                        answers,
+                        custom_inputs,
+                        custom_cursor,
+                        editing_custom,
+                        last_paste,
+                    },
+                    other => {
+                        self.state = other;
+                        return Ok(());
+                    }
+                };
+                st.handle_event(event, &mut self.state)?;
+            }
+        }
+        Ok(())
+    }
+}

@@ -3,7 +3,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use unicode_width::UnicodeWidthStr;
 
-use super::app::Message;
+use super::app::types::Message;
 use super::event::TaskStatus;
 use super::markdown;
 

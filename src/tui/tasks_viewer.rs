@@ -5,7 +5,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::storage::{MessageRole, StoredMessage, SubsessionSummary};
-use crate::tui::app::Message;
+use crate::tui::app::types::Message;
 use crate::tui::history_cell::{self, HistoryCell};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

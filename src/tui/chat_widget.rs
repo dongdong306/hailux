@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::Message;
+use super::app::types::Message;
 use super::command;
 use super::history_cell::{
     CHAT_FG, CHAT_FILE_MENTION, CHAT_PASTE, CHAT_PLACEHOLDER, CHAT_PREFIX_BLUE, HistoryCell,
