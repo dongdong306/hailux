@@ -590,14 +590,19 @@ impl Tool for TaskTool {
                 let mut chat_messages = Vec::new();
                 for msg in &stored_messages {
                     if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
-                        chat_messages.push(chat_msg);
+                        chat_messages.push(std::sync::Arc::new(chat_msg));
                     }
                 }
                 if !chat_messages.is_empty() {
                     // 保留已有的 system prompt（build_subagent 已设置），仅加载非 system 消息
                     let non_system: Vec<_> = chat_messages
                         .into_iter()
-                        .filter(|m| !matches!(m, CompatibleChatCompletionRequestMessage::System(_)))
+                        .filter(|m| {
+                            !matches!(
+                                m.as_ref(),
+                                CompatibleChatCompletionRequestMessage::System(_)
+                            )
+                        })
                         .collect();
                     restore_agent.sync_messages(non_system);
                 }
@@ -711,7 +716,7 @@ impl Tool for TaskTool {
                     AppEvent::AgentComplete { messages, .. } => {
                         // 从最终消息中提取最后一条 assistant 消息的文本
                         for msg in messages.iter().rev() {
-                            if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg
+                            if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg.as_ref()
                                 && let Some(ref content) = assistant.base.content
                                     && let async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(t) = content
                                         && !t.is_empty() {

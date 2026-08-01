@@ -156,7 +156,7 @@ impl App {
 
         for msg in &active_stored {
             if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
-                chat_messages.push(chat_msg);
+                chat_messages.push(std::sync::Arc::new(chat_msg));
             }
         }
 
@@ -166,14 +166,15 @@ impl App {
                 .any(|m| crate::storage::compatible_message_role(m) == MessageRole::System);
 
             if let Some(ref summary) = compact_summary {
-                let summary_msg: crate::agent::models::CompatibleChatCompletionRequestMessage =
+                let summary_msg: crate::agent::models::SharedMessage = std::sync::Arc::new(
                     async_openai::types::chat::ChatCompletionRequestUserMessage {
                         content: async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
                             format!("[Context Summary]\n{}", summary),
                         ),
                         name: None,
                     }
-                    .into();
+                    .into(),
+                );
 
                 let preserved_system = if has_system {
                     None
@@ -188,7 +189,7 @@ impl App {
 
                 let mut final_messages = Vec::new();
                 if let Some(prompt) = &preserved_system {
-                    final_messages.push(
+                    final_messages.push(std::sync::Arc::new(
                         async_openai::types::chat::ChatCompletionRequestSystemMessage {
                             content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
                                 prompt.clone(),
@@ -196,7 +197,7 @@ impl App {
                             name: None,
                         }
                         .into(),
-                    );
+                    ));
                 }
                 final_messages.push(summary_msg);
                 final_messages.extend(non_system);

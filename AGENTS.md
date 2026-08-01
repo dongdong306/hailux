@@ -44,6 +44,10 @@ subagent delegation, and custom slash commands.
     wraps standard async-openai types and adds `reasoning_content` to Assistant messages.
     Uses custom `Serialize` to inject `thinking` config and `extra` fields into the
     request JSON. Requests go through `create_stream_byot` (BYOT = bring your own transport).
+    Messages are stored as `SharedMessage = Arc<CompatibleChatCompletionRequestMessage>`:
+    cloning a message list is O(n) pointer copies (no deep copy of content). In plan mode,
+    `AgentStreamState::build_request()` uses `Arc::make_mut` to inject the read-only prompt —
+    it deep-copies only the single message being modified, leaving the rest shared.
   - `tools.rs` — `Tool` trait + built-in tools (`bash`, `read`, `edit`, `write`, `grep`,
     `glob`, `web_fetch`, `todo_write`, `ask_user`). `ToolRegistry` converts tools to
     OpenAI function-calling schema. `allowed_in_plan_mode()` gates write tools.

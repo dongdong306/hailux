@@ -1,4 +1,4 @@
-use crate::agent::models::CompatibleChatCompletionRequestMessage;
+use crate::agent::models::SharedMessage;
 use crate::mcp::McpConnection;
 use crossterm::event::{
     Event as CrosstermEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
@@ -39,7 +39,7 @@ pub enum AppEvent {
     AgentChunk(String),
     AgentReasoningChunk(String),
     AgentComplete {
-        messages: Vec<CompatibleChatCompletionRequestMessage>,
+        messages: Vec<SharedMessage>,
         usages: Vec<MessageUsage>,
         status: TaskStatus,
     },
@@ -48,7 +48,7 @@ pub enum AppEvent {
         completion_tokens: u32,
     },
     PersistMessage {
-        msg: CompatibleChatCompletionRequestMessage,
+        msg: SharedMessage,
         usage: Option<(u32, u32)>,
         display: Option<String>,
     },

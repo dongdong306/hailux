@@ -1,7 +1,7 @@
 use super::models::{
     CompatibleChatCompletionRequestAssistantMessage, CompatibleChatCompletionRequestMessage,
     CompatibleCreateChatCompletionRequestArgs, CompatibleCreateChatCompletionStreamResponse,
-    ThinkingConfig,
+    SharedMessage, ThinkingConfig,
 };
 use super::tools::ToolRegistry;
 use crate::tui::AppEvent;
@@ -41,7 +41,7 @@ struct PartialToolCall {
 pub struct Agent {
     client: Client<OpenAIConfig>,
     tool_registry: ToolRegistry,
-    messages: Vec<CompatibleChatCompletionRequestMessage>,
+    messages: Vec<SharedMessage>,
     model: String,
     max_tokens: u32,
     plan_mode: bool,
@@ -83,22 +83,28 @@ impl Agent {
     }
 
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.messages
-            .retain(|m| !matches!(m, CompatibleChatCompletionRequestMessage::System(_)));
+        self.messages.retain(|m| {
+            !matches!(
+                m.as_ref(),
+                CompatibleChatCompletionRequestMessage::System(_)
+            )
+        });
         self.messages.insert(
             0,
-            ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(prompt.to_string()),
-                name: None,
-            }
-            .into(),
+            Arc::new(
+                ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(prompt.to_string()),
+                    name: None,
+                }
+                .into(),
+            ),
         );
     }
 
     /// 提取当前的 system prompt（用于切换会话后恢复）
     pub fn take_system_prompt(&self) -> Option<String> {
         self.messages.iter().find_map(|m| {
-            if let CompatibleChatCompletionRequestMessage::System(sys) = m {
+            if let CompatibleChatCompletionRequestMessage::System(sys) = m.as_ref() {
                 match &sys.content {
                     ChatCompletionRequestSystemMessageContent::Text(t) => Some(t.clone()),
                     _ => None,
@@ -121,13 +127,13 @@ impl Agent {
         user_input: &str,
         event_tx: EventTx,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.messages.push(
+        self.messages.push(Arc::new(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text(user_input.to_string()),
                 name: None,
             }
             .into(),
-        );
+        ));
 
         let client = self.client.clone();
         let tool_registry = self.tool_registry.clone_registry();
@@ -152,17 +158,17 @@ impl Agent {
                 let mut messages = {
                     let state = handle.lock().map_err(|e| e.to_string());
                     match state {
-                        Ok(state) => state.messages.clone(),
+                        Ok(mut state) => std::mem::take(&mut state.messages),
                         Err(_) => Vec::new(),
                     }
                 };
                 if !messages.is_empty() {
                     let needs_assistant = !matches!(
-                        messages.last(),
+                        messages.last().map(|m| m.as_ref()),
                         Some(CompatibleChatCompletionRequestMessage::Assistant(_))
                     );
                     if needs_assistant {
-                        let msg: CompatibleChatCompletionRequestMessage =
+                        let msg: SharedMessage = Arc::new(
                             CompatibleChatCompletionRequestAssistantMessage {
                                 base: ChatCompletionRequestAssistantMessage {
                                     content: Some(
@@ -174,8 +180,9 @@ impl Agent {
                                 },
                                 reasoning_content: None,
                             }
-                            .into();
-                        messages.push(msg.clone());
+                            .into(),
+                        );
+                        messages.push(Arc::clone(&msg));
                         let _ = tx_clone.try_send(AppEvent::PersistMessage {
                             msg,
                             usage: None,
@@ -195,7 +202,7 @@ impl Agent {
     }
 
     /// 流式聊天完成后，同步消息历史
-    pub fn sync_messages(&mut self, messages: Vec<CompatibleChatCompletionRequestMessage>) {
+    pub fn sync_messages(&mut self, messages: Vec<SharedMessage>) {
         self.messages = messages;
     }
 
@@ -203,15 +210,24 @@ impl Agent {
     pub fn messages_excluding_system_count(&self) -> usize {
         self.messages
             .iter()
-            .filter(|m| !matches!(m, CompatibleChatCompletionRequestMessage::System(_)))
+            .filter(|m| {
+                !matches!(
+                    m.as_ref(),
+                    CompatibleChatCompletionRequestMessage::System(_)
+                )
+            })
             .count()
     }
 
     /// 应用压缩结果：保留 System 消息，替换其余为摘要 User 消息
     pub fn apply_compaction(&mut self, summary: &str) {
-        self.messages
-            .retain(|m| matches!(m, CompatibleChatCompletionRequestMessage::System(_)));
-        self.messages.push(
+        self.messages.retain(|m| {
+            matches!(
+                m.as_ref(),
+                CompatibleChatCompletionRequestMessage::System(_)
+            )
+        });
+        self.messages.push(Arc::new(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text(format!(
                     "[Context Summary]\n{summary}"
@@ -219,7 +235,7 @@ impl Agent {
                 name: None,
             }
             .into(),
-        );
+        ));
     }
 
     /// 启动压缩 LLM 调用（无工具），流式输出摘要。
@@ -233,10 +249,15 @@ impl Agent {
         let model = self.model.clone();
         let max_tokens = self.max_tokens;
 
-        let conversation: Vec<CompatibleChatCompletionRequestMessage> = self
+        let conversation: Vec<SharedMessage> = self
             .messages
             .iter()
-            .filter(|m| !matches!(m, CompatibleChatCompletionRequestMessage::System(_)))
+            .filter(|m| {
+                !matches!(
+                    m.as_ref(),
+                    CompatibleChatCompletionRequestMessage::System(_)
+                )
+            })
             .cloned()
             .collect();
 
@@ -244,17 +265,19 @@ impl Agent {
             return Err("Not enough messages to compact".into());
         }
 
-        let compact_system = ChatCompletionRequestSystemMessage {
-            content: ChatCompletionRequestSystemMessageContent::Text(
-                crate::prompts::COMPACT.to_string(),
-            ),
-            name: None,
-        }
-        .into();
+        let compact_system: SharedMessage = Arc::new(
+            ChatCompletionRequestSystemMessage {
+                content: ChatCompletionRequestSystemMessageContent::Text(
+                    crate::prompts::COMPACT.to_string(),
+                ),
+                name: None,
+            }
+            .into(),
+        );
 
         let mut compact_messages = vec![compact_system];
         compact_messages.extend(conversation);
-        compact_messages.push(
+        compact_messages.push(Arc::new(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text(
                     "请总结以上对话".to_string(),
@@ -262,7 +285,7 @@ impl Agent {
                 name: None,
             }
             .into(),
-        );
+        ));
 
         let tx = event_tx.clone();
         self.cancel.store(false, Ordering::Relaxed);
@@ -338,7 +361,7 @@ impl Agent {
 struct AgentStreamState {
     client: Client<OpenAIConfig>,
     tool_registry: ToolRegistry,
-    messages: Vec<CompatibleChatCompletionRequestMessage>,
+    messages: Vec<SharedMessage>,
     model: String,
     max_tokens: u32,
     plan_mode: bool,
@@ -353,7 +376,8 @@ impl AgentStreamState {
         // 规划模式下，把只读提示词注入到最后一条用户消息（在克隆上操作，不污染存储）。
         if self.plan_mode {
             for msg in messages.iter_mut().rev() {
-                if let CompatibleChatCompletionRequestMessage::User(u) = msg {
+                let msg_mut = Arc::make_mut(msg);
+                if let CompatibleChatCompletionRequestMessage::User(u) = msg_mut {
                     if let ChatCompletionRequestUserMessageContent::Text(t) = &mut u.content {
                         t.push_str("\n\n");
                         t.push_str(PLAN_MODE_PROMPT);
@@ -380,12 +404,12 @@ impl AgentStreamState {
 
 fn emit_persist_message(
     event_tx: &EventTx,
-    msg: &CompatibleChatCompletionRequestMessage,
+    msg: &SharedMessage,
     usage: Option<(u32, u32)>,
     display: Option<String>,
 ) {
     let _ = event_tx.try_send(AppEvent::PersistMessage {
-        msg: msg.clone(),
+        msg: Arc::clone(msg),
         usage,
         display,
     });
@@ -529,9 +553,9 @@ async fn run_stream_loop(
                 })
                 .collect();
 
-            let pushed_msg: CompatibleChatCompletionRequestMessage = {
+            let pushed_msg: SharedMessage = {
                 let mut state = state.lock().map_err(|e| e.to_string())?;
-                let msg: CompatibleChatCompletionRequestMessage =
+                let msg: SharedMessage = Arc::new(
                     CompatibleChatCompletionRequestAssistantMessage {
                         base: ChatCompletionRequestAssistantMessage {
                             content: if ai_message.is_empty() {
@@ -550,8 +574,9 @@ async fn run_stream_loop(
                             Some(ai_reasoning)
                         },
                     }
-                    .into();
-                state.messages.push(msg.clone());
+                    .into(),
+                );
+                state.messages.push(Arc::clone(&msg));
                 if let Some((pt, ct)) = last_usage {
                     all_usages.push(MessageUsage {
                         prompt_tokens: pt,
@@ -574,9 +599,9 @@ async fn run_stream_loop(
                 return Ok(());
             }
         } else {
-            let pushed_msg: CompatibleChatCompletionRequestMessage = {
+            let pushed_msg: SharedMessage = {
                 let mut state = state.lock().map_err(|e| e.to_string())?;
-                let msg: CompatibleChatCompletionRequestMessage =
+                let msg: SharedMessage = Arc::new(
                     CompatibleChatCompletionRequestAssistantMessage {
                         base: ChatCompletionRequestAssistantMessage {
                             content: Some(ChatCompletionRequestAssistantMessageContent::Text(
@@ -590,8 +615,9 @@ async fn run_stream_loop(
                             Some(ai_reasoning)
                         },
                     }
-                    .into();
-                state.messages.push(msg.clone());
+                    .into(),
+                );
+                state.messages.push(Arc::clone(&msg));
                 if let Some((pt, ct)) = last_usage {
                     all_usages.push(MessageUsage {
                         prompt_tokens: pt,
@@ -611,8 +637,8 @@ async fn run_stream_loop(
     }
 
     let final_messages = {
-        let state = state.lock().map_err(|e| e.to_string())?;
-        state.messages.clone()
+        let mut state = state.lock().map_err(|e| e.to_string())?;
+        std::mem::take(&mut state.messages)
     };
     let _ = event_tx.try_send(AppEvent::AgentComplete {
         messages: final_messages,
@@ -646,11 +672,11 @@ async fn push_partial_assistant(
         })
         .collect();
 
-    let pushed_msgs: Vec<CompatibleChatCompletionRequestMessage> = {
+    let pushed_msgs: Vec<SharedMessage> = {
         let mut state = state.lock().map_err(|e| e.to_string())?;
         let mut msgs = Vec::new();
 
-        let assistant_msg: CompatibleChatCompletionRequestMessage =
+        let assistant_msg: SharedMessage = Arc::new(
             CompatibleChatCompletionRequestAssistantMessage {
                 base: ChatCompletionRequestAssistantMessage {
                     content: if ai_message.is_empty() && tool_calls.is_empty() {
@@ -677,23 +703,25 @@ async fn push_partial_assistant(
                     Some(ai_reasoning.to_string())
                 },
             }
-            .into();
-        state.messages.push(assistant_msg.clone());
+            .into(),
+        );
+        state.messages.push(Arc::clone(&assistant_msg));
         msgs.push(assistant_msg);
 
         for tc in &tool_calls {
             if let ChatCompletionMessageToolCalls::Function(f) = tc
                 && !f.id.is_empty()
             {
-                let tool_msg: CompatibleChatCompletionRequestMessage =
+                let tool_msg: SharedMessage = Arc::new(
                     ChatCompletionRequestToolMessage {
                         content: ChatCompletionRequestToolMessageContent::Text(
                             "Tool execution aborted".to_string(),
                         ),
                         tool_call_id: f.id.clone(),
                     }
-                    .into();
-                state.messages.push(tool_msg.clone());
+                    .into(),
+                );
+                state.messages.push(Arc::clone(&tool_msg));
                 msgs.push(tool_msg);
             }
         }
@@ -717,7 +745,8 @@ async fn finalize_cancelled(
 
         // 检查最后一条 assistant 消息是否有 orphaned tool_calls（缺少对应的 tool result）
         let mut orphaned_tool_msgs = Vec::new();
-        if let Some(CompatibleChatCompletionRequestMessage::Assistant(a)) = guard.messages.last()
+        if let Some(msg) = guard.messages.last()
+            && let CompatibleChatCompletionRequestMessage::Assistant(a) = msg.as_ref()
             && let Some(tool_calls) = &a.base.tool_calls
             && !tool_calls.is_empty()
         {
@@ -726,27 +755,28 @@ async fn finalize_cancelled(
                     ChatCompletionMessageToolCalls::Function(f) => f.id.clone(),
                     ChatCompletionMessageToolCalls::Custom(c) => c.id.clone(),
                 };
-                let tool_msg: CompatibleChatCompletionRequestMessage =
+                let tool_msg: SharedMessage = Arc::new(
                     ChatCompletionRequestToolMessage {
                         content: ChatCompletionRequestToolMessageContent::Text(
                             "Tool execution aborted".to_string(),
                         ),
                         tool_call_id: id,
                     }
-                    .into();
+                    .into(),
+                );
                 orphaned_tool_msgs.push(tool_msg);
             }
         }
         for msg in &orphaned_tool_msgs {
-            guard.messages.push(msg.clone());
+            guard.messages.push(Arc::clone(msg));
         }
 
         let needs_assistant = !matches!(
-            guard.messages.last(),
+            guard.messages.last().map(|m| m.as_ref()),
             Some(CompatibleChatCompletionRequestMessage::Assistant(_))
         );
         let pending = if needs_assistant {
-            let msg: CompatibleChatCompletionRequestMessage =
+            let msg: SharedMessage = Arc::new(
                 CompatibleChatCompletionRequestAssistantMessage {
                     base: ChatCompletionRequestAssistantMessage {
                         content: Some(ChatCompletionRequestAssistantMessageContent::Text(
@@ -756,17 +786,22 @@ async fn finalize_cancelled(
                     },
                     reasoning_content: None,
                 }
-                .into();
-            guard.messages.push(msg.clone());
+                .into(),
+            );
+            guard.messages.push(Arc::clone(&msg));
             Some(msg)
         } else {
             None
         };
-        (guard.messages.clone(), pending, orphaned_tool_msgs)
+        (
+            std::mem::take(&mut guard.messages),
+            pending,
+            orphaned_tool_msgs,
+        )
     };
     for msg in &orphaned_tool_msgs {
         emit_persist_message(event_tx, msg, None, None);
-        if let CompatibleChatCompletionRequestMessage::Tool(t) = msg {
+        if let CompatibleChatCompletionRequestMessage::Tool(t) = msg.as_ref() {
             let result_text = match &t.content {
                 ChatCompletionRequestToolMessageContent::Text(t) => t.clone(),
                 _ => String::new(),
@@ -809,17 +844,18 @@ async fn handle_tool_calls_stream(
                 display: None,
                 subagent_name: None,
             });
-            let pushed_msg: CompatibleChatCompletionRequestMessage = {
+            let pushed_msg: SharedMessage = {
                 let mut state = state.lock().map_err(|e| e.to_string())?;
-                let msg: CompatibleChatCompletionRequestMessage =
+                let msg: SharedMessage = Arc::new(
                     ChatCompletionRequestToolMessage {
                         content: ChatCompletionRequestToolMessageContent::Text(
                             "Tool execution aborted".to_string(),
                         ),
                         tool_call_id: id.clone(),
                     }
-                    .into();
-                state.messages.push(msg.clone());
+                    .into(),
+                );
+                state.messages.push(Arc::clone(&msg));
                 msg
             };
             emit_persist_message(event_tx, &pushed_msg, None, None);
@@ -878,14 +914,16 @@ async fn handle_tool_calls_stream(
             subagent_name: None,
         });
 
-        let pushed_msg: CompatibleChatCompletionRequestMessage = {
+        let pushed_msg: SharedMessage = {
             let mut state = state.lock().map_err(|e| e.to_string())?;
-            let msg: CompatibleChatCompletionRequestMessage = ChatCompletionRequestToolMessage {
-                content: ChatCompletionRequestToolMessageContent::Text(result),
-                tool_call_id: id.clone(),
-            }
-            .into();
-            state.messages.push(msg.clone());
+            let msg: SharedMessage = Arc::new(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(result),
+                    tool_call_id: id.clone(),
+                }
+                .into(),
+            );
+            state.messages.push(Arc::clone(&msg));
             msg
         };
         emit_persist_message(event_tx, &pushed_msg, None, display);
@@ -907,22 +945,22 @@ mod tests {
         let mut agent = make_test_agent();
         agent.set_system_prompt("You are test");
 
-        agent.messages.push(
+        agent.messages.push(Arc::new(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text("hello".into()),
                 name: None,
             }
             .into(),
-        );
+        ));
 
         agent.apply_compaction("这是摘要");
 
         assert_eq!(agent.messages.len(), 2);
         assert!(matches!(
-            agent.messages[0],
+            agent.messages[0].as_ref(),
             CompatibleChatCompletionRequestMessage::System(_)
         ));
-        match &agent.messages[1] {
+        match agent.messages[1].as_ref() {
             CompatibleChatCompletionRequestMessage::User(u) => {
                 let text = match &u.content {
                     ChatCompletionRequestUserMessageContent::Text(t) => t.clone(),
@@ -941,7 +979,7 @@ mod tests {
         agent.apply_compaction("摘要");
         assert_eq!(agent.messages.len(), 1);
         assert!(matches!(
-            agent.messages[0],
+            agent.messages[0].as_ref(),
             CompatibleChatCompletionRequestMessage::User(_)
         ));
     }
@@ -952,25 +990,25 @@ mod tests {
         agent.set_system_prompt("sys");
         agent.apply_compaction("摘要");
 
-        agent.messages.push(
+        agent.messages.push(Arc::new(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text("新问题".into()),
                 name: None,
             }
             .into(),
-        );
+        ));
 
         assert_eq!(agent.messages.len(), 3);
         assert!(matches!(
-            agent.messages[0],
+            agent.messages[0].as_ref(),
             CompatibleChatCompletionRequestMessage::System(_)
         ));
         assert!(matches!(
-            agent.messages[1],
+            agent.messages[1].as_ref(),
             CompatibleChatCompletionRequestMessage::User(_)
         ));
         assert!(matches!(
-            agent.messages[2],
+            agent.messages[2].as_ref(),
             CompatibleChatCompletionRequestMessage::User(_)
         ));
     }

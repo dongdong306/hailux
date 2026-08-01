@@ -12,6 +12,10 @@ use async_openai::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::sync::Arc;
+
+/// 共享消息类型：Arc 包裹的 Compatible 消息，使得 Vec 克隆变为 O(n) 指针拷贝。
+pub type SharedMessage = Arc<CompatibleChatCompletionRequestMessage>;
 
 /// 思考模式配置
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -129,7 +133,7 @@ pub struct CompatibleChatCompletionRequestAssistantMessage {
 /// 自定义聊天完成请求，序列化时替换 messages 字段以支持扩展消息类型
 pub struct CompatibleCreateChatCompletionRequest {
     base: CreateChatCompletionRequest,
-    custom_messages: Vec<CompatibleChatCompletionRequestMessage>,
+    custom_messages: Vec<SharedMessage>,
     thinking: Option<ThinkingConfig>,
     extra: Map<String, Value>,
 }
@@ -166,7 +170,7 @@ impl Serialize for CompatibleCreateChatCompletionRequest {
 #[allow(dead_code)]
 pub struct CompatibleCreateChatCompletionRequestArgs {
     base: CreateChatCompletionRequestArgs,
-    custom_messages: Vec<CompatibleChatCompletionRequestMessage>,
+    custom_messages: Vec<SharedMessage>,
     thinking: Option<ThinkingConfig>,
     extra: Map<String, Value>,
 }
@@ -201,7 +205,7 @@ impl CompatibleCreateChatCompletionRequestArgs {
         self
     }
 
-    pub fn messages(&mut self, messages: Vec<CompatibleChatCompletionRequestMessage>) -> &mut Self {
+    pub fn messages(&mut self, messages: Vec<SharedMessage>) -> &mut Self {
         self.custom_messages = messages;
         self
     }
@@ -255,7 +259,7 @@ impl CompatibleCreateChatCompletionRequestArgs {
         let base = self.base.build()?;
         Ok(CompatibleCreateChatCompletionRequest {
             base,
-            custom_messages: self.custom_messages.clone(),
+            custom_messages: std::mem::take(&mut self.custom_messages),
             thinking: self.thinking.clone(),
             extra: self.extra.clone(),
         })
