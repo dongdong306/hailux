@@ -127,6 +127,7 @@ fn default_context_window() -> u32 {
 // ── 可选模型条目（供 UI 使用）─────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ModelEntry {
     pub provider_id: String,
     pub provider_name: String,

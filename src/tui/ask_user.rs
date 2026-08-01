@@ -5,7 +5,7 @@ use ratatui::widgets::BorderType;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
-use super::app::AppState;
+use super::app::types::AppState;
 use super::event::{self, AppEvent};
 use super::model_picker::wrap_input;
 
