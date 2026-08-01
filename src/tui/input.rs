@@ -326,7 +326,7 @@ impl InputHandler {
     // ===== Visual info for rendering =====
 
     pub fn compute_visual_info(&self) -> (u16, u16, u16) {
-        let prefix_text = if self.is_processing { "⠋ " } else { "▌ " };
+        let prefix_text = if self.is_processing { "⠋ " } else { "> " };
         let prefix_w: u16 = prefix_text.width() as u16;
         let before_cursor = &self.text[..self.cursor.min(self.text.len())];
 
@@ -380,7 +380,7 @@ impl InputHandler {
     // ===== Internal helpers =====
 
     fn text_avail_width(&self) -> u16 {
-        let prefix = if self.is_processing { "⠋ " } else { "▌ " };
+        let prefix = if self.is_processing { "⠋ " } else { "> " };
         let prefix_w = prefix.width() as u16;
         self.last_area_width.saturating_sub(prefix_w).max(1)
     }

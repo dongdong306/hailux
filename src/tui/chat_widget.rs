@@ -9,8 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::types::Message;
 use super::command;
 use super::history_cell::{
-    CHAT_FG, CHAT_FILE_MENTION, CHAT_PASTE, CHAT_PLACEHOLDER, CHAT_PREFIX_BLUE, HistoryCell,
-    INPUT_BG, PLAN_BADGE,
+    CHAT_FG, CHAT_FILE_MENTION, CHAT_PASTE, CHAT_PLACEHOLDER, HistoryCell, PLAN_BADGE,
 };
 use super::input::ElementKind;
 
@@ -162,21 +161,31 @@ impl<'a> ChatWidget<'a> {
         let [
             messages_area,
             timing_area,
-            _timing_gap,
             input_area,
-            _gap_area,
             status_area,
         ] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Length(self.input_area_height),
-            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(area);
 
-        let max_hide = self.render_messages(messages_area, buf);
+        let indent = 1u16;
+        let messages_area = Rect::new(
+            messages_area.x + indent,
+            messages_area.y,
+            messages_area.width.saturating_sub(indent),
+            messages_area.height,
+        );
+        let timing_area = Rect::new(
+            timing_area.x + indent,
+            timing_area.y,
+            timing_area.width.saturating_sub(indent),
+            timing_area.height,
+        );
+
+        let max_hide = self.render_messages(messages_area, buf, indent);
         self.render_timing(timing_area, buf);
         self.render_input(input_area, buf);
         self.render_status(status_area, buf);
@@ -192,7 +201,7 @@ impl<'a> ChatWidget<'a> {
         RenderResult { max_hide }
     }
 
-    fn render_messages(&mut self, messages_area: Rect, buf: &mut Buffer) -> u16 {
+    fn render_messages(&mut self, messages_area: Rect, buf: &mut Buffer, indent: u16) -> u16 {
         let scrollbar_width: u16 = 2;
         let text_width = messages_area.width.saturating_sub(scrollbar_width);
         let visible_height = messages_area.height;
@@ -223,6 +232,8 @@ impl<'a> ChatWidget<'a> {
         let mut all_lines: Vec<Line<'static>> =
             Vec::with_capacity(win_end.saturating_sub(win_start));
 
+        let header_total = segments.first().map(|&(_, n)| n + 1).unwrap_or(0);
+
         let mut pos = 0usize;
         for &(key, cell_count) in &segments {
             // cell lines
@@ -243,6 +254,14 @@ impl<'a> ChatWidget<'a> {
             pos = cell_end + 1;
         }
 
+        // Lines belonging to the header cell (no indent); rest are indented
+        let header_visible = if win_start < header_total {
+            header_total.min(win_end) - win_start
+        } else {
+            0
+        }
+        .min(all_lines.len());
+
         let text_area = Rect::new(messages_area.x, messages_area.y, text_width, visible_height);
 
         for line in all_lines.iter_mut() {
@@ -256,6 +275,24 @@ impl<'a> ChatWidget<'a> {
 
         let messages_paragraph = Paragraph::new(all_lines.clone());
         messages_paragraph.render(text_area, buf);
+
+        // Render header lines without indent (align with input box border)
+        if header_visible > 0 {
+            let header_area = Rect::new(
+                text_area.x.saturating_sub(indent),
+                text_area.y,
+                text_area.width + indent,
+                text_area.height,
+            );
+            let header_lines = &all_lines[..header_visible.min(all_lines.len())];
+            if !header_lines.is_empty() {
+                Clear.render(
+                    Rect::new(header_area.x, header_area.y, header_area.width, header_lines.len() as u16),
+                    buf,
+                );
+                Paragraph::new(header_lines.to_vec()).render(header_area, buf);
+            }
+        }
 
         // 将 diff 行的背景色延伸到行尾，避免 ratatui 宽字符 trailing cell
         // diff 不更新背景色（PR#2308）导致滚动残留
@@ -314,40 +351,48 @@ impl<'a> ChatWidget<'a> {
     }
 
     fn render_input(&self, input_area: Rect, buf: &mut Buffer) {
-        let input_render_area = Rect::new(
-            input_area.x,
-            input_area.y + 1,
-            input_area.width,
-            input_area.height.saturating_sub(1),
-        );
-        let prefix_text = "▌ ".to_string();
+        let border_color = if self.is_processing {
+            Color::DarkGray
+        } else if self.plan_mode {
+            PLAN_BADGE
+        } else {
+            Color::Rgb(100, 100, 100)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_color));
+        let input_render_area = block.inner(input_area);
+        block.render(input_area, buf);
+
+        let prefix_text = "> ".to_string();
         let prefix_w: u16 = prefix_text.width() as u16;
         let input_prefix = Span::styled(
             prefix_text,
             if self.is_processing {
-                Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+                Style::default().fg(Color::DarkGray)
             } else if self.plan_mode {
-                Style::default().fg(PLAN_BADGE).bg(INPUT_BG)
+                Style::default().fg(PLAN_BADGE)
             } else {
-                Style::default().fg(CHAT_PREFIX_BLUE).bg(INPUT_BG)
+                Style::default().fg(Color::Rgb(120, 120, 120))
             },
         );
         let area_w = input_render_area.width;
 
         let text_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+            Style::default().fg(Color::DarkGray)
         } else {
-            Style::default().fg(CHAT_FG).bg(INPUT_BG)
+            Style::default().fg(CHAT_FG)
         };
         let element_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+            Style::default().fg(Color::DarkGray)
         } else {
-            Style::default().fg(CHAT_PASTE).bg(INPUT_BG)
+            Style::default().fg(CHAT_PASTE)
         };
         let file_mention_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+            Style::default().fg(Color::DarkGray)
         } else {
-            Style::default().fg(CHAT_FILE_MENTION).bg(INPUT_BG)
+            Style::default().fg(CHAT_FILE_MENTION)
         };
 
         if self.input_buffer.is_empty() && !self.is_processing {
@@ -355,11 +400,10 @@ impl<'a> ChatWidget<'a> {
                 input_prefix,
                 Span::styled(
                     "输入消息... (Shift+Enter 换行)",
-                    Style::default().fg(CHAT_PLACEHOLDER).bg(INPUT_BG),
+                    Style::default().fg(CHAT_PLACEHOLDER),
                 ),
             ]));
             input_paragraph.render(input_render_area, buf);
-            self.paint_input_panel(input_area, buf);
             return;
         }
 
@@ -382,7 +426,7 @@ impl<'a> ChatWidget<'a> {
                     visual_lines.push(Line::from(vec![input_prefix.clone()]));
                 } else {
                     visual_lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default().bg(INPUT_BG)),
+                        Span::raw("  "),
                         Span::styled(String::new(), text_style),
                     ]));
                 }
@@ -428,7 +472,7 @@ impl<'a> ChatWidget<'a> {
                     let mut line_spans = if is_first_chunk {
                         vec![input_prefix.clone()]
                     } else {
-                        vec![Span::styled("  ", Style::default().bg(INPUT_BG))]
+                        vec![Span::raw("  ")]
                     };
                     line_spans.append(&mut spans);
                     visual_lines.push(Line::from(line_spans));
@@ -448,7 +492,7 @@ impl<'a> ChatWidget<'a> {
                 let mut line_spans = if is_first_chunk {
                     vec![input_prefix.clone()]
                 } else {
-                    vec![Span::styled("  ", Style::default().bg(INPUT_BG))]
+                    vec![Span::raw("  ")]
                 };
                 line_spans.append(&mut spans);
                 visual_lines.push(Line::from(line_spans));
@@ -461,33 +505,6 @@ impl<'a> ChatWidget<'a> {
 
         let input_paragraph = Paragraph::new(visual_lines).scroll((self.input_scroll_row, 0));
         input_paragraph.render(input_render_area, buf);
-        self.paint_input_panel(input_area, buf);
-    }
-
-    /// 将输入区（含顶部间隔行）中未着色的 cell 统一涂上 INPUT_BG，
-    /// 并在左侧空白行补画 ▌ 标记，使蓝色竖条贯穿整个面板高度
-    fn paint_input_panel(&self, area: Rect, buf: &mut Buffer) {
-        let bar_color = if self.is_processing {
-            Color::DarkGray
-        } else if self.plan_mode {
-            PLAN_BADGE
-        } else {
-            CHAT_PREFIX_BLUE
-        };
-        for y in area.y..area.y.saturating_add(area.height) {
-            for x in area.x..area.right() {
-                let cell = &mut buf[(x, y)];
-                if cell.bg == Color::Reset {
-                    cell.set_bg(INPUT_BG);
-                }
-            }
-            let left = &mut buf[(area.x, y)];
-            if left.symbol() == " " {
-                left.set_char('▌');
-                left.set_fg(bar_color);
-                left.set_bg(INPUT_BG);
-            }
-        }
     }
 
     /// 渲染状态横幅（输入框上方）
@@ -598,10 +615,10 @@ impl<'a> ChatWidget<'a> {
                 .map(|cmd| cmd.description.width())
                 .max()
                 .unwrap_or(0);
-        let popup_width = (content_width as u16 + 4).min(full_area.width);
+        let popup_width = (content_width as u16 + 5).min(full_area.width);
         let popup_height = suggestion_count + 2; // +2 为上下边框
 
-        let popup_x = full_area.x + 1;
+        let popup_x = full_area.x;
         let popup_y = input_area.y.saturating_sub(popup_height);
 
         let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
@@ -639,6 +656,7 @@ impl<'a> ChatWidget<'a> {
                 }
                 let desc_text = format!("  {}", cmd.description);
                 Line::from(vec![
+                    Span::raw(" "),
                     Span::styled(cmd_text, name_style),
                     Span::styled(desc_text, style),
                 ])
@@ -666,7 +684,7 @@ impl<'a> ChatWidget<'a> {
         let popup_width = (content_width as u16 + 4).min(full_area.width);
         let popup_height = count + 2;
 
-        let popup_x = full_area.x + 1;
+        let popup_x = full_area.x;
         let popup_y = input_area.y.saturating_sub(popup_height);
 
         let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);

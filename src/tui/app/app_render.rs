@@ -43,7 +43,7 @@ impl App {
         }
 
         let input_text = self.input.text().to_string();
-        self.input.update_area_width(area.width);
+        self.input.update_area_width(area.width.saturating_sub(2));
         let (total_visual_rows, cursor_visual_row, cursor_visual_col) =
             self.input.compute_visual_info();
 
@@ -133,7 +133,7 @@ impl App {
         };
 
         if show_cursor {
-            let gap_height: u16 = 1;
+            let gap_height: u16 = 0;
             let status_height: u16 = 1;
             let input_content_y = area.y
                 + area
@@ -142,10 +142,10 @@ impl App {
                 + 1;
 
             let display_row = cursor_visual_row.saturating_sub(self.input.input_scroll_row());
-            let display_col = cursor_visual_col.min(area.width.saturating_sub(1));
+            let display_col = cursor_visual_col.min(area.width.saturating_sub(3));
 
             frame.set_cursor_position((
-                area.x + display_col,
+                area.x + 1 + display_col,
                 input_content_y + display_row.min(visible_input_rows - 1),
             ));
         }
