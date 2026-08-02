@@ -21,7 +21,6 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          release-type: rust
           config-file: .github/release-please-config.json
 
   format-changelog:
