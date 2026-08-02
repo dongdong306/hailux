@@ -1,6 +1,6 @@
 [package]
 name = "hailux"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.96.0"
 description = "一个基于终端的 AI 编程助手，支持流式对话、工具调用、MCP 协议与可扩展技能系统"
