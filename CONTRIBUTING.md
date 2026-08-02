@@ -63,3 +63,20 @@ cargo run
 - 提交 [Issue](https://github.com/dongdong306/hailux/issues) 描述 Bug 或提出功能建议
 - 请使用 Issue 模板，提供尽可能详细的信息
 
+## 发布流程（release-please）
+
+本项目通过 [release-please](https://github.com/googleapis/release-please) 自动生成 release PR 与 GitHub Release，配置见：
+
+- `.github/release-please-config.json` — 分区映射（`changelog-sections`）等配置
+- `.release-please-manifest.json` — 各包当前版本基线
+- `.github/workflows/release-please.yml` — 触发工作流
+
+**日常无需手动修改 manifest**：合并 release PR 时，release-please 会自动把新版本写回 `.release-please-manifest.json` 并打 tag，版本基线始终自动推进。
+
+需要手动修正 manifest 的常见场景：
+
+- 首次从 simple 模式（`release-type`）切换到 manifest 模式时，manifest 缺失或为空会导致 release-please 从 `0.1.0` 重新开始——此时需把 manifest 钉为当前已发布的最高 tag 版本
+- 误合并/回滚了 release PR，需要重新设定基线
+
+注意：工作流中**不要同时设置 `release-type` 与 `config-file`**，否则 action 会走 simple 模式并忽略配置文件（`changelog-sections` 等自定义分区不生效）。
+
