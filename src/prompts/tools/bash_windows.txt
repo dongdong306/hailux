@@ -7,7 +7,7 @@ This tool is for terminal operations (such as git, cargo, npm, etc.), not for fi
 Before executing a command, follow these steps:
 
 1. Directory verification:
-   - If the command will create new directories or files, first use ls to verify the parent directory exists and is in the correct location
+   - If the command will create new directories or files, first use the read tool to verify the parent directory exists and is in the correct location
    - For example, before running "mkdir foo/bar", check that "foo" exists
 
 2. Path quoting:
@@ -18,14 +18,16 @@ Before executing a command, follow these steps:
 3. Command execution:
    - After ensuring proper quoting, execute the command and capture the output
 
+IMPORTANT — Prefer dedicated tools over PowerShell cmdlets or aliases for file operations. Avoid using: ls, dir, Get-ChildItem, Get-Content, cat, type, Set-Content, Out-File, Select-String, Write-Output. Use the dedicated tools instead:
+    - List directory / find files: use glob (avoid ls, dir, Get-ChildItem — including -Recurse, PowerShell's equivalent of find)
+    - Content search: use the grep tool (avoid Select-String)
+    - Read file: use read (avoid Get-Content, cat, or type)
+    - Edit file: use edit (avoid string replacement scripts)
+    - Write file: use write (avoid Set-Content or Out-File)
+    - Output text to the user: output directly (avoid Write-Output)
+Using Write-Output/echo for terminal purposes (e.g. inspecting a variable or $LASTEXITCODE) is fine — the guidance only covers file writes and communicating with the user.
+
 Usage notes:
-  - Unless explicitly instructed or required by the task, avoid using PowerShell file operation commands (such as Get-Content, Set-Content, Select-String, Get-ChildItem, Write-Output, etc.). Always prefer dedicated tools:
-    - File search: use glob (not Get-ChildItem or ls)
-    - Content search: use grep (not Select-String)
-    - Read file: use read (not Get-Content)
-    - Edit file: use edit (not string replacement scripts)
-    - Write file: use write (not Set-Content / Out-File)
-    - Output text: output directly (not Write-Output)
   - When issuing multiple commands:
     - If commands are independent and can run in parallel, call the Bash tool multiple times in a single message. For example, you can call the Bash tool twice in parallel to run git status and git diff.
     - Use ; only when you need to run commands sequentially and don't care if earlier commands fail
