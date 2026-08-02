@@ -7,7 +7,7 @@ This tool is for terminal operations (such as git, cargo, npm, etc.), not for fi
 Before executing a command, follow these steps:
 
 1. Directory verification:
-   - If the command will create new directories or files, first use ls to verify the parent directory exists and is in the correct location
+   - If the command will create new directories or files, first use the read tool to verify the parent directory exists and is in the correct location
    - For example, before running "mkdir foo/bar", check that "foo" exists
 
 2. Path quoting:
@@ -18,14 +18,16 @@ Before executing a command, follow these steps:
 3. Command execution:
    - After ensuring proper quoting, execute the command and capture the output
 
+IMPORTANT — Prefer dedicated tools over shell commands for file operations. Avoid using: ls, find, cat, head, tail, grep, rg, sed, awk, echo, printf. Use the dedicated tools instead:
+    - List directory / find files: use glob (avoid ls or find)
+    - Content search: use the grep tool (avoid shell grep or rg)
+    - Read file: use read (avoid cat, head, or tail)
+    - Edit file: use edit (avoid sed or awk)
+    - Write file: use write (avoid echo > or cat <<EOF)
+    - Output text to the user: output directly (avoid echo or printf)
+Using echo/printf for terminal purposes (e.g. echo $? to check an exit code, feeding a pipeline) is fine — the guidance only covers file writes and communicating with the user.
+
 Usage notes:
-  - Unless explicitly instructed or required by the task, avoid using Bash with find, grep, cat, head, tail, sed, awk, or echo commands. Always prefer dedicated tools:
-    - File search: use glob (not find or ls)
-    - Content search: use grep (not grep or rg)
-    - Read file: use read (not cat/head/tail)
-    - Edit file: use edit (not sed/awk)
-    - Write file: use write (not echo > / cat <<EOF)
-    - Output text: output directly (not echo/printf)
   - When issuing multiple commands:
     - If commands are independent and can run in parallel, call the Bash tool multiple times in a single message. For example, you can call the Bash tool twice in parallel to run git status and git diff.
     - Use && to chain dependent commands, only running the second if the first succeeds

@@ -235,10 +235,6 @@ impl Tool for BashTool {
         "bash"
     }
 
-    fn allowed_in_plan_mode(&self) -> bool {
-        false
-    }
-
     fn description(&self) -> &str {
         crate::prompts::tools::BASH
     }
