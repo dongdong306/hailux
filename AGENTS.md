@@ -89,9 +89,12 @@ subagent delegation, and custom slash commands.
     Supports stdio (local subprocess) and http (remote) transports.
   - `client.rs` — Connects servers in background, registers their tools with the agent.
     `SharedMcpBackends` (`Arc<Mutex<Vec<McpToolBackend>>>`) is shared with `TaskTool` for subagent MCP access.
-- `storage/db.rs` — SQLite chat history at `~/.hailux/db/chat.db`. **Manual migrations**
-    (no sqlx macros or migration files) — schema created via `CREATE TABLE IF NOT EXISTS`
-    with `ALTER TABLE` column-add fallbacks for backward compat. Max pool connections = 1.
+- `storage/db.rs` — SQLite chat history at `~/.hailux/db/chat.db`. **Versioned migrations via
+    `sqlx::migrate!`** (`migrations/*.sql`, recorded in `_sqlx_migrations`). New schema changes =
+    add a new migration file, no hand-written fallbacks. `upgrade_legacy_schema()` is a one-time
+    bootstrap that only runs on pre-0.4.0 DBs (no `_sqlx_migrations` table yet) to backfill
+    columns with idempotent `pragma_table_info` checks; it can be removed after a few releases.
+    Max pool connections = 1.
     Supports subsessions (parent/child session relationships for subagent task isolation).
     `messages.compacted` + `sessions.compact_summary` support context compaction; active-context
     queries filter `compacted = 0`.

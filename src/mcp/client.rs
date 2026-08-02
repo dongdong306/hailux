@@ -343,11 +343,10 @@ fn build_header_map(
     Ok(map)
 }
 
-/// 将 MCP 服务器的工具适配为 hailux 的同步 `Tool` trait。
+/// 将 MCP 服务器的工具适配为 hailux 的异步 `Tool` trait。
 ///
-/// 工具调用是异步的（走传输层），而现有 `Tool` trait 是同步的。
-/// 沿用 `WebFetchTool` 的惯例，在 `execute` 内用 `block_in_place` + `block_on`
-/// 将异步调用桥接到同步上下文。
+/// 工具调用是异步的（走传输层），`execute_async` 直接 await
+/// `McpClient::call_tool` 完成调用。
 pub struct McpTool {
     registered_name: String,
     tool_name: String,
