@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "hailux"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-openai",
  "chrono",

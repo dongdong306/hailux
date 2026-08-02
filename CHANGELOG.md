@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/dongdong306/hailux/compare/v0.3.0...v0.4.0) (2026-08-02)
+
+
+### Improvements
+
+* add CLI non-interactive mode and modularize app.rs ([8127c6c](https://github.com/dongdong306/hailux/commit/8127c6c1d01eed2aa9191b62cefee5b5a667f7b5))
+
+
+### Bugfixes
+
+* gate edit/write/bash tools in plan mode ([8fc8f26](https://github.com/dongdong306/hailux/commit/8fc8f26814c71d13dcd7d1dbaaeab6a1e33ea2d9))
+* pin release-please manifest to current version 0.3.0 ([abcf1b8](https://github.com/dongdong306/hailux/commit/abcf1b8412d5392578f78279b7d45298bb5fabdc))
+
+
+### Performance
+
+* store messages as Vec&lt;Arc&lt;Message&gt;&gt; to eliminate deep copies ([0f66037](https://github.com/dongdong306/hailux/commit/0f66037fd1d3d5c7410db272c8026d0a37eec62c))
+
+
+### CI
+
+* enable manifest-based release-please config ([8b8290b](https://github.com/dongdong306/hailux/commit/8b8290b5a9ca999ccea1a446afe2a756e57234a9))
+
+
+### Refactor
+
+* allow bash in plan mode and strengthen tool-guidance prompts ([5703c8e](https://github.com/dongdong306/hailux/commit/5703c8e00a8c848823ad0a9d9c56cbda851c7981))
+* extract cancellation poll interval into named constant ([8ef8293](https://github.com/dongdong306/hailux/commit/8ef82935e9d1c76e155488a5098164decab38153))
+* make tool execution fully async and drop sync execute path ([c9b7c02](https://github.com/dongdong306/hailux/commit/c9b7c02fb1ea937103219f9937cf41aa109b7924))
+* redesign TUI input box with rounded border and update message styling ([9725130](https://github.com/dongdong306/hailux/commit/9725130e7e46f3d7779bd631d63cd68d5abe2d0b))
+* switch to sqlx versioned migrations and update docs ([6673b96](https://github.com/dongdong306/hailux/commit/6673b96f747851e580ac8fe7447ba8f37d56b120))
+
+
+### Documentation
+
+* document release-please manifest workflow ([474246e](https://github.com/dongdong306/hailux/commit/474246e2596a65fcab4478009baba2736ffd60a1))
+
 ## [0.3.0](https://github.com/dongdong306/hailux/compare/v0.2.0...v0.3.0) (2026-08-01)
 
 
