@@ -25,7 +25,7 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "fs", "process", "io-std", "time"] }
 rmcp = { version = "2.1", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 http = "1"
-sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite-bundled"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite-bundled", "migrate", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 chrono = "0.4"

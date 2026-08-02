@@ -1,6 +1,6 @@
 # hailux
 
-> 一个基于终端的 AI 编程助手，让你在命令行中完成代码编写、审查、重构和问题排查。基于 Rust 构建，单一二进制零依赖，低内存占用，开箱即用。
+> 一个基于终端的 AI 编程助手，让你在命令行中完成代码编写、审查、重构和问题排查。基于 Rust 构建，编译为单一可执行文件，无需安装任何外部运行时（Node、Python 等），低内存占用，开箱即用。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.96.0%2B-orange.svg)](https://www.rust-lang.org)
@@ -10,8 +10,8 @@
 
 - **流式对话** — 实时显示 AI 回复，支持推理过程展示
 - **工具调用** — 内置文件读写、搜索、Bash 执行、网页获取等工具，AI 可自主调用完成复杂任务
-- **MCP 协议支持** — 可接入任意MCP服务拓展能力
-- **SKILL系统** — 通过 SKILL.md 定义可复用的工作流和知识库，支持项目级和全局技能
+- **MCP 协议支持** — 可接入任意 MCP 服务拓展能力
+- **SKILL 系统** — 通过 SKILL.md 定义可复用的工作流和知识库，支持项目级和全局技能
 - **规划模式** — 切换到只读模式，让 AI 先分析后执行，避免误操作
 - **子代理** — 支持委派复杂任务给子代理并行处理
 - **会话管理** — 自动保存对话历史，支持多会话切换
@@ -78,6 +78,15 @@ hailux              # 在当前目录启动
 
 首次启动时会引导你选择模型并输入 API Key。
 
+### 使用示例
+
+```sh
+$ hailux
+> 这个项目的测试是怎么组织的？
+```
+
+hailux 会读取当前目录上下文（AGENTS.md、技能等），调用 `grep` / `read` 等工具定位测试代码后给出答案。涉及文件修改的任务（如"给 CLI 加个 --verbose 参数"），它会自动使用编辑工具修改代码并汇报 diff；输入 `@路径` 可强制引用指定文件内容。
+
 ## 使用指南
 
 ### 斜杠命令
@@ -93,7 +102,9 @@ hailux              # 在当前目录启动
 | `/mcp` | 查看 MCP 服务器状态 |
 | `/tasks` | 查看子代理执行情况 |
 | `/plan` | 切换规划模式（只读） |
-| `/exit` | 退出程序 |
+| `/compact` | 压缩对话历史（节省上下文） |
+| `/init` | 为当前目录生成 AGENTS.md 模板 |
+| `/exit` | 退出程序（`quit` / `q` 亦可） |
 
 ### 快捷键
 
@@ -140,7 +151,7 @@ args = ["/path/to/server.js"]
 url = "https://example.com/mcp"
 ```
 
-### SKILL系统
+### SKILL 系统
 
 在 `~/.hailux/skills/<name>/SKILL.md` 创建技能：
 
@@ -170,7 +181,9 @@ cargo fmt       # 格式化代码
 - **LLM 交互**：[async-openai](https://github.com/64bit/async-openai)
 - **MCP 客户端**：[rmcp](https://github.com/modelcontextprotocol/rust-sdk)
 - **存储**：SQLite ([sqlx](https://github.com/launchbadge/sqlx))
-- **Markdown**：[pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) + [syntect](https://github.com/trishume/syntect)
+- **Markdown 渲染**：[pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) + [syntect](https://github.com/trishume/syntect)
+- **代码搜索**：[grep](https://github.com/BurntSushi/ripgrep) + [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore)
+- **CLI**：[clap](https://github.com/clap-rs/clap)
 
 ## 许可证
 

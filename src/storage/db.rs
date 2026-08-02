@@ -121,6 +121,32 @@ impl ChatStorage {
     }
 
     async fn run_migration(&self) -> Result<()> {
+        // 旧版（< 0.4.0）用手写 ALTER TABLE fallback 演进 schema，没有 _sqlx_migrations 表。
+        // 检测到这类旧库时，先用幂等的 pragma 检查补齐缺失列（一次性引导），
+        // 之后所有 schema 演进交给版本化迁移（migrations/*.sql）管理。
+        let has_migrations_table: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let has_sessions: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        if has_migrations_table.0 == 0 && has_sessions.0 == 1 {
+            self.upgrade_legacy_schema().await?;
+        }
+
+        sqlx::migrate!("./migrations").run(&self.pool).await?;
+        Ok(())
+    }
+
+    /// 旧版（< 0.4.0）手写迁移的一次性引导：仅用于还没有 `_sqlx_migrations`
+    /// 表的旧库，幂等地补齐缺失列。新库和已迁移库不会走到这里。
+    async fn upgrade_legacy_schema(&self) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
@@ -146,7 +172,7 @@ impl ChatStorage {
                 reasoning_content TEXT,
                 prompt_tokens     INTEGER,
                 completion_tokens INTEGER,
-                created_at       TEXT NOT NULL
+                created_at        TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
@@ -918,6 +944,88 @@ mod tests {
         let session_id = storage.create_session("test-model", "/tmp").await.unwrap();
         let summary = storage.get_compact_summary(&session_id).await.unwrap();
         assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_db_upgrades_to_versioned_schema() {
+        // 模拟旧版（手写迁移时代）的库：没有 _sqlx_migrations 表，且缺列
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', work_dir TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', tool_calls TEXT, tool_call_id TEXT, created_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let storage = ChatStorage { pool };
+        storage.run_migration().await.unwrap();
+
+        // 版本化迁移表已建立
+        let has_migrations: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(has_migrations.0, 1);
+
+        // 缺失列已补齐
+        for col in [
+            "reasoning_content",
+            "prompt_tokens",
+            "completion_tokens",
+            "runtime_meta",
+            "think_ms",
+            "compacted",
+        ] {
+            let n: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?")
+                    .bind(col)
+                    .fetch_one(&storage.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(n.0, 1, "messages 缺少列 {col}");
+        }
+        for col in [
+            "prompt_tokens",
+            "completion_tokens",
+            "parent_id",
+            "compact_summary",
+        ] {
+            let n: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?")
+                    .bind(col)
+                    .fetch_one(&storage.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(n.0, 1, "sessions 缺少列 {col}");
+        }
+
+        // 升级后读写正常
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage
+            .append_message(&sid, &make_message(MessageRole::User, "hi"))
+            .await
+            .unwrap();
+        let msgs = storage.load_messages(&sid).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(!msgs[0].compacted);
+
+        // 再次启动（幂等）不报错
+        storage.run_migration().await.unwrap();
     }
 
     #[tokio::test]
