@@ -142,6 +142,10 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   Windows case-insensitive, `*`/`?`-wildcard matcher with literal special chars.
 - **Plan mode** (`/plan` or Shift+Tab): Filters out write/edit tools from the tool list
   and injects a read-only system-reminder into the last user message (on a clone, not stored).
+  `bash` stays available but is hard-gated: `permission/bash_readonly.rs::is_read_only_bash_command`
+  (fail-closed allowlist: git read subcommands, ls/cat/grep, PowerShell Get-* cmdlets, etc.;
+  redirects `>`/`>>` and unknown commands are denied) — non-read-only bash commands are rejected
+  directly in the agent permission check without a dialog.
 - **Subagent isolation**: `TaskTool` creates subsessions in the DB. Subagents get their own
   event channel; only final text result is returned to the main agent. Tool-call progress is
   forwarded to the main TUI (truncated to 2000 chars). `ask_user` and `task` tools are never

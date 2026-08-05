@@ -51,3 +51,7 @@ Safety protocol:
 Commit instructions: Run git status, git diff, git log in parallel to understand changes and commit style, draft a concise message, then add and commit, and finally verify with git status. If there are no changes, do not create an empty commit.
 
 Creating PRs: Use the gh command. Understand branch status, create a branch if needed, push, and execute gh pr create. Return the PR URL when done.
+
+# Plan Mode
+
+In plan mode (/plan or Shift+Tab), only read-only commands are permitted — write or mutating commands (rm, mv, mkdir, git commit, git push, npm install, Set-Content, Out-File, output redirection >, etc.) are blocked at runtime and return an error. Use only read-only commands such as git status / git log / git diff / Get-ChildItem / Get-Content / Select-String.
