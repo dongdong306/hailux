@@ -1,6 +1,7 @@
 use ratatui::buffer::CellDiffOption;
 use ratatui::prelude::*;
 use std::collections::HashSet;
+use std::time::Instant;
 
 use super::{App, AppState};
 use crate::tui::ask_user;
@@ -109,7 +110,7 @@ impl App {
             show_file_picker: self.file_picker.active,
             file_picker_results: &self.file_picker.results,
             file_picker_selected: self.file_picker.selected,
-            user_msg_sent_at: self.timing.user_msg_sent_at,
+            user_msg_sent_at: self.timing.effective_sent_at(Instant::now()),
             render_cache: &mut self.render.cache,
         };
         let result = widget.render(area, frame.buffer_mut());

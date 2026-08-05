@@ -62,8 +62,8 @@ impl App {
             } => {
                 // 计算最终耗时
                 self.finalize_thinking_ms();
-                if let Some(sent_at) = self.timing.user_msg_sent_at {
-                    self.timing.last_total_ms = Some(sent_at.elapsed().as_millis() as u64);
+                if let Some(total_ms) = self.timing.effective_elapsed_ms(Instant::now()) {
+                    self.timing.last_total_ms = Some(total_ms);
                 }
                 // 将耗时和模型名写入 runtime_meta（含 status）
                 if let Some(session_id) = &self.current_session_id
@@ -90,6 +90,7 @@ impl App {
                 }
                 // 重置实时时间字段（保留 final 字段用于展示）
                 self.timing.user_msg_sent_at = None;
+                self.timing.clear_pause();
 
                 if let Some(Message::AgentStreaming(text)) = self.messages.last() {
                     let text = text.clone();
@@ -304,6 +305,7 @@ impl App {
                     editing_custom: false,
                     last_paste: None,
                 };
+                self.timing.pause();
             }
             AppEvent::McpReady(_) => {}
             AppEvent::MouseClick => {}
@@ -457,6 +459,7 @@ impl App {
         self.input.set_processing(true);
         self.timing.user_msg_sent_at = Some(Instant::now());
         self.timing.last_total_ms = None;
+        self.timing.clear_pause();
         self.input.submit(&input);
         self.pending_pastes.clear();
         self.file_picker.pending_mentions.clear();
