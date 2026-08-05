@@ -88,8 +88,36 @@ fn resolve_permission_path(path: &str, work_dir: &str) -> std::path::PathBuf {
     } else {
         normalize_lexical(&Path::new(work_dir).join(path))
     };
-    let resolved = std::fs::canonicalize(&joined).unwrap_or(joined);
-    strip_extended_prefix(resolved)
+    match std::fs::canonicalize(&joined) {
+        Ok(c) => strip_extended_prefix(c),
+        Err(_) => {
+            // 文件不存在时，逐级向上找到第一个存在的祖先目录并 canonicalize，
+            // 再把不存在的部分拼回去。这解决了 Windows 短路径名（如 RUNNER~1）
+            // 与 canonicalize 结果不一致导致 starts_with 匹配失败的问题。
+            let mut existing = joined.clone();
+            let mut missing: Vec<std::ffi::OsString> = Vec::new();
+            while !existing.as_os_str().is_empty() {
+                match std::fs::canonicalize(&existing) {
+                    Ok(canon) => {
+                        let mut result = strip_extended_prefix(canon);
+                        for part in missing.into_iter().rev() {
+                            result.push(part);
+                        }
+                        return result;
+                    }
+                    Err(_) => {
+                        if let Some(name) = existing.file_name() {
+                            missing.push(name.to_os_string());
+                        }
+                        if !existing.pop() {
+                            break;
+                        }
+                    }
+                }
+            }
+            strip_extended_prefix(joined)
+        }
+    }
 }
 
 /// 构造「操作非工作目录内容」的权限请求（external_directory，默认询问）。
