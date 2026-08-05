@@ -376,6 +376,25 @@ fn bash_external_dir_request(command: &str, work_dir: &str) -> Option<Permission
     None
 }
 
+/// 从 bash 工具参数中提取 `command_string`。
+pub(crate) fn bash_command_from_arguments(arguments: &str) -> Option<String> {
+    let args: Value = serde_json::from_str(arguments).ok()?;
+    args["command_string"].as_str().map(str::to_string)
+}
+
+/// plan 模式下的 bash 只读拦截：返回 `Some(拒绝原因)` 时禁止执行。
+/// 只读判定 fail-closed（无法明确判定为只读即拒绝）。
+pub(crate) fn plan_mode_bash_denial(arguments: &str) -> Option<String> {
+    let command = bash_command_from_arguments(arguments)?;
+    if crate::permission::bash_readonly::is_read_only_bash_command(&command) {
+        None
+    } else {
+        Some(format!(
+            "[Bash write operation blocked in plan mode: {command}. Plan mode is read-only; exit with /plan or Shift+Tab to execute.]"
+        ))
+    }
+}
+
 pub struct BashTool;
 
 impl Tool for BashTool {
@@ -389,7 +408,7 @@ impl Tool for BashTool {
 
     fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
         let args: Value = serde_json::from_str(arguments).ok()?;
-        let command = args["command_string"].as_str()?;
+        let command = args["command_string"].as_str()?.to_string();
         if command.trim().is_empty() {
             return None;
         }
@@ -405,10 +424,10 @@ impl Tool for BashTool {
             }
         }
         // 文件路径参数指向工作目录之外 → 询问
-        if let Some(req) = bash_external_dir_request(command, work_dir) {
+        if let Some(req) = bash_external_dir_request(&command, work_dir) {
             return Some(req);
         }
-        let (pattern, description) = extract_bash_pattern(command);
+        let (pattern, description) = extract_bash_pattern(&command);
         Some(PermissionRequest {
             permission: "bash".to_string(),
             patterns: vec![pattern.clone()],
@@ -1568,5 +1587,25 @@ mod tests {
             normalize_lexical(&joined),
             base.parent().unwrap().join("outside_dir")
         );
+    }
+
+    #[test]
+    fn plan_mode_denies_bash_write_commands() {
+        let deny = |args: &str| plan_mode_bash_denial(args);
+        // 写操作 → 拒绝
+        assert!(deny(r#"{"command_string":"rm -rf target"}"#).is_some());
+        assert!(deny(r#"{"command_string":"git commit -m x"}"#).is_some());
+        assert!(deny(r#"{"command_string":"echo hi > f"}"#).is_some());
+        // 只读操作 → 放行
+        assert!(deny(r#"{"command_string":"git status"}"#).is_none());
+        assert!(deny(r#"{"command_string":"git diff HEAD"}"#).is_none());
+        assert!(deny(r#"{"command_string":"ls -la"}"#).is_none());
+        // 坏 JSON / 缺失参数 → 放行（由执行层报错）
+        assert!(deny("not json").is_none());
+        assert!(deny(r#"{}"#).is_none());
+        // 拒绝信息包含命令原文，便于模型理解
+        let reason = deny(r#"{"command_string":"rm -rf target"}"#).unwrap();
+        assert!(reason.contains("rm -rf target"));
+        assert!(reason.contains("plan mode"));
     }
 }

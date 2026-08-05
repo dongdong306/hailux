@@ -1,4 +1,5 @@
 pub mod bash_arity;
+pub mod bash_readonly;
 
 use std::sync::{Arc, Mutex};
 

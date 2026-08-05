@@ -922,7 +922,16 @@ async fn handle_tool_calls_stream(
                     let pm2 = state.plan_mode;
                     (req, pm, pm2)
                 };
-                if let Some(req) = perm_req {
+                // plan 模式：bash 非只读命令直接拒绝（fail-closed，不弹窗），
+                // 与 plan 模式隐藏 edit/write 工具保持一致。
+                let plan_denial = if plan_mode && tool.name() == "bash" {
+                    super::tools::plan_mode_bash_denial(arguments)
+                } else {
+                    None
+                };
+                if let Some(reason) = plan_denial {
+                    Some(reason)
+                } else if let Some(req) = perm_req {
                     match perm_mgr.check(&req, plan_mode) {
                         PermissionResult::Allowed => None,
                         PermissionResult::Denied(reason) => Some(reason),
