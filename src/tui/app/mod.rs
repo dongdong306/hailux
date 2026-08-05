@@ -80,6 +80,50 @@ pub(super) struct Spinner {
 pub(super) struct TimingStats {
     pub(super) user_msg_sent_at: Option<Instant>,
     pub(super) last_total_ms: Option<u64>,
+    /// 累计暂停时长：等待用户输入的弹窗（权限确认 / ask）期间不计入耗时
+    pub(super) paused_total: Duration,
+    /// 当前暂停起点；Some = 正处于弹窗等待用户输入
+    pub(super) paused_at: Option<Instant>,
+}
+
+impl TimingStats {
+    /// 进入等待用户输入的状态（Permission / AskUser 弹窗）时调用。
+    /// 已在暂停中或没有进行中的请求时为无操作。
+    pub(super) fn pause(&mut self) {
+        if self.user_msg_sent_at.is_some() && self.paused_at.is_none() {
+            self.paused_at = Some(Instant::now());
+        }
+    }
+
+    /// 弹窗关闭（回复完成 / 取消 / Esc）后调用，恢复计时。
+    pub(super) fn resume(&mut self) {
+        if let Some(paused_at) = self.paused_at.take() {
+            self.paused_total += paused_at.elapsed();
+        }
+    }
+
+    /// 扣除暂停时间后的等效发送时刻。
+    /// 暂停中该值随时间同步后移，使 `elapsed()` 显示为冻结值。
+    pub(super) fn effective_sent_at(&self, now: Instant) -> Option<Instant> {
+        let sent_at = self.user_msg_sent_at?;
+        let mut adjust = self.paused_total;
+        if let Some(paused_at) = self.paused_at {
+            adjust += now - paused_at;
+        }
+        Some(sent_at + adjust)
+    }
+
+    /// 扣除暂停时间后的实际耗时（毫秒）。
+    pub(super) fn effective_elapsed_ms(&self, now: Instant) -> Option<u64> {
+        self.effective_sent_at(now)
+            .map(|t| now.duration_since(t).as_millis() as u64)
+    }
+
+    /// 清空暂停状态（新请求开始 / 一轮请求结束时）。
+    pub(super) fn clear_pause(&mut self) {
+        self.paused_total = Duration::ZERO;
+        self.paused_at = None;
+    }
 }
 
 /// 渲染缓存与脏标记
@@ -356,8 +400,7 @@ impl App {
             // 写入 interrupted runtime_meta
             let total_ms = self
                 .timing
-                .user_msg_sent_at
-                .map(|t| t.elapsed().as_millis() as u64)
+                .effective_elapsed_ms(Instant::now())
                 .unwrap_or(0);
             let meta = serde_json::json!({
                 "total_ms": total_ms,
@@ -446,6 +489,7 @@ impl App {
                     };
                 }
             }
+            self.timing.pause();
             return Ok(());
         }
 
@@ -537,6 +581,9 @@ impl App {
                     }
                 };
                 st.handle_event(event, &mut self.state)?;
+                if matches!(self.state, AppState::Chat) {
+                    self.timing.resume();
+                }
             }
             AppState::Permission { .. } => {
                 if let AppEvent::InputKey(key) = event {
@@ -554,6 +601,9 @@ impl App {
                     } else {
                         self.state = AppState::Permission { pending, selected };
                     }
+                }
+                if matches!(self.state, AppState::Chat) {
+                    self.timing.resume();
                 }
             }
         }
