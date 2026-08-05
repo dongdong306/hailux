@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod mcp;
+mod permission;
 mod prompts;
 mod storage;
 mod tui;
@@ -25,6 +26,12 @@ struct Cli {
     /// 设置工作目录
     #[arg(short = 'p', long = "path", global = true)]
     work_dir: Option<String>,
+    /// 重建数据库（清空全部历史记录），迁移故障时使用
+    #[arg(long = "rebuild-db", global = true)]
+    rebuild_db: bool,
+    /// 以 YOLO 模式运行（跳过所有权限确认），对 TUI 和非交互模式均生效
+    #[arg(long = "yolo", global = true)]
+    yolo: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -44,10 +51,49 @@ enum Commands {
     },
 }
 
+/// 数据库迁移失败时拒绝启动，并提示用户重建
+fn ensure_storage_ok(storage: &storage::ChatStorage) -> Result<()> {
+    if let Some(err) = storage.migration_error() {
+        color_eyre::eyre::bail!(
+            "数据库迁移失败：{err}\n请使用 `hailux --rebuild-db` 重建数据库（将清空全部历史记录）。"
+        );
+    }
+    Ok(())
+}
+
+/// `hailux --rebuild-db`：备份旧数据库文件后重建数据库
+async fn rebuild_database() -> Result<()> {
+    let mut storage = storage::ChatStorage::new().await?;
+    let backup_path = storage.rebuild().await?;
+    println!("数据库已重建（历史记录已清空）。");
+    if let Some(path) = backup_path {
+        println!("原数据库已备份至：{}", path.display());
+    }
+    Ok(())
+}
+
+fn build_permission_rules(cfg: &config::Config) -> Vec<crate::permission::PermissionRule> {
+    use crate::permission::rules_from_config_table;
+    let mut rules = Vec::new();
+    rules.extend(rules_from_config_table("bash", &cfg.permission.bash));
+    rules.extend(rules_from_config_table("read", &cfg.permission.read));
+    rules.extend(rules_from_config_table("edit", &cfg.permission.edit));
+    rules.extend(rules_from_config_table("write", &cfg.permission.write));
+    rules.extend(rules_from_config_table("mcp", &cfg.permission.mcp));
+    rules.extend(rules_from_config_table(
+        "external_directory",
+        &cfg.permission.external_directory,
+    ));
+    // 注意：不要在此追加「默认 Ask」规则。evaluate 无匹配时本就默认 Ask，
+    // 追加默认规则反而会因其在末尾优先匹配，遮蔽用户配置的具体 deny/allow 规则。
+    rules
+}
+
 // ── Agent 构建 ───────────────────────────────────────────────
 
 fn build_agent_base(
     resolved: &config::ResolvedModel,
+    cfg: &config::Config,
     work_dir: &Path,
 ) -> Result<(
     Agent,
@@ -55,10 +101,16 @@ fn build_agent_base(
     CommandRegistry,
     Vec<subagent::SubagentConfig>,
 )> {
+    let pm = crate::permission::PermissionManager::new(
+        crate::permission::PermissionMode::from_str(&cfg.permission.mode),
+        build_permission_rules(cfg),
+    );
     let mut agent = Agent::new(
         resolved.config.clone(),
         &resolved.model_id,
         resolved.max_tokens,
+        pm,
+        &work_dir.display().to_string(),
     );
     agent.register_tool(Box::new(BashTool));
     agent.register_tool(Box::new(ReadTool));
@@ -99,7 +151,7 @@ fn build_agent(
     Vec<subagent::SubagentConfig>,
 )> {
     let (mut agent, skills, command_registry, mut subagents) =
-        build_agent_base(resolved, work_dir)?;
+        build_agent_base(resolved, cfg, work_dir)?;
 
     agent.register_tool(Box::new(AskTool::new(event_tx)));
 
@@ -116,6 +168,7 @@ async fn run_non_interactive(
     message: Option<String>,
     model: Option<String>,
     no_tools: bool,
+    yolo: bool,
     work_dir: &Path,
 ) -> Result<()> {
     let message = match message {
@@ -131,7 +184,7 @@ async fn run_non_interactive(
     }
 
     let cfg = match config::load()? {
-        config::LoadResult::Ready(cfg) => cfg,
+        config::LoadResult::Ready(cfg) => *cfg,
         config::LoadResult::NeedsSetup => {
             color_eyre::eyre::bail!("配置未完成，请先运行 hailux 进行初始化设置");
         }
@@ -145,7 +198,17 @@ async fn run_non_interactive(
 
     let (event_tx, mut event_rx) = tui::event::create_event_channel();
 
-    let (mut agent, skills, _, mut subagents) = build_agent_base(&resolved, work_dir)?;
+    let (mut agent, skills, _, mut subagents) = build_agent_base(&resolved, &cfg, work_dir)?;
+    if yolo {
+        // --yolo：跳过所有权限确认
+        agent
+            .permission()
+            .set_mode(crate::permission::PermissionMode::Yolo);
+    } else {
+        // 非交互模式没有 TUI 弹窗应答权限请求：需要询问的操作直接拒绝。
+        // 工作目录内的读取本就不触发权限检查（默认放行），不受影响。
+        agent.permission().set_auto_deny(true);
+    }
     if !subagents.iter().any(|s| s.name == "general") {
         subagents.insert(0, subagent::builtin_general_subagent(&cfg.main_model));
     }
@@ -183,6 +246,7 @@ async fn run_non_interactive(
 
         // 注册 TaskTool
         let storage = storage::ChatStorage::new().await?;
+        ensure_storage_ok(&storage)?;
         let current_session_shared = Arc::new(Mutex::new(None::<String>));
         let shared_config: Arc<Mutex<config::Config>> = Arc::new(Mutex::new(cfg.clone()));
         let task_tool = subagent::TaskTool::new(
@@ -197,6 +261,7 @@ async fn run_non_interactive(
             mcp_backends,
             shared_config,
             Some(event_tx.clone()),
+            agent.permission().clone(),
         );
         agent.register_tool(Box::new(task_tool));
     }
@@ -323,12 +388,23 @@ async fn run_tui(
     cfg: config::Config,
     resolved: config::ResolvedModel,
     work_dir: &Path,
+    yolo: bool,
 ) -> Result<()> {
     let (event_tx, event_rx) = tui::event::create_event_channel();
     let (mut agent, skills, command_registry, subagents) =
         build_agent(&resolved, &cfg, event_tx.clone(), work_dir)?;
+    if yolo {
+        // --yolo：跳过所有权限确认
+        agent
+            .permission()
+            .set_mode(crate::permission::PermissionMode::Yolo);
+    }
 
     let storage = storage::ChatStorage::new().await?;
+    ensure_storage_ok(&storage)?;
+    // 绑定存储到 PermissionManager，启用 session 级 DB 持久化
+    agent.permission().with_storage_ref(storage.clone());
+
     let shared = tui::app::AppSharedState {
         current_session: Arc::new(Mutex::new(None::<String>)),
         mcp_backends: Arc::new(Mutex::new(Vec::new())),
@@ -347,6 +423,7 @@ async fn run_tui(
         shared.mcp_backends.clone(),
         shared.config.clone(),
         Some(event_tx.clone()),
+        agent.permission().clone(),
     );
     agent.register_tool(Box::new(task_tool));
 
@@ -381,7 +458,7 @@ async fn run_tui_setup(work_dir: &Path) -> Result<()> {
     // NeedsSetup 时 build_agent 会因空 model_id 产生问题，
     // 所以只用 build_agent_base + AskTool
     let (mut agent, skills, command_registry, mut subagents) =
-        build_agent_base(&resolved, work_dir)?;
+        build_agent_base(&resolved, &cfg, work_dir)?;
     agent.register_tool(Box::new(AskTool::new(event_tx.clone())));
 
     if !subagents.iter().any(|s| s.name == "general") {
@@ -389,6 +466,7 @@ async fn run_tui_setup(work_dir: &Path) -> Result<()> {
     }
 
     let storage = storage::ChatStorage::new().await?;
+    ensure_storage_ok(&storage)?;
     let shared = tui::app::AppSharedState {
         current_session: Arc::new(Mutex::new(None::<String>)),
         mcp_backends: Arc::new(Mutex::new(Vec::new())),
@@ -427,6 +505,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    if cli.rebuild_db {
+        return rebuild_database().await;
+    }
+
     match cli.command {
         Some(Commands::Run {
             message,
@@ -434,7 +516,7 @@ async fn main() -> Result<()> {
             no_tools,
         }) => {
             let work_dir = resolve_work_dir(cli.work_dir.as_deref())?;
-            run_non_interactive(message, model, no_tools, &work_dir).await
+            run_non_interactive(message, model, no_tools, cli.yolo, &work_dir).await
         }
         None => {
             let work_dir = resolve_work_dir(cli.work_dir.as_deref())?;
@@ -442,7 +524,7 @@ async fn main() -> Result<()> {
             let load_result = config::load()?;
             let needs_setup = matches!(load_result, config::LoadResult::NeedsSetup);
             let cfg = match load_result {
-                config::LoadResult::Ready(cfg) => cfg,
+                config::LoadResult::Ready(cfg) => *cfg,
                 config::LoadResult::NeedsSetup => config::Config::default(),
             };
             let resolved = if needs_setup {
@@ -461,7 +543,7 @@ async fn main() -> Result<()> {
                 skill::ensure_default_skills();
                 run_tui_setup(&work_dir).await
             } else {
-                run_tui(cfg, resolved, &work_dir).await
+                run_tui(cfg, resolved, &work_dir, cli.yolo).await
             }
         }
     }

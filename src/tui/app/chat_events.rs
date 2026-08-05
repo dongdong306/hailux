@@ -356,6 +356,8 @@ impl App {
                 self.input.set_processing(false);
                 self.render.dirty = true;
             }
+            // 权限请求在 App::handle_event 顶部统一入队，不会到达此处
+            AppEvent::PermissionRequest { .. } => {}
         }
         Ok(())
     }
@@ -387,6 +389,16 @@ impl App {
                     }
                     command::Command::Plan => {
                         self.toggle_plan_mode();
+                    }
+                    command::Command::Yolo => {
+                        let mode = self.agent.permission().toggle_yolo();
+                        let label = if mode == crate::permission::PermissionMode::Yolo {
+                            "YOLO"
+                        } else {
+                            "ASK"
+                        };
+                        self.messages
+                            .push(Message::Agent(format!("Permission mode: {label}")));
                     }
                     command::Command::Compact => {
                         self.compact_conversation(None).await?;
@@ -527,6 +539,7 @@ impl App {
                     self.shared.mcp_backends.clone(),
                     self.shared.config.clone(),
                     Some(self.events.0.clone()),
+                    self.agent.permission().clone(),
                 );
 
                 let task_description = format!(

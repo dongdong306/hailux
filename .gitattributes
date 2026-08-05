@@ -1,0 +1,7 @@
+# 统一使用 LF 行尾：避免换行符差异导致迁移校验和、内容变化等问题
+*.sql   text eol=lf
+*.sh    text eol=lf
+*.rs    text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.lock  text eol=lf

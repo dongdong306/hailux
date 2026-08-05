@@ -4,6 +4,7 @@ use super::models::{
     SharedMessage, ThinkingConfig,
 };
 use super::tools::ToolRegistry;
+use crate::permission::{PermissionManager, PermissionReply, PermissionResult};
 use crate::tui::AppEvent;
 use crate::tui::event::{EventTx, MessageUsage, TaskStatus};
 use async_openai::{
@@ -24,6 +25,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 /// 规划模式提示词。开启 plan 模式时，会注入到本轮最后一条用户消息中，
 /// 作为软约束提醒模型处于只读阶段。改编自 opencode 的 plan.txt。
@@ -50,10 +52,18 @@ pub struct Agent {
     max_tokens: u32,
     plan_mode: bool,
     cancel: Arc<AtomicBool>,
+    permission: PermissionManager,
+    work_dir: String,
 }
 
 impl Agent {
-    pub fn new(config: OpenAIConfig, model: &str, max_tokens: u32) -> Self {
+    pub fn new(
+        config: OpenAIConfig,
+        model: &str,
+        max_tokens: u32,
+        permission: PermissionManager,
+        work_dir: &str,
+    ) -> Self {
         Self {
             client: Client::with_config(config),
             tool_registry: ToolRegistry::new(),
@@ -62,6 +72,8 @@ impl Agent {
             max_tokens,
             plan_mode: false,
             cancel: Arc::new(AtomicBool::new(false)),
+            permission,
+            work_dir: work_dir.to_string(),
         }
     }
 
@@ -81,8 +93,22 @@ impl Agent {
         self.max_tokens = max_tokens;
     }
 
-    /// 注册一个工具
+    pub fn permission(&self) -> &PermissionManager {
+        &self.permission
+    }
+
+    #[allow(dead_code)]
+    pub fn work_dir(&self) -> &str {
+        &self.work_dir
+    }
+
+    /// 注册一个工具。
+    /// config 中该工具权限类别被 `*` + deny 禁用时直接跳过注册，
+    /// 使工具对模型完全不可见（不可被会话级 always 绕过）。
     pub fn register_tool(&mut self, tool: Box<dyn super::tools::Tool>) {
+        if self.permission.is_disabled(tool.permission_category()) {
+            return;
+        }
         self.tool_registry.register(tool);
     }
 
@@ -142,6 +168,8 @@ impl Agent {
         let client = self.client.clone();
         let tool_registry = self.tool_registry.clone_registry();
         let messages = self.messages.clone();
+        let permission = self.permission.clone();
+        let work_dir = self.work_dir.clone();
 
         let agent_handle = Arc::new(Mutex::new(AgentStreamState {
             client,
@@ -150,6 +178,8 @@ impl Agent {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             plan_mode: self.plan_mode,
+            permission,
+            work_dir,
         }));
 
         let handle = agent_handle.clone();
@@ -369,6 +399,8 @@ struct AgentStreamState {
     model: String,
     max_tokens: u32,
     plan_mode: bool,
+    permission: PermissionManager,
+    work_dir: String,
 }
 
 impl AgentStreamState {
@@ -874,17 +906,90 @@ async fn handle_tool_calls_stream(
             }
         };
 
-        let _ = event_tx.try_send(AppEvent::ToolCallStart {
-            name: name.clone(),
-            arguments: arguments.clone(),
-            subagent_name: None,
-        });
-
         let tool_arc = {
             let state = state.lock().map_err(|e| e.to_string())?;
             state.tool_registry.get_arc(name)
         };
-        let result_display: (String, Option<String>) = if let Some(tool) = tool_arc {
+
+        // 权限检查
+        let permission_denied: Option<String> = if let Some(ref tool) = tool_arc {
+            let needs_check = tool.permission_category().is_some();
+            if needs_check {
+                let (perm_req, perm_mgr, plan_mode) = {
+                    let state = state.lock().map_err(|e| e.to_string())?;
+                    let req = tool.extract_permission(arguments, &state.work_dir);
+                    let pm = state.permission.clone();
+                    let pm2 = state.plan_mode;
+                    (req, pm, pm2)
+                };
+                if let Some(req) = perm_req {
+                    match perm_mgr.check(&req, plan_mode) {
+                        PermissionResult::Allowed => None,
+                        PermissionResult::Denied(reason) => Some(reason),
+                        PermissionResult::NeedsAsk(req) => {
+                            let always_patterns = req.always_patterns.clone();
+                            let (tx, rx) = oneshot::channel::<PermissionReply>();
+                            if event_tx
+                                .try_send(AppEvent::PermissionRequest {
+                                    request: req,
+                                    response_tx: tx,
+                                    subagent_name: None,
+                                })
+                                .is_err()
+                            {
+                                // 事件通道满或已关闭：无法向用户弹窗询问。
+                                // 回退为拒绝而非等待一个永不 resolve 的 rx（死锁）。
+                                Some("Permission request channel unavailable".to_string())
+                            } else {
+                                tokio::select! {
+                                    reply = rx => match reply {
+                                        Ok(PermissionReply::Once) => None,
+                                        Ok(PermissionReply::Always) => {
+                                            let category =
+                                                tool.permission_category().unwrap_or("").to_string();
+                                            perm_mgr.add_session_rules(&category, &always_patterns);
+                                            None
+                                        }
+                                        Ok(PermissionReply::Deny) => {
+                                            Some("Permission denied by user".to_string())
+                                        }
+                                        Err(_) => {
+                                            Some("Permission request channel closed".to_string())
+                                        }
+                                    },
+                                    // 等待期间用户取消（如 Ctrl+C）：中止本次询问，避免卡死在弹窗上
+                                    _ = async {
+                                        while !cancel.load(Ordering::Relaxed) {
+                                            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+                                        }
+                                    } => Some("Permission request cancelled".to_string()),
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 权限通过后才上报「工具已开始」，被拒的工具不显示
+        if permission_denied.is_none() {
+            let _ = event_tx.try_send(AppEvent::ToolCallStart {
+                name: name.clone(),
+                arguments: arguments.clone(),
+                subagent_name: None,
+            });
+        }
+
+        let result_display: (String, Option<String>) = if let Some(deny_reason) = permission_denied
+        {
+            (deny_reason, None)
+        } else if let Some(tool) = tool_arc {
             if tool.cancellable() {
                 let cancel_clone = cancel.clone();
                 let execute_fut = tool.execute_async_with_display(arguments);
@@ -941,7 +1046,11 @@ mod tests {
 
     fn make_test_agent() -> Agent {
         let config = OpenAIConfig::new().with_api_base("http://localhost:0");
-        Agent::new(config, "test-model", 4096)
+        let pm = crate::permission::PermissionManager::new(
+            crate::permission::PermissionMode::Yolo,
+            vec![],
+        );
+        Agent::new(config, "test-model", 4096, pm, ".")
     }
 
     #[test]

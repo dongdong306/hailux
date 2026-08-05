@@ -385,6 +385,24 @@ impl Tool for McpTool {
         self.schema.clone()
     }
 
+    fn permission_category(&self) -> Option<&str> {
+        Some("mcp")
+    }
+
+    fn extract_permission(
+        &self,
+        _arguments: &str,
+        _work_dir: &str,
+    ) -> Option<crate::permission::PermissionRequest> {
+        Some(crate::permission::PermissionRequest {
+            permission: "mcp".to_string(),
+            patterns: vec![self.registered_name.clone()],
+            always_patterns: vec![self.registered_name.clone()],
+            description: format!("MCP tool: {}", self.registered_name),
+            metadata: serde_json::json!({}),
+        })
+    }
+
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,

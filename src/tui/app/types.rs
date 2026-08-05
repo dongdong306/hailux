@@ -123,6 +123,19 @@ pub(crate) enum AppState {
         editing_custom: bool,
         last_paste: Option<Instant>,
     },
+    Permission {
+        pending: Vec<PermissionPending>,
+        selected: usize,
+    },
+}
+
+/// 排队等待用户回复的权限请求。
+/// 主 agent 与 subagent 的请求汇聚到同一队列，按 `subagent_name` 分组处理
+/// （None = 主 agent，Some(name) = 对应 subagent）。
+pub(crate) struct PermissionPending {
+    pub request: crate::permission::PermissionRequest,
+    pub response_tx: tokio::sync::oneshot::Sender<crate::permission::PermissionReply>,
+    pub subagent_name: Option<String>,
 }
 
 /// 共享状态（在 App、TaskTool、subagent 之间传递）

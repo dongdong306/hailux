@@ -131,6 +131,15 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   and `bash -c` on Unix. The `workdir` parameter only exists on non-Windows. Windows has an
   extra `crossterm_winapi` dependency and different paste-detection timing constants.
   Tool description templates are platform-specific (`bash_windows.txt` vs `bash_unix.txt`).
+- **Permission defaults**: In-workdir operations are allowed by default via
+  builtin lowest-priority rules in `permission/mod.rs::default_rules()`: `* allow`,
+  `external_directory * ask`, `read *.env` / `*.env.* ask` (`.env.example allow`), `mcp * ask`.
+  Tools issue `external_directory` requests (not their category permission) when a path resolves
+  outside the workdir — read/edit/write/grep/glob path args and `bash` file-path args
+  (`BASH_FILE_COMMANDS`) plus the bash `workdir` param. `[permission.xxx]` config rules
+  (session > config > builtin defaults) override the defaults; `read` in-workdir requests use
+  absolute-path patterns so `.env` rules match via `wildcard_match` — a `\`→`/`-normalized,
+  Windows case-insensitive, `*`/`?`-wildcard matcher with literal special chars.
 - **Plan mode** (`/plan` or Shift+Tab): Filters out write/edit tools from the tool list
   and injects a read-only system-reminder into the last user message (on a clone, not stored).
 - **Subagent isolation**: `TaskTool` creates subsessions in the DB. Subagents get their own

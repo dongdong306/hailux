@@ -298,6 +298,8 @@ pub struct TaskTool {
     config: SharedConfig,
     /// 主 TUI 的事件发送器，用于将 subagent 的工具调用过程实时转发到聊天区
     main_event_tx: Option<EventTx>,
+    /// 权限管理器（与主 Agent 共享）
+    permission: crate::permission::PermissionManager,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -314,6 +316,7 @@ impl TaskTool {
         mcp_backends: SharedMcpBackends,
         config: SharedConfig,
         main_event_tx: Option<EventTx>,
+        permission: crate::permission::PermissionManager,
     ) -> Self {
         let names: Vec<&str> = subagents.iter().map(|s| s.name.as_str()).collect();
         let agents_list = if names.is_empty() {
@@ -336,6 +339,7 @@ impl TaskTool {
             description_cache,
             config,
             main_event_tx,
+            permission,
         }
     }
 
@@ -364,7 +368,13 @@ impl TaskTool {
                 ),
             })?;
 
-        let mut agent = Agent::new(agent_config, &agent_model, agent_max_tokens);
+        let mut agent = Agent::new(
+            agent_config,
+            &agent_model,
+            agent_max_tokens,
+            self.permission.clone(),
+            &self.work_dir,
+        );
 
         // 注册内建工具（不包含 task 和 ask_user）
         let allowed = config.allowed_tools.as_ref();
@@ -577,6 +587,7 @@ impl Tool for TaskTool {
                     description_cache: String::new(),
                     config: app_config.clone(),
                     main_event_tx: main_event_tx.clone(),
+                    permission: self.permission.clone(),
                 };
                 let mut restore_agent = task_tool_for_restore.build_subagent(&config)?;
 
@@ -682,6 +693,7 @@ impl Tool for TaskTool {
                     description_cache: String::new(),
                     config: app_config.clone(),
                     main_event_tx: main_event_tx.clone(),
+                    permission: self.permission.clone(),
                 };
                 let agent = task_tool.build_subagent(&config)?;
 
@@ -776,6 +788,19 @@ impl Tool for TaskTool {
                                 name,
                                 result: truncated,
                                 display,
+                                subagent_name: Some(subagent_name.to_string()),
+                            });
+                        }
+                    }
+                    AppEvent::PermissionRequest {
+                        request,
+                        response_tx,
+                        ..
+                    } => {
+                        if let Some(ref tx) = main_event_tx {
+                            let _ = tx.try_send(AppEvent::PermissionRequest {
+                                request,
+                                response_tx,
                                 subagent_name: Some(subagent_name.to_string()),
                             });
                         }

@@ -1,5 +1,6 @@
 use crate::agent::models::SharedMessage;
 use crate::mcp::McpConnection;
+use crate::permission::{PermissionReply, PermissionRequest};
 use crossterm::event::{
     Event as CrosstermEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -68,6 +69,11 @@ pub enum AppEvent {
     AskUser {
         questions: Vec<QuestionInfo>,
         response_tx: oneshot::Sender<String>,
+    },
+    PermissionRequest {
+        request: PermissionRequest,
+        response_tx: oneshot::Sender<PermissionReply>,
+        subagent_name: Option<String>,
     },
     Resize,
     ScrollUp,

@@ -16,6 +16,7 @@ pub enum Command {
     Skills,
     Mcp,
     Tasks,
+    Yolo,
     Exit,
 }
 
@@ -67,6 +68,10 @@ static SLASH_COMMANDS: &[SlashCommand] = &[
         description: "查看子代理执行情况",
     },
     SlashCommand {
+        name: "yolo",
+        description: "切换 YOLO 模式（跳过权限确认）",
+    },
+    SlashCommand {
         name: "exit",
         description: "退出程序",
     },
@@ -82,6 +87,7 @@ fn match_ui_command(name: &str) -> Option<Command> {
         "skills" => Some(Command::Skills),
         "mcp" => Some(Command::Mcp),
         "tasks" => Some(Command::Tasks),
+        "yolo" => Some(Command::Yolo),
         "exit" | "quit" | "q" => Some(Command::Exit),
         _ => None,
     }
@@ -125,7 +131,8 @@ pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedC
 /// UI 命令与内建 prompt 命令的统一展示优先级。
 /// 不在此列表中的自定义命令按字母排序追加在末尾。
 const COMMAND_PRIORITY: &[&str] = &[
-    "new", "sessions", "init", "plan", "models", "compact", "skills", "mcp", "tasks", "exit",
+    "new", "sessions", "init", "plan", "models", "compact", "skills", "mcp", "tasks", "yolo",
+    "exit",
 ];
 
 /// 构建所有可用命令的展示列表（UI 命令 + prompt 命令按优先级混合排序）。
