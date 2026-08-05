@@ -234,6 +234,10 @@ impl Tool for SkillTool {
         "skill"
     }
 
+    fn permission_category(&self) -> Option<&str> {
+        Some("skill")
+    }
+
     fn description(&self) -> &str {
         crate::prompts::tools::SKILL
     }

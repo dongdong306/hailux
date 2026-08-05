@@ -262,6 +262,9 @@ impl App {
         self.file_picker.pending_mentions.clear();
         self.scroll_offset = 0;
         self.should_auto_scroll = true;
+        self.agent
+            .permission()
+            .switch_session(session_id.to_string());
         self.load_session_messages().await?;
         self.state = AppState::Chat;
         Ok(())
@@ -284,6 +287,7 @@ impl App {
         self.file_picker.pending_mentions.clear();
         self.scroll_offset = 0;
         self.should_auto_scroll = true;
+        self.agent.permission().clear_session();
         let system_prompt = self.agent.take_system_prompt();
         self.agent.clear_messages();
         if let Some(prompt) = system_prompt {

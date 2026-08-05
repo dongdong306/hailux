@@ -72,6 +72,31 @@ pub(crate) fn find_provider_def(id: &str) -> Option<&'static ProviderDef> {
 
 // ── 运行时配置结构 ───────────────────────────────────────────
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PermissionConfig {
+    /// "ask" (Normal) 或 "yolo" (Yolo)
+    #[serde(default)]
+    pub mode: String,
+    /// bash 权限规则: pattern -> action ("allow"/"deny"/"ask")
+    #[serde(default)]
+    pub bash: BTreeMap<String, String>,
+    /// read 权限规则
+    #[serde(default)]
+    pub read: BTreeMap<String, String>,
+    /// edit 权限规则
+    #[serde(default)]
+    pub edit: BTreeMap<String, String>,
+    /// write 权限规则
+    #[serde(default)]
+    pub write: BTreeMap<String, String>,
+    /// mcp 权限规则
+    #[serde(default)]
+    pub mcp: BTreeMap<String, String>,
+    /// external_directory 权限规则（默认询问；可配置放行特定外部目录）
+    #[serde(default)]
+    pub external_directory: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -81,6 +106,9 @@ pub struct Config {
     /// 自动压缩阈值（0.0-1.0），上下文 token 占比超过此值时自动压缩
     #[serde(default = "default_compact_threshold")]
     pub compact_threshold: f32,
+    /// 权限配置
+    #[serde(default)]
+    pub permission: PermissionConfig,
 }
 
 impl Default for Config {
@@ -89,6 +117,7 @@ impl Default for Config {
             main_model: String::new(),
             providers: BTreeMap::new(),
             compact_threshold: default_compact_threshold(),
+            permission: PermissionConfig::default(),
         }
     }
 }
@@ -426,7 +455,7 @@ fn config_file_path() -> Result<PathBuf> {
 
 /// 加载结果：配置就绪或需要初始化设置
 pub enum LoadResult {
-    Ready(Config),
+    Ready(Box<Config>),
     NeedsSetup,
 }
 
@@ -473,7 +502,7 @@ pub fn load() -> Result<LoadResult> {
         }
     }
 
-    Ok(LoadResult::Ready(config))
+    Ok(LoadResult::Ready(Box::new(config)))
 }
 
 pub fn save_config(config: &Config) -> Result<()> {
@@ -519,6 +548,34 @@ pub fn save_config(config: &Config) -> Result<()> {
         "compact_threshold".into(),
         toml::Value::Float(config.compact_threshold as f64),
     );
+
+    // 权限配置
+    let mut perm_table = toml::map::Map::new();
+    if !config.permission.mode.is_empty() {
+        perm_table.insert(
+            "mode".into(),
+            toml::Value::String(config.permission.mode.clone()),
+        );
+    }
+    for (key, table) in [
+        ("bash", &config.permission.bash),
+        ("read", &config.permission.read),
+        ("edit", &config.permission.edit),
+        ("write", &config.permission.write),
+        ("mcp", &config.permission.mcp),
+        ("external_directory", &config.permission.external_directory),
+    ] {
+        if !table.is_empty() {
+            let mut t = toml::map::Map::new();
+            for (k, v) in table {
+                t.insert(k.clone(), toml::Value::String(v.clone()));
+            }
+            perm_table.insert(key.into(), toml::Value::Table(t));
+        }
+    }
+    if !perm_table.is_empty() {
+        root.insert("permission".into(), toml::Value::Table(perm_table));
+    }
 
     let path = config_file_path()?;
     let toml_str = toml::to_string_pretty(&toml::Value::Table(root)).wrap_err("无法序列化配置")?;

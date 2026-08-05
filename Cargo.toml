@@ -15,8 +15,6 @@ debug = true
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
 
 [dependencies]
 async-openai = { version = "0.41.1", features = ["chat-completion", "byot"] }

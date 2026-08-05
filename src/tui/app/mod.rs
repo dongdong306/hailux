@@ -422,9 +422,39 @@ impl App {
             return Ok(());
         }
 
+        // 权限请求统一在此入队，不受当前 state 限制。
+        // 必须优先处理：若此时处于其他弹窗（如 AskUser）而把请求
+        // 交给对应 handler，事件会被吞掉，agent 端 oneshot 永不 resolve 而死锁。
+        if let AppEvent::PermissionRequest {
+            request,
+            response_tx,
+            subagent_name,
+        } = event
+        {
+            let pending = crate::tui::app::types::PermissionPending {
+                request,
+                response_tx,
+                subagent_name,
+            };
+            match &mut self.state {
+                // 弹窗已打开：新请求入队，不覆盖当前请求
+                AppState::Permission { pending: queue, .. } => queue.push(pending),
+                _ => {
+                    self.state = AppState::Permission {
+                        pending: vec![pending],
+                        selected: 0,
+                    };
+                }
+            }
+            return Ok(());
+        }
+
         // 非 Chat 覆盖层状态下，非键盘事件仍需转发给 Chat 处理器，
         // 确保 agent 响应、工具结果等不被丢弃。
-        let is_overlay = !matches!(&self.state, AppState::Chat | AppState::AskUser { .. });
+        let is_overlay = !matches!(
+            &self.state,
+            AppState::Chat | AppState::AskUser { .. } | AppState::Permission { .. }
+        );
         let is_local_input = matches!(
             &event,
             AppEvent::InputKey(_)
@@ -508,7 +538,88 @@ impl App {
                 };
                 st.handle_event(event, &mut self.state)?;
             }
+            AppState::Permission { .. } => {
+                if let AppEvent::InputKey(key) = event {
+                    let (mut pending, mut selected) =
+                        match std::mem::replace(&mut self.state, AppState::Chat) {
+                            AppState::Permission { pending, selected } => (pending, selected),
+                            other => {
+                                self.state = other;
+                                return Ok(());
+                            }
+                        };
+                    let done = crate::tui::permission_dialog::handle_key(key, &mut selected);
+                    if done {
+                        self.reply_permission(&mut pending, selected);
+                    } else {
+                        self.state = AppState::Permission { pending, selected };
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// 回复当前权限请求（队列队首），并批量处理同组其余请求：
+    /// - Always：写入会话规则后，同组中已被新规则覆盖的请求自动放行
+    /// - Deny：同组其余 pending 请求一并拒绝
+    /// - Once：仅回复当前请求
+    fn reply_permission(
+        &mut self,
+        pending: &mut Vec<crate::tui::app::types::PermissionPending>,
+        selected: usize,
+    ) {
+        let reply = crate::tui::permission_dialog::reply_from_selected(selected);
+        let Some(current) = pending.first() else {
+            self.state = AppState::Chat;
+            return;
+        };
+        let current_group = current.subagent_name.clone();
+        let current_permission = current.request.permission.clone();
+        let current_always = current.request.always_patterns.clone();
+        let current = pending.remove(0);
+
+        if reply == crate::permission::PermissionReply::Always {
+            self.agent
+                .permission()
+                .add_session_rules(&current_permission, &current_always);
+        }
+        let _ = current.response_tx.send(reply);
+
+        if reply == crate::permission::PermissionReply::Always
+            || reply == crate::permission::PermissionReply::Deny
+        {
+            let pm = self.agent.permission();
+            let mut i = 0;
+            while i < pending.len() {
+                let same_group = pending[i].subagent_name == current_group;
+                let auto_reply = if same_group {
+                    match reply {
+                        crate::permission::PermissionReply::Always => pm.rules_allow(
+                            &pending[i].request.permission,
+                            &pending[i].request.patterns,
+                        ),
+                        _ => true,
+                    }
+                } else {
+                    false
+                };
+                if auto_reply {
+                    let p = pending.remove(i);
+                    let _ = p.response_tx.send(reply);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        if pending.is_empty() {
+            self.state = AppState::Chat;
+        } else {
+            self.state = AppState::Permission {
+                pending: std::mem::take(pending),
+                selected: 0,
+            };
+        }
     }
 }

@@ -80,6 +80,7 @@ pub struct ChatWidget<'a> {
     pub input_area_height: u16,
     pub directory: &'a str,
     pub plan_mode: bool,
+    pub yolo_mode: bool,
     pub show_suggestions: bool,
     pub command_suggestions: &'a [command::CommandEntry],
     pub selected_suggestion: usize,
@@ -564,21 +565,30 @@ impl<'a> ChatWidget<'a> {
             ratio * 100.0,
         );
 
-        let mut left_spans = vec![
-            Span::styled(format!(" {} ", self.directory), gray),
-            Span::styled("· ", gray),
-            Span::styled(format!("{} ", self.model_name), gray),
-        ];
-
-        if self.scroll_offset > 0 {
-            left_spans.push(Span::styled(format!("↑{} ", self.scroll_offset), gray));
-        }
+        let mut left_spans = Vec::new();
 
         if self.plan_mode {
             left_spans.push(Span::styled(
-                "[● 规划模式·只读] ",
+                " PLAN ",
                 Style::default().fg(PLAN_BADGE).add_modifier(Modifier::BOLD),
             ));
+        }
+
+        if self.yolo_mode {
+            left_spans.push(Span::styled(
+                " YOLO ",
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        left_spans.push(Span::styled(format!(" {} ", self.directory), gray));
+        left_spans.push(Span::styled("· ", gray));
+        left_spans.push(Span::styled(format!("{} ", self.model_name), gray));
+
+        if self.scroll_offset > 0 {
+            left_spans.push(Span::styled(format!("↑{} ", self.scroll_offset), gray));
         }
 
         let mut right_spans = vec![Span::styled(" ", gray)];

@@ -98,6 +98,7 @@ impl App {
             input_area_height,
             directory: &self.work_dir,
             plan_mode: self.plan_mode,
+            yolo_mode: self.agent.permission().mode() == crate::permission::PermissionMode::Yolo,
             show_suggestions: self.cmd_suggestion.show,
             command_suggestions: &self.cmd_suggestion.items,
             selected_suggestion: self.cmd_suggestion.selected,
@@ -128,6 +129,7 @@ impl App {
             | AppState::Tasks { .. }
             | AppState::TaskDetail { .. }
             | AppState::Setup(_) => false,
+            AppState::Permission { .. } => false,
             AppState::AskUser { editing_custom, .. } => *editing_custom,
             AppState::AddModel(_) => true,
         };
@@ -301,6 +303,20 @@ impl App {
             if let Some(pos) = cursor_pos {
                 frame.set_cursor_position(pos);
             }
+        }
+
+        if let AppState::Permission {
+            pending, selected, ..
+        } = &self.state
+            && let Some(first) = pending.first()
+        {
+            crate::tui::permission_dialog::render_permission_dialog(
+                area,
+                frame.buffer_mut(),
+                &first.request,
+                *selected,
+                first.subagent_name.as_deref(),
+            );
         }
 
         // JediTerm 下 ratatui 的增量 diff 会导致渲染错位，强制全量重绘

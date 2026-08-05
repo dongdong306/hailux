@@ -7,6 +7,43 @@ description: Learn about hailux features, slash commands, keyboard shortcuts, @f
 
 hailux is a terminal AI coding assistant that supports streaming conversations, tool calls, Skills, custom commands, MCP server integration, and subagent delegation.
 
+## Command Line Interface
+
+| Command | Description |
+|---------|-------------|
+| `hailux` | Launch the interactive TUI |
+| `hailux --path <dir>` | Set the working directory |
+| `hailux --rebuild-db` | Rebuild the database (clears all history), used when migration fails; the old database is backed up first |
+| `hailux --yolo` | YOLO mode: skip all permission confirmations (works in both TUI and non-interactive mode) |
+| `hailux run <message>` | Non-interactive mode: send a single message and print the reply (reads from stdin if the message is omitted) |
+| `hailux run --model <provider/model>` | Override the model specified in config |
+| `hailux run --no-tools` | Disable all tool calls (including MCP), pure chat mode |
+
+## Permissions
+
+By default, operations inside the working directory are allowed without confirmation:
+
+- bash commands, `read`/`edit`/`write`/`grep`/`glob` inside the working directory run freely
+- reading sensitive files such as `.env` / `.env.local` asks for confirmation (`.env.example` is allowed)
+- any operation touching content outside the working directory (e.g. `cat ../secrets.txt`, `rm /tmp/x`, editing a file outside the project) asks for confirmation
+- MCP tools always ask for confirmation
+
+Override the defaults with rules in `~/.hailux/config.toml`:
+
+```toml
+[permission.bash]
+"rm *" = "deny"
+"git push *" = "ask"
+
+[permission.read]
+"*.env" = "allow"   # 关闭 .env 读取确认
+
+[permission.external_directory]
+"C:\\Users\\me\\shared\\*" = "allow"
+```
+
+Choosing "always" in the permission dialog persists the rule for the current session; `hailux --yolo` skips all confirmations.
+
 ## Slash Commands
 
 Trigger them by starting with `/` in the input box. After typing `/`, a command completion list pops up automatically. Use `↑↓` to select, `Tab` or `Enter` to confirm:

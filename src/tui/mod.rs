@@ -8,6 +8,7 @@ mod input;
 mod markdown;
 mod mcp_viewer;
 mod model_picker;
+mod permission_dialog;
 pub mod session_picker;
 mod setup;
 pub mod skills_viewer;
