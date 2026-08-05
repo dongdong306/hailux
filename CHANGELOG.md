@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/dongdong306/hailux/compare/v0.4.0...v0.5.0) (2026-08-05)
+
+
+### Improvements
+
+* add configurable permission system with YOLO mode ([5bb8d59](https://github.com/dongdong306/hailux/commit/5bb8d59472150cbc8a377b5f019fa0a018fbdfbb))
+* enforce read-only bash commands in plan mode ([cc69fc7](https://github.com/dongdong306/hailux/commit/cc69fc7eeb255c44689b7b6a752f98dbe5de99df))
+
+
+### Bugfixes
+
+* exclude popup wait time from response timing stats ([9e1a7e9](https://github.com/dongdong306/hailux/commit/9e1a7e924bb57f6829d4ade59cbd1855ad5297fc))
+* resolve Windows short-name path mismatch in permission tests ([e305e35](https://github.com/dongdong306/hailux/commit/e305e35ac9c24ac48a597a3a0c96c71f3090845b))
+
+
+### Refactor
+
+* broaden system prompt scope and add confirm-before-act workflow ([8ce04a5](https://github.com/dongdong306/hailux/commit/8ce04a585afccb50b65dbae3adeb654951d6bbb1))
+
 ## [0.4.0](https://github.com/dongdong306/hailux/compare/v0.3.0...v0.4.0) (2026-08-02)
 
 
