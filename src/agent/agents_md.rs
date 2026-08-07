@@ -28,7 +28,15 @@ pub fn discover_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
         }
     }
 
-    // 2. 从 work_dir 向上遍历（最多3级），收集祖先目录的 AGENTS.md
+    // 2. 工作目录及祖先目录的 AGENTS.md
+    found.extend(discover_local_agent_md(work_dir));
+
+    found
+}
+
+/// 从 work_dir 向上遍历（最多3级），收集祖先目录的 AGENTS.md。
+/// 返回结果按优先级从低到高排列（最远祖先在前，work_dir 在最后）。
+fn discover_local_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
     let mut ancestors: Vec<(PathBuf, String)> = Vec::new();
     let mut current = Some(work_dir);
     let mut depth = 0;
@@ -46,9 +54,7 @@ pub fn discover_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
     }
     // ancestors 的顺序是从近到远（work_dir 在前），需要反转
     ancestors.reverse();
-    found.extend(ancestors);
-
-    found
+    ancestors
 }
 
 /// 将 AGENTS.md 列表格式化为注入 system prompt 的文本（包含路径与内容）。
@@ -99,7 +105,7 @@ mod tests {
         let tmp =
             std::env::temp_dir().join(format!("hailux-agent-md-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let result = discover_agent_md(&tmp);
+        let result = discover_local_agent_md(&tmp);
         assert!(result.is_empty());
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -111,7 +117,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join(AGENT_MD_FILE_NAME), "# Rules\nAlways use tabs").unwrap();
 
-        let result = discover_agent_md(&tmp);
+        let result = discover_local_agent_md(&tmp);
         assert_eq!(result.len(), 1);
         assert!(result[0].0.ends_with(AGENT_MD_FILE_NAME));
         assert!(result[0].1.contains("Always use tabs"));
@@ -131,7 +137,7 @@ mod tests {
         std::fs::write(&root_md, "# Root\nRoot rule").unwrap();
         std::fs::write(&child_md, "# Child\nChild rule").unwrap();
 
-        let result = discover_agent_md(&child);
+        let result = discover_local_agent_md(&child);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, root_md);
         assert_eq!(result[1].0, child_md);
@@ -172,7 +178,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("agents.md"), "# Lowercase\nlower rule").unwrap();
 
-        let result = discover_agent_md(&tmp);
+        let result = discover_local_agent_md(&tmp);
         assert_eq!(result.len(), 1);
         assert!(result[0].1.contains("lower rule"));
 
