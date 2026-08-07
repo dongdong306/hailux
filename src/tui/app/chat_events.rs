@@ -520,7 +520,11 @@ impl App {
         self.storage.append_message(&session_id, &stored).await?;
 
         if new_session {
-            let title: String = input.chars().take(50).collect();
+            let title: String = if input.chars().count() > 50 {
+                format!("{}...", input.chars().take(50).collect::<String>())
+            } else {
+                input.chars().take(50).collect()
+            };
             self.storage
                 .update_session_title(&session_id, &title)
                 .await?;
