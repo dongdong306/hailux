@@ -22,8 +22,8 @@ use async_openai::{
 use futures_util::StreamExt;
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -151,7 +151,7 @@ impl Agent {
     }
 
     /// 流式聊天，通过事件通道将输出发送给 TUI
-    /// 返回一个 Arc<Mutex<Self>> 用于在独立 task 中运行
+    /// 在独立 tokio task 中运行，完成后通过 AgentComplete 事件回传最终消息
     pub fn chat_stream(
         &mut self,
         user_input: &str,
@@ -171,7 +171,7 @@ impl Agent {
         let permission = self.permission.clone();
         let work_dir = self.work_dir.clone();
 
-        let agent_handle = Arc::new(Mutex::new(AgentStreamState {
+        let mut state = AgentStreamState {
             client,
             tool_registry,
             messages,
@@ -180,55 +180,21 @@ impl Agent {
             plan_mode: self.plan_mode,
             permission,
             work_dir,
-        }));
+        };
 
-        let handle = agent_handle.clone();
         let tx_clone = event_tx.clone();
         let cancel = self.cancel.clone();
         self.cancel.store(false, Ordering::Relaxed);
         tokio::spawn(async move {
-            if let Err(e) = run_stream_loop(handle.clone(), cancel, &tx_clone).await {
+            if let Err(e) = run_stream_loop(&mut state, cancel, &tx_clone).await {
                 let _ = tx_clone.try_send(AppEvent::AgentChunk(format!("\n[Error: {}]", e)));
-                let mut messages = {
-                    let state = handle.lock().map_err(|e| e.to_string());
-                    match state {
-                        Ok(mut state) => std::mem::take(&mut state.messages),
-                        Err(_) => Vec::new(),
-                    }
-                };
-                if !messages.is_empty() {
-                    let needs_assistant = !matches!(
-                        messages.last().map(|m| m.as_ref()),
-                        Some(CompatibleChatCompletionRequestMessage::Assistant(_))
-                    );
-                    if needs_assistant {
-                        let msg: SharedMessage = Arc::new(
-                            CompatibleChatCompletionRequestAssistantMessage {
-                                base: ChatCompletionRequestAssistantMessage {
-                                    content: Some(
-                                        ChatCompletionRequestAssistantMessageContent::Text(
-                                            format!("[Error: {}]", e),
-                                        ),
-                                    ),
-                                    ..Default::default()
-                                },
-                                reasoning_content: None,
-                            }
-                            .into(),
-                        );
-                        messages.push(Arc::clone(&msg));
-                        let _ = tx_clone.try_send(AppEvent::PersistMessage {
-                            msg,
-                            usage: None,
-                            display: None,
-                        });
-                    }
-                }
-                let _ = tx_clone.try_send(AppEvent::AgentComplete {
-                    messages,
-                    usages: Vec::new(),
-                    status: TaskStatus::Error,
-                });
+                finalize_messages(
+                    &mut state.messages,
+                    format!("[Error: {}]", e),
+                    &tx_clone,
+                    Vec::new(),
+                    TaskStatus::Error,
+                );
             }
         });
 
@@ -322,6 +288,9 @@ impl Agent {
         ));
 
         let tx = event_tx.clone();
+        // 安全约定：chat_stream 与 request_compaction 共享同一个 cancel 标志。
+        // 不会并发运行：TUI 层 compact_conversation() 会检查 is_processing，
+        // 确保流式对话进行中不会触发压缩，反之亦然。
         self.cancel.store(false, Ordering::Relaxed);
         let cancel = self.cancel.clone();
         tokio::spawn(async move {
@@ -451,27 +420,59 @@ fn emit_persist_message(
     });
 }
 
+/// 确保消息列表以 Assistant 消息结尾，然后发送 AgentComplete 事件。
+/// 若最后一条不是 Assistant，则追加一条内容为 `fallback_content` 的 Assistant 消息。
+/// 被 `chat_stream` 错误路径和 `finalize_cancelled` 共用，避免逻辑重复。
+fn finalize_messages(
+    messages: &mut Vec<SharedMessage>,
+    fallback_content: String,
+    event_tx: &EventTx,
+    usages: Vec<MessageUsage>,
+    status: TaskStatus,
+) {
+    let needs_assistant = !matches!(
+        messages.last().map(|m| m.as_ref()),
+        Some(CompatibleChatCompletionRequestMessage::Assistant(_))
+    );
+    if needs_assistant {
+        let msg: SharedMessage = Arc::new(
+            CompatibleChatCompletionRequestAssistantMessage {
+                base: ChatCompletionRequestAssistantMessage {
+                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                        fallback_content,
+                    )),
+                    ..Default::default()
+                },
+                reasoning_content: None,
+            }
+            .into(),
+        );
+        messages.push(Arc::clone(&msg));
+        emit_persist_message(event_tx, &msg, None, None);
+    }
+    let final_messages = std::mem::take(messages);
+    let _ = event_tx.try_send(AppEvent::AgentComplete {
+        messages: final_messages,
+        usages,
+        status,
+    });
+}
+
 async fn run_stream_loop(
-    state: Arc<Mutex<AgentStreamState>>,
+    state: &mut AgentStreamState,
     cancel: Arc<AtomicBool>,
     event_tx: &EventTx,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut all_usages: Vec<MessageUsage> = Vec::new();
     loop {
         if cancel.load(Ordering::Relaxed) {
-            finalize_cancelled(&state, event_tx, all_usages).await?;
+            finalize_cancelled(state, event_tx, all_usages).await?;
             return Ok(());
         }
 
-        let request = {
-            let state = state.lock().map_err(|e| e.to_string())?;
-            state.build_request()?.build()?
-        };
+        let request = state.build_request()?.build()?;
 
-        let client = {
-            let state = state.lock().map_err(|e| e.to_string())?;
-            state.client.clone()
-        };
+        let client = state.client.clone();
 
         let mut stream = {
             let chat = client.chat();
@@ -488,7 +489,7 @@ async fn run_stream_loop(
                     _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
                         if cancel.load(Ordering::Relaxed) {
                             let _ = event_tx.try_send(AppEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
-                            finalize_cancelled(&state, event_tx, all_usages).await?;
+                            finalize_cancelled(state, event_tx, all_usages).await?;
                             return Ok(());
                         }
                     }
@@ -563,15 +564,9 @@ async fn run_stream_loop(
 
         if stream_cancelled {
             let _ = event_tx.try_send(AppEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
-            push_partial_assistant(
-                &state,
-                &ai_message,
-                &ai_reasoning,
-                &tool_calls_map,
-                event_tx,
-            )
-            .await?;
-            finalize_cancelled(&state, event_tx, all_usages).await?;
+            push_partial_assistant(state, &ai_message, &ai_reasoning, &tool_calls_map, event_tx)
+                .await?;
+            finalize_cancelled(state, event_tx, all_usages).await?;
             return Ok(());
         }
 
@@ -590,7 +585,6 @@ async fn run_stream_loop(
                 .collect();
 
             let pushed_msg: SharedMessage = {
-                let mut state = state.lock().map_err(|e| e.to_string())?;
                 let msg: SharedMessage = Arc::new(
                     CompatibleChatCompletionRequestAssistantMessage {
                         base: ChatCompletionRequestAssistantMessage {
@@ -628,15 +622,14 @@ async fn run_stream_loop(
 
             emit_persist_message(event_tx, &pushed_msg, last_usage, None);
 
-            handle_tool_calls_stream(&state, &full_tool_calls, &cancel, event_tx).await?;
+            handle_tool_calls_stream(state, &full_tool_calls, &cancel, event_tx).await?;
 
             if cancel.load(Ordering::Relaxed) {
-                finalize_cancelled(&state, event_tx, all_usages).await?;
+                finalize_cancelled(state, event_tx, all_usages).await?;
                 return Ok(());
             }
         } else {
             let pushed_msg: SharedMessage = {
-                let mut state = state.lock().map_err(|e| e.to_string())?;
                 let msg: SharedMessage = Arc::new(
                     CompatibleChatCompletionRequestAssistantMessage {
                         base: ChatCompletionRequestAssistantMessage {
@@ -672,10 +665,7 @@ async fn run_stream_loop(
         }
     }
 
-    let final_messages = {
-        let mut state = state.lock().map_err(|e| e.to_string())?;
-        std::mem::take(&mut state.messages)
-    };
+    let final_messages = std::mem::take(&mut state.messages);
     let _ = event_tx.try_send(AppEvent::AgentComplete {
         messages: final_messages,
         usages: all_usages,
@@ -685,7 +675,7 @@ async fn run_stream_loop(
 }
 
 async fn push_partial_assistant(
-    state: &Arc<Mutex<AgentStreamState>>,
+    state: &mut AgentStreamState,
     ai_message: &str,
     ai_reasoning: &str,
     tool_calls_map: &BTreeMap<u32, PartialToolCall>,
@@ -709,7 +699,6 @@ async fn push_partial_assistant(
         .collect();
 
     let pushed_msgs: Vec<SharedMessage> = {
-        let mut state = state.lock().map_err(|e| e.to_string())?;
         let mut msgs = Vec::new();
 
         let assistant_msg: SharedMessage = Arc::new(
@@ -772,69 +761,39 @@ async fn push_partial_assistant(
 }
 
 async fn finalize_cancelled(
-    state: &Arc<Mutex<AgentStreamState>>,
+    state: &mut AgentStreamState,
     event_tx: &EventTx,
     usages: Vec<MessageUsage>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (final_messages, pending_msg, orphaned_tool_msgs) = {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-
-        // 检查最后一条 assistant 消息是否有 orphaned tool_calls（缺少对应的 tool result）
-        let mut orphaned_tool_msgs = Vec::new();
-        if let Some(msg) = guard.messages.last()
-            && let CompatibleChatCompletionRequestMessage::Assistant(a) = msg.as_ref()
-            && let Some(tool_calls) = &a.base.tool_calls
-            && !tool_calls.is_empty()
-        {
-            for tc in tool_calls {
-                let id = match tc {
-                    ChatCompletionMessageToolCalls::Function(f) => f.id.clone(),
-                    ChatCompletionMessageToolCalls::Custom(c) => c.id.clone(),
-                };
-                let tool_msg: SharedMessage = Arc::new(
-                    ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(
-                            "Tool execution aborted".to_string(),
-                        ),
-                        tool_call_id: id,
-                    }
-                    .into(),
-                );
-                orphaned_tool_msgs.push(tool_msg);
-            }
-        }
-        for msg in &orphaned_tool_msgs {
-            guard.messages.push(Arc::clone(msg));
-        }
-
-        let needs_assistant = !matches!(
-            guard.messages.last().map(|m| m.as_ref()),
-            Some(CompatibleChatCompletionRequestMessage::Assistant(_))
-        );
-        let pending = if needs_assistant {
-            let msg: SharedMessage = Arc::new(
-                CompatibleChatCompletionRequestAssistantMessage {
-                    base: ChatCompletionRequestAssistantMessage {
-                        content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                            "[Task interrupted]".to_string(),
-                        )),
-                        ..Default::default()
-                    },
-                    reasoning_content: None,
+    // 检查最后一条 assistant 消息是否有 orphaned tool_calls（缺少对应的 tool result）
+    let mut orphaned_tool_msgs = Vec::new();
+    if let Some(msg) = state.messages.last()
+        && let CompatibleChatCompletionRequestMessage::Assistant(a) = msg.as_ref()
+        && let Some(tool_calls) = &a.base.tool_calls
+        && !tool_calls.is_empty()
+    {
+        for tc in tool_calls {
+            let id = match tc {
+                ChatCompletionMessageToolCalls::Function(f) => f.id.clone(),
+                ChatCompletionMessageToolCalls::Custom(c) => c.id.clone(),
+            };
+            let tool_msg: SharedMessage = Arc::new(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(
+                        "Tool execution aborted".to_string(),
+                    ),
+                    tool_call_id: id,
                 }
                 .into(),
             );
-            guard.messages.push(Arc::clone(&msg));
-            Some(msg)
-        } else {
-            None
-        };
-        (
-            std::mem::take(&mut guard.messages),
-            pending,
-            orphaned_tool_msgs,
-        )
-    };
+            orphaned_tool_msgs.push(tool_msg);
+        }
+    }
+    for msg in &orphaned_tool_msgs {
+        state.messages.push(Arc::clone(msg));
+    }
+
+    // 为 orphaned tool 消息发送持久化 + ToolResult 事件
     for msg in &orphaned_tool_msgs {
         emit_persist_message(event_tx, msg, None, None);
         if let CompatibleChatCompletionRequestMessage::Tool(t) = msg.as_ref() {
@@ -850,19 +809,23 @@ async fn finalize_cancelled(
             });
         }
     }
-    if let Some(msg) = &pending_msg {
-        emit_persist_message(event_tx, msg, None, None);
-    }
-    let _ = event_tx.try_send(AppEvent::AgentComplete {
-        messages: final_messages,
+
+    // 注意：当 push_partial_assistant 已推入 [Assistant(partial), Tool(aborted)...] 时，
+    // finalize_messages 会检测到最后一条不是 Assistant（而是 Tool），
+    // 从而追加一条 "[Task interrupted]" Assistant 消息作为对 tool results 的回应。
+    // 这符合 OpenAI API 消息交替约束：Assistant → Tool → Assistant。
+    finalize_messages(
+        &mut state.messages,
+        "[Task interrupted]".to_string(),
+        event_tx,
         usages,
-        status: TaskStatus::Interrupted,
-    });
+        TaskStatus::Interrupted,
+    );
     Ok(())
 }
 
 async fn handle_tool_calls_stream(
-    state: &Arc<Mutex<AgentStreamState>>,
+    state: &mut AgentStreamState,
     tool_calls: &[ChatCompletionMessageToolCalls],
     cancel: &Arc<AtomicBool>,
     event_tx: &EventTx,
@@ -881,7 +844,6 @@ async fn handle_tool_calls_stream(
                 subagent_name: None,
             });
             let pushed_msg: SharedMessage = {
-                let mut state = state.lock().map_err(|e| e.to_string())?;
                 let msg: SharedMessage = Arc::new(
                     ChatCompletionRequestToolMessage {
                         content: ChatCompletionRequestToolMessageContent::Text(
@@ -906,17 +868,13 @@ async fn handle_tool_calls_stream(
             }
         };
 
-        let tool_arc = {
-            let state = state.lock().map_err(|e| e.to_string())?;
-            state.tool_registry.get_arc(name)
-        };
+        let tool_arc = state.tool_registry.get_arc(name);
 
         // 权限检查
         let permission_denied: Option<String> = if let Some(ref tool) = tool_arc {
             let needs_check = tool.permission_category().is_some();
             if needs_check {
                 let (perm_req, perm_mgr, plan_mode) = {
-                    let state = state.lock().map_err(|e| e.to_string())?;
                     let req = tool.extract_permission(arguments, &state.work_dir);
                     let pm = state.permission.clone();
                     let pm2 = state.plan_mode;
@@ -1033,7 +991,6 @@ async fn handle_tool_calls_stream(
         });
 
         let pushed_msg: SharedMessage = {
-            let mut state = state.lock().map_err(|e| e.to_string())?;
             let msg: SharedMessage = Arc::new(
                 ChatCompletionRequestToolMessage {
                     content: ChatCompletionRequestToolMessageContent::Text(result),

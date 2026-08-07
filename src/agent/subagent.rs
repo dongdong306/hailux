@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 const CONFIG_DIR_NAME: &str = ".hailux";
 const AGENT_DIR_NAME: &str = "agents";
 const AGENT_FILE_NAME: &str = "AGENTS.md";
+const TOOL_RESULT_MAX_CHARS: usize = 2000;
 
 /// 已发现的 subagent 配置
 #[derive(Debug, Clone)]
@@ -563,7 +564,7 @@ impl Tool for TaskTool {
             })?;
 
             // 判断是恢复已有会话还是创建新会话
-            let (sub_session_id, is_new_session) = if let Some(existing_id) = task_id {
+            let (sub_session_id, agent) = if let Some(existing_id) = task_id {
                 // 恢复已有会话：加载历史消息
                 let stored_messages =
                     storage
@@ -700,7 +701,7 @@ impl Tool for TaskTool {
                 (sub_session_id, agent)
             };
 
-            let mut agent = is_new_session;
+            let mut agent = agent;
 
             // 创建局部 event channel
             let (sub_tx, mut sub_rx) = create_event_channel();
@@ -778,8 +779,9 @@ impl Tool for TaskTool {
                         ..
                     } => {
                         if let Some(ref tx) = main_event_tx {
-                            let truncated = if result.chars().count() > 2000 {
-                                let safe: String = result.chars().take(2000).collect();
+                            let truncated = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
+                                let safe: String =
+                                    result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
                                 format!("{safe}...(truncated)")
                             } else {
                                 result
