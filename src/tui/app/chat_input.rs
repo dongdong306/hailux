@@ -473,9 +473,8 @@ impl App {
                 } else {
                     self.input.clear();
                     self.pending_pastes.clear();
-                    self.file_picker.pending_mentions.clear();
+                    self.file_picker.reset();
                     self.refresh_suggestions();
-                    self.file_picker.active = false;
                 }
             }
             KeyCode::Up => {
@@ -726,10 +725,12 @@ impl App {
         }
     }
 
-    fn collect_files(&self) -> Vec<String> {
+    /// 遍历工作目录，返回 (绝对路径, 小写形式) 列表，目录路径带尾部分隔符。
+    /// 仅在 picker 会话首次激活时调用一次，后续按键复用缓存。
+    fn collect_paths(&self) -> Vec<(String, String)> {
         use ignore::WalkBuilder;
         let work_path = std::path::Path::new(&self.work_dir);
-        let mut files = Vec::new();
+        let mut paths = Vec::new();
         let walker = WalkBuilder::new(work_path)
             .hidden(false)
             .git_ignore(true)
@@ -739,66 +740,71 @@ impl App {
             })
             .build();
         for entry in walker.flatten() {
-            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-                && let Some(abs) = entry.path().to_str()
-            {
-                files.push(abs.to_string());
+            if entry.path() == work_path {
+                continue;
+            }
+            let Some(abs) = entry.path().to_str() else {
+                continue;
+            };
+            let ft = entry.file_type();
+            if ft.is_some_and(|ft| ft.is_file()) {
+                let lower = abs.to_lowercase();
+                paths.push((abs.to_string(), lower));
+            } else if ft.is_some_and(|ft| ft.is_dir()) {
+                let mut s = abs.to_string();
+                s.push(std::path::MAIN_SEPARATOR);
+                let lower = s.to_lowercase();
+                paths.push((s, lower));
             }
         }
-        files.sort();
-        files
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        paths
     }
 
     pub(super) fn refresh_file_picker(&mut self) {
         let before_cursor = self.input.text_before_cursor();
-        if before_cursor.is_empty() {
+        let Some(query) = Self::file_picker_query(before_cursor) else {
             self.file_picker.active = false;
             return;
+        };
+        // 懒构建缓存：picker 会话期间仅首次遍历文件系统，其余按键只做内存过滤
+        if self.file_picker.cached.is_none() {
+            self.file_picker.cached = Some(self.collect_paths());
         }
+        let cached = self.file_picker.cached.as_ref().unwrap();
+        let q_lower = query.to_lowercase();
+        let limit = if query.is_empty() { 20 } else { 15 };
+        let mut results = Vec::with_capacity(limit);
+        for (path, lower) in cached {
+            if query.is_empty() || lower.contains(&q_lower) {
+                results.push(path.clone());
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+        if results.is_empty() {
+            self.file_picker.active = false;
+        } else {
+            self.file_picker.active = true;
+            self.file_picker.results = results;
+            self.file_picker.selected = 0;
+        }
+    }
 
-        let at_pos = before_cursor.rfind('@');
-        match at_pos {
-            None => {
-                self.file_picker.active = false;
-            }
-            Some(at_idx) => {
-                let before_at = &before_cursor[..at_idx];
-                let is_boundary =
-                    before_at.is_empty() || before_at.ends_with(|c: char| c.is_whitespace());
-                if !is_boundary {
-                    self.file_picker.active = false;
-                    return;
-                }
-                let query = &before_cursor[at_idx + 1..];
-                if query.contains(|c: char| c.is_whitespace()) {
-                    self.file_picker.active = false;
-                    return;
-                }
-                let files = self.collect_files();
-                let q_lower = query.to_lowercase();
-                let mut results: Vec<String> = files
-                    .into_iter()
-                    .filter(|f| {
-                        if query.is_empty() {
-                            return true;
-                        }
-                        f.to_lowercase().contains(&q_lower)
-                    })
-                    .collect();
-                if query.is_empty() {
-                    results.truncate(20);
-                } else {
-                    results.truncate(15);
-                }
-                if results.is_empty() {
-                    self.file_picker.active = false;
-                } else {
-                    self.file_picker.active = true;
-                    self.file_picker.results = results;
-                    self.file_picker.selected = 0;
-                }
-            }
+    /// 解析光标前输入中的 `@query` 片段；无有效 `@` 触发时返回 None。
+    /// 语义：`@` 前必须是行首或空白，query 内不含空白。
+    fn file_picker_query(before_cursor: &str) -> Option<&str> {
+        let at_idx = before_cursor.rfind('@')?;
+        let before_at = &before_cursor[..at_idx];
+        if !before_at.is_empty() && !before_at.ends_with(|c: char| c.is_whitespace()) {
+            return None;
         }
+        let query = &before_cursor[at_idx + 1..];
+        if query.contains(|c: char| c.is_whitespace()) {
+            return None;
+        }
+        Some(query)
     }
 
     fn select_file(&mut self) {
@@ -808,10 +814,14 @@ impl App {
             .get(self.file_picker.selected)
             .cloned()
         {
-            let rel_path = std::path::Path::new(&abs_path)
+            let is_dir = abs_path.ends_with(std::path::MAIN_SEPARATOR);
+            let mut rel_path = std::path::Path::new(&abs_path)
                 .strip_prefix(&self.work_dir)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| abs_path.clone());
+            if is_dir && !rel_path.ends_with(std::path::MAIN_SEPARATOR) {
+                rel_path.push(std::path::MAIN_SEPARATOR);
+            }
             let before_cursor = self.input.text_before_cursor();
             if let Some(at_idx) = before_cursor.rfind('@') {
                 self.input.drain_raw(at_idx..self.input.cursor());

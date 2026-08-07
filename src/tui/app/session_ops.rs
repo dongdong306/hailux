@@ -259,7 +259,7 @@ impl App {
         self.render.cache.clear();
         self.input.reset();
         self.pending_pastes.clear();
-        self.file_picker.pending_mentions.clear();
+        self.file_picker.reset();
         self.scroll_offset = 0;
         self.should_auto_scroll = true;
         self.agent
@@ -284,7 +284,7 @@ impl App {
         self.render.cache.clear();
         self.input.reset();
         self.pending_pastes.clear();
-        self.file_picker.pending_mentions.clear();
+        self.file_picker.reset();
         self.scroll_offset = 0;
         self.should_auto_scroll = true;
         self.agent.permission().clear_session();

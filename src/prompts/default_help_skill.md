@@ -1,6 +1,6 @@
 ---
 name: help
-description: Learn about hailux features, slash commands, keyboard shortcuts, @file mentions, and how to configure AGENTS.md, Skills, custom commands, MCP servers, and Subagents
+description: Learn about hailux features, slash commands, keyboard shortcuts, @file/@folder mentions, and how to configure AGENTS.md, Skills, custom commands, MCP servers, and Subagents
 ---
 
 # hailux User Guide

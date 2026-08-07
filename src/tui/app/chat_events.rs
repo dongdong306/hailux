@@ -462,7 +462,7 @@ impl App {
         self.timing.clear_pause();
         self.input.submit(&input);
         self.pending_pastes.clear();
-        self.file_picker.pending_mentions.clear();
+        self.file_picker.reset();
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
         self.messages.push(Message::User {
