@@ -1335,7 +1335,7 @@ pub(crate) const CHAT_FG: Color = Color::Rgb(248, 250, 252); // #F8FAFC
 pub(crate) const CHAT_PLACEHOLDER: Color = Color::Rgb(130, 130, 130); // #828282
 /// 粘贴元素高亮
 pub(crate) const CHAT_PASTE: Color = Color::Rgb(34, 211, 238); // #22D3EE
-/// 文件引用 `@file` 高亮
+/// 路径引用 `@file`/`@folder` 高亮
 pub(crate) const CHAT_FILE_MENTION: Color = Color::Rgb(251, 191, 36); // #FBBF24
 /// Plan 模式徽标
 pub(crate) const PLAN_BADGE: Color = Color::Rgb(217, 159, 7); // #D99F07

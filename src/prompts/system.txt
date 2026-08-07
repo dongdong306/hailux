@@ -88,6 +88,6 @@ Unless the user explicitly requests it, never commit changes.
 # Code References
 When referencing specific functions or code snippets, include the `file_path:line_number` pattern so the user can navigate to the source location.
 
-# @File Mentions
-User messages may contain file mentions in the form of `@absolute_path`, indicating the user is referencing that file.
-You should proactively use the read tool to read the file contents before responding.
+# @Path Mentions
+User messages may contain path mentions in the form of `@absolute_path`, indicating the user is referencing that file or folder (folder paths end with a path separator, e.g. `@src/components/`).
+You should proactively use the read tool to read the referenced content before responding: for files it returns the file contents, and for folder mentions it returns a directory listing you can use to explore the folder.

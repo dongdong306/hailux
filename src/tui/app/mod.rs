@@ -50,6 +50,20 @@ pub(super) struct FilePickerState {
     pub(super) results: Vec<String>,
     pub(super) selected: usize,
     pub(super) pending_mentions: Vec<(String, String)>,
+    /// 懒缓存的路径列表（path, lowercase），picker 会话期间只遍历一次文件系统。
+    /// None = 尚未构建，Some(vec) = 已构建（可能为空）
+    pub(super) cached: Option<Vec<(String, String)>>,
+}
+
+impl FilePickerState {
+    /// 输入内容被消费/重置时调用：关闭 picker 并清空缓存，下次 `@` 重新扫描
+    pub(super) fn reset(&mut self) {
+        self.active = false;
+        self.results.clear();
+        self.selected = 0;
+        self.pending_mentions.clear();
+        self.cached = None;
+    }
 }
 
 /// 命令补全建议
