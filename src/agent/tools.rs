@@ -597,10 +597,26 @@ async fn run_shell_command(
             message: e.to_string(),
         })?
     };
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    const MAX_OUTPUT_CHARS: usize = 5000;
+
+    let raw = if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).to_string()
     } else {
-        Ok(combine_output(&output.stdout, &output.stderr))
+        combine_output(&output.stdout, &output.stderr)
+    };
+
+    let char_count = raw.chars().count();
+    if char_count > MAX_OUTPUT_CHARS {
+        let truncated: String = raw.chars().take(MAX_OUTPUT_CHARS).collect();
+        Ok(format!(
+            "{}\n\n... Output truncated (showing {} of {} characters, {} more omitted)",
+            truncated,
+            MAX_OUTPUT_CHARS,
+            char_count,
+            char_count - MAX_OUTPUT_CHARS
+        ))
+    } else {
+        Ok(raw)
     }
 }
 
@@ -1394,7 +1410,12 @@ impl Tool for GlobTool {
                 })?
                 .compile_matcher();
 
+            const MAX_FILES: usize = 100;
+
             let mut results = String::new();
+            let mut file_count = 0usize;
+            let mut total_count = 0usize;
+            let mut truncated = false;
             for entry in walk_builder.build() {
                 let entry = entry.map_err(|e| ToolExecuteError {
                     message: e.to_string(),
@@ -1403,12 +1424,37 @@ impl Tool for GlobTool {
                     continue;
                 }
                 if glob_matcher.is_match(entry.path()) {
-                    results.push_str(&format!("{}\n", entry.path().canonicalize()?.display()));
+                    total_count += 1;
+                    if file_count < MAX_FILES {
+                        if let Some(canonical) = entry.path().canonicalize().ok() {
+                            results.push_str(&format!("{}\n", canonical.display()));
+                            file_count += 1;
+                        }
+                    }
+                    if total_count >= MAX_FILES * 5 {
+                        truncated = true;
+                        break;
+                    }
                 }
             }
 
             if results.is_empty() {
                 Ok("No matching files found".to_string())
+            } else if truncated {
+                results.push_str(&format!(
+                    "\n... Too many results, truncated (showing {} of {}+ files)",
+                    MAX_FILES,
+                    MAX_FILES * 5
+                ));
+                Ok(results)
+            } else if total_count > MAX_FILES {
+                results.push_str(&format!(
+                    "\n... Too many results, truncated (showing {} of {} files, {} more omitted)",
+                    MAX_FILES,
+                    total_count,
+                    total_count - MAX_FILES
+                ));
+                Ok(results)
             } else {
                 Ok(results)
             }
