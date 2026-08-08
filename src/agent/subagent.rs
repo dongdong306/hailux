@@ -644,27 +644,6 @@ impl Tool for TaskTool {
                 let title = format!("{}|{}", config.name, description);
                 let _ = storage.update_session_title(&sub_session_id, &title).await;
 
-                // 持久化 system prompt
-                let system_prompt = {
-                    let mut sp = config.system_prompt.clone();
-                    sp.push_str(&format!("\n\nCurrent working directory: {}", work_dir));
-                    sp
-                };
-
-                let sys_stored = crate::storage::StoredMessage {
-                    role: MessageRole::System,
-                    content: system_prompt,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    runtime_meta: None,
-                    think_ms: None,
-                    compacted: false,
-                };
-                let _ = storage.append_message(&sub_session_id, &sys_stored).await;
-
                 // 持久化 user prompt
                 let user_stored = crate::storage::StoredMessage {
                     role: MessageRole::User,

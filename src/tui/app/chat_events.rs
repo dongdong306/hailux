@@ -510,23 +510,6 @@ impl App {
         }
 
         let session_id = self.current_session_id.as_deref().unwrap().to_string();
-        if new_session && let Some(prompt) = self.agent.take_system_prompt() {
-            let sys_stored = StoredMessage {
-                role: MessageRole::System,
-                content: prompt,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                runtime_meta: None,
-                think_ms: None,
-                compacted: false,
-            };
-            self.storage
-                .append_message(&session_id, &sys_stored)
-                .await?;
-        }
         let stored = StoredMessage {
             role: MessageRole::User,
             content: input.clone(),
