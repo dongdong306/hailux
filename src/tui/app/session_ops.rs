@@ -157,18 +157,32 @@ impl App {
         self.messages = display_messages;
 
         for msg in &active_stored {
+            if msg.role == MessageRole::System {
+                continue;
+            }
             if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
                 chat_messages.push(std::sync::Arc::new(chat_msg));
             }
         }
 
         if !chat_messages.is_empty() {
-            let has_system = chat_messages
-                .iter()
-                .any(|m| crate::storage::compatible_message_role(m) == MessageRole::System);
+            let system_prompt = self.agent.take_system_prompt();
+
+            let mut final_messages = Vec::new();
+            if let Some(prompt) = &system_prompt {
+                final_messages.push(std::sync::Arc::new(
+                    async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                        content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                            prompt.clone(),
+                        ),
+                        name: None,
+                    }
+                    .into(),
+                ));
+            }
 
             if let Some(ref summary) = compact_summary {
-                let summary_msg: crate::agent::models::SharedMessage = std::sync::Arc::new(
+                final_messages.push(std::sync::Arc::new(
                     async_openai::types::chat::ChatCompletionRequestUserMessage {
                         content: async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
                             format!("[Context Summary]\n{}", summary),
@@ -176,45 +190,11 @@ impl App {
                         name: None,
                     }
                     .into(),
-                );
-
-                let preserved_system = if has_system {
-                    None
-                } else {
-                    self.agent.take_system_prompt()
-                };
-
-                let non_system: Vec<_> = chat_messages
-                    .into_iter()
-                    .filter(|m| crate::storage::compatible_message_role(m) != MessageRole::System)
-                    .collect();
-
-                let mut final_messages = Vec::new();
-                if let Some(prompt) = &preserved_system {
-                    final_messages.push(std::sync::Arc::new(
-                        async_openai::types::chat::ChatCompletionRequestSystemMessage {
-                            content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
-                                prompt.clone(),
-                            ),
-                            name: None,
-                        }
-                        .into(),
-                    ));
-                }
-                final_messages.push(summary_msg);
-                final_messages.extend(non_system);
-                self.agent.sync_messages(final_messages);
-            } else {
-                let preserved_system = if has_system {
-                    None
-                } else {
-                    self.agent.take_system_prompt()
-                };
-                self.agent.sync_messages(chat_messages);
-                if let Some(prompt) = preserved_system {
-                    self.agent.set_system_prompt(&prompt);
-                }
+                ));
             }
+
+            final_messages.extend(chat_messages);
+            self.agent.sync_messages(final_messages);
         }
 
         self.should_auto_scroll = true;

@@ -1425,11 +1425,11 @@ impl Tool for GlobTool {
                 }
                 if glob_matcher.is_match(entry.path()) {
                     total_count += 1;
-                    if file_count < MAX_FILES {
-                        if let Some(canonical) = entry.path().canonicalize().ok() {
-                            results.push_str(&format!("{}\n", canonical.display()));
-                            file_count += 1;
-                        }
+                    if file_count < MAX_FILES
+                        && let Ok(canonical) = entry.path().canonicalize()
+                    {
+                        results.push_str(&format!("{}\n", canonical.display()));
+                        file_count += 1;
                     }
                     if total_count >= MAX_FILES * 5 {
                         truncated = true;
