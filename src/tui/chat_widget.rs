@@ -521,11 +521,11 @@ impl<'a> ChatWidget<'a> {
         let elapsed = sent_at.elapsed().as_secs_f64();
         let ch = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
 
-        let is_thinking = matches!(
-            self.messages.last(),
-            Some(Message::AgentThinking { think_ms: None, .. })
-        );
-        let header = if is_thinking { "Thinking" } else { "Working" };
+        let header = match self.messages.last() {
+            Some(Message::AgentThinking { think_ms: None, .. }) => "Thinking",
+            Some(Message::CompactStreaming(_)) => "Compacting context",
+            _ => "Working",
+        };
 
         let esc_hint = if self.esc_hint_active {
             "再按一次 Esc 中断"

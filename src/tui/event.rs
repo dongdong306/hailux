@@ -85,8 +85,15 @@ pub enum AppEvent {
     CompactComplete {
         summary: String,
         session_id: String,
+        usage: Option<CompactUsage>,
     },
     CompactError(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompactUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
 }
 
 pub type EventTx = mpsc::Sender<AppEvent>;

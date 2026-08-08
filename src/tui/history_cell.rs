@@ -17,6 +17,11 @@ fn finish_hasher(h: DefaultHasher) -> u64 {
     h.finish()
 }
 
+fn format_seconds(ms: u64) -> String {
+    let secs = ms as f64 / 1000.0;
+    format!("{:.1}", secs)
+}
+
 /// 工具分类，每种工具拥有独立的动词、颜色和显示标签
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ToolCategory {
@@ -985,7 +990,7 @@ fn explore_item_from(name: &str, arguments: &str, result: Option<&str>) -> Explo
 }
 
 struct DividerCell {
-    label: &'static str,
+    label: String,
     hash_seed: u64,
 }
 
@@ -1002,7 +1007,7 @@ impl HistoryCell for DividerCell {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
 
-        let label_w = UnicodeWidthStr::width(self.label);
+        let label_w = UnicodeWidthStr::width(self.label.as_str());
         let total_w = width as usize;
 
         if label_w >= total_w {
@@ -1285,16 +1290,22 @@ pub(crate) fn messages_to_cells(
             Message::CompactMarker {
                 summary: _,
                 compacted_count,
+                total_ms,
             } => {
+                let label = if let Some(ms) = total_ms {
+                    format!("─ Context compacted ({}s) ", format_seconds(*ms))
+                } else {
+                    "─ Context compacted ".to_string()
+                };
                 cells.push(Box::new(DividerCell {
-                    label: "─ Context compacted ",
+                    label,
                     hash_seed: *compacted_count as u64,
                 }));
                 i += 1;
             }
             Message::CompactStreaming(text) => {
                 cells.push(Box::new(DividerCell {
-                    label: "─ Compacting context ",
+                    label: "─ Compacting context ".to_string(),
                     hash_seed: {
                         let mut h = DefaultHasher::new();
                         text.hash(&mut h);
@@ -1918,5 +1929,30 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
         format!("{}...", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_seconds;
+
+    #[test]
+    fn format_seconds_zero() {
+        assert_eq!(format_seconds(0), "0.0");
+    }
+
+    #[test]
+    fn format_seconds_exact_second() {
+        assert_eq!(format_seconds(1000), "1.0");
+    }
+
+    #[test]
+    fn format_seconds_subsecond() {
+        assert_eq!(format_seconds(550), "0.6");
+    }
+
+    #[test]
+    fn format_seconds_large() {
+        assert_eq!(format_seconds(12_345), "12.3");
     }
 }
