@@ -138,6 +138,26 @@ impl TimingStats {
         self.paused_total = Duration::ZERO;
         self.paused_at = None;
     }
+
+    /// 开始一轮新的请求计时：记录发送时刻、清空上一轮耗时与暂停状态。
+    pub(super) fn start_request(&mut self) {
+        self.user_msg_sent_at = Some(Instant::now());
+        self.last_total_ms = None;
+        self.clear_pause();
+    }
+
+    /// 结束计时：记录最终耗时并清空进行中状态。
+    pub(super) fn finish(&mut self, now: Instant) {
+        self.last_total_ms = self.effective_elapsed_ms(now);
+        self.user_msg_sent_at = None;
+        self.clear_pause();
+    }
+
+    /// 中止计时：不记录耗时，直接清空进行中状态（用于错误 / 取消路径）。
+    pub(super) fn abort(&mut self) {
+        self.user_msg_sent_at = None;
+        self.clear_pause();
+    }
 }
 
 /// 渲染缓存与脏标记

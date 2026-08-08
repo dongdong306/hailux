@@ -40,6 +40,7 @@ impl App {
                 display_messages.push(Message::CompactMarker {
                     summary: compact_summary.clone().unwrap(),
                     compacted_count: idx,
+                    total_ms: None,
                 });
                 compact_marker_inserted = true;
             }
@@ -142,6 +143,7 @@ impl App {
             display_messages.push(Message::CompactMarker {
                 summary: compact_summary.clone().unwrap(),
                 compacted_count: stored.len(),
+                total_ms: None,
             });
         }
 

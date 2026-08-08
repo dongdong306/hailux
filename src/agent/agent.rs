@@ -6,7 +6,7 @@ use super::models::{
 use super::tools::ToolRegistry;
 use crate::permission::{PermissionManager, PermissionReply, PermissionResult};
 use crate::tui::AppEvent;
-use crate::tui::event::{EventTx, MessageUsage, TaskStatus};
+use crate::tui::event::{CompactUsage, EventTx, MessageUsage, TaskStatus};
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -325,6 +325,7 @@ impl Agent {
             };
 
             let mut summary = String::new();
+            let mut last_usage: Option<CompactUsage> = None;
             while let Some(chunk_result) = stream.next().await {
                 if cancel.load(Ordering::Relaxed) {
                     let _ = tx.try_send(AppEvent::CompactError("压缩已取消".to_string()));
@@ -332,6 +333,12 @@ impl Agent {
                 }
                 match chunk_result {
                     Ok(chunk) => {
+                        if let Some(usage) = &chunk.usage {
+                            last_usage = Some(CompactUsage {
+                                prompt_tokens: usage.prompt_tokens,
+                                completion_tokens: usage.completion_tokens,
+                            });
+                        }
                         for choice in chunk.choices {
                             if let Some(content) = choice.delta.base.content {
                                 let _ = tx.try_send(AppEvent::CompactChunk(content.clone()));
@@ -352,6 +359,7 @@ impl Agent {
                 let _ = tx.try_send(AppEvent::CompactComplete {
                     summary,
                     session_id,
+                    usage: last_usage,
                 });
             }
         });

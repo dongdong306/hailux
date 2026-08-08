@@ -7,8 +7,17 @@ use crate::agent::command_def::INIT_COMMAND_NAME;
 use crate::agent::subagent::{self, TaskTool};
 use crate::storage::{MessageRole, StoredMessage};
 use crate::tui::command;
-use crate::tui::event::{AppEvent, TaskStatus};
+use crate::tui::event::{AppEvent, CompactUsage, TaskStatus};
 use crate::tui::tasks_viewer::{TaskRecord, TaskRunStatus};
+
+/// 估算压缩后的 prompt token 数。
+/// 公式: old_prompt - compact_prompt + compact_completion
+/// (压缩请求的 prompt 包含系统提示开销，因此结果会偏低估，仅供 UI 展示)
+fn estimate_compact_prompt(old_prompt: u32, usage: CompactUsage) -> u32 {
+    old_prompt
+        .saturating_sub(usage.prompt_tokens)
+        .saturating_add(usage.completion_tokens)
+}
 
 impl App {
     pub(super) async fn handle_chat_event(&mut self, event: AppEvent) -> Result<()> {
@@ -62,9 +71,7 @@ impl App {
             } => {
                 // 计算最终耗时
                 self.finalize_thinking_ms();
-                if let Some(total_ms) = self.timing.effective_elapsed_ms(Instant::now()) {
-                    self.timing.last_total_ms = Some(total_ms);
-                }
+                self.timing.finish(Instant::now());
                 // 将耗时和模型名写入 runtime_meta（含 status）
                 if let Some(session_id) = &self.current_session_id
                     && let Some(total_ms) = self.timing.last_total_ms
@@ -88,9 +95,6 @@ impl App {
                         eprintln!("[warn] failed to persist runtime_meta: {e}");
                     }
                 }
-                // 重置实时时间字段（保留 final 字段用于展示）
-                self.timing.user_msg_sent_at = None;
-                self.timing.clear_pause();
 
                 if let Some(Message::AgentStreaming(text)) = self.messages.last() {
                     let text = text.clone();
@@ -320,6 +324,7 @@ impl App {
             AppEvent::CompactComplete {
                 summary,
                 session_id,
+                usage,
             } => {
                 let compact_session = self.current_session_id.as_deref() == Some(&session_id);
 
@@ -334,10 +339,30 @@ impl App {
                 if compact_session {
                     self.agent.apply_compaction(&summary);
 
+                    // 计算压缩耗时
+                    self.timing.finish(Instant::now());
+                    let total_ms = self.timing.last_total_ms;
+                    self.last_esc_time = None;
+                    self.esc_hint_active = false;
+
+                    // 更新 token 估算
+                    // 新上下文 ≈ context_prompt_tokens - compact_prompt_tokens + completion_tokens
+                    if let Some(usage) = usage {
+                        let estimated_prompt =
+                            estimate_compact_prompt(self.context_prompt_tokens, usage);
+                        self.set_session_usage(estimated_prompt, 0);
+                        if let Some(sid) = &self.current_session_id {
+                            self.storage
+                                .update_session_usage(sid, estimated_prompt as i64, 0)
+                                .await?;
+                        }
+                    }
+
                     if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
                         *self.messages.last_mut().unwrap() = Message::CompactMarker {
                             summary: summary.clone(),
                             compacted_count,
+                            total_ms,
                         };
                     }
 
@@ -354,6 +379,9 @@ impl App {
                     *self.messages.last_mut().unwrap() =
                         Message::Agent(format!("[压缩失败: {}]", msg));
                 }
+                self.timing.abort();
+                self.last_esc_time = None;
+                self.esc_hint_active = false;
                 self.is_processing = false;
                 self.input.set_processing(false);
                 self.render.dirty = true;
@@ -457,9 +485,7 @@ impl App {
     pub(super) async fn handle_user_message(&mut self, input: String) -> Result<()> {
         self.is_processing = true;
         self.input.set_processing(true);
-        self.timing.user_msg_sent_at = Some(Instant::now());
-        self.timing.last_total_ms = None;
-        self.timing.clear_pause();
+        self.timing.start_request();
         self.input.submit(&input);
         self.pending_pastes.clear();
         self.file_picker.reset();
@@ -665,6 +691,7 @@ impl App {
         self.input.set_processing(true);
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
+        self.timing.start_request();
 
         let label = if let Some(reason) = auto_reason {
             format!("正在压缩上下文（{}）...\n", reason)
@@ -679,6 +706,7 @@ impl App {
             if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
                 *self.messages.last_mut().unwrap() = Message::Agent(format!("[压缩失败: {}]", e));
             }
+            self.timing.abort();
             self.is_processing = false;
             self.input.set_processing(false);
         }
@@ -699,5 +727,39 @@ fn parse_task_id_from_result(result: &str) -> Option<String> {
         None
     } else {
         Some(id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_basic() {
+        let usage = CompactUsage {
+            prompt_tokens: 5000,
+            completion_tokens: 800,
+        };
+        // 10000 - 5000 + 800 = 5800
+        assert_eq!(estimate_compact_prompt(10_000, usage), 5_800);
+    }
+
+    #[test]
+    fn estimate_underflow_clamped() {
+        let usage = CompactUsage {
+            prompt_tokens: 15_000,
+            completion_tokens: 800,
+        };
+        // old_prompt < compact_prompt -> saturating_sub yields 0, +800
+        assert_eq!(estimate_compact_prompt(10_000, usage), 800);
+    }
+
+    #[test]
+    fn estimate_zero_completion() {
+        let usage = CompactUsage {
+            prompt_tokens: 3_000,
+            completion_tokens: 0,
+        };
+        assert_eq!(estimate_compact_prompt(10_000, usage), 7_000);
     }
 }
