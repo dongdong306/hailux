@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/dongdong306/hailux/compare/v0.5.0...v0.6.0) (2026-08-08)
+
+
+### Improvements
+
+* show compact duration and update token usage after context compaction ([78ec625](https://github.com/dongdong306/hailux/commit/78ec625de26727334368ac57b09f1e93d0e20669))
+* support [@folder](https://github.com/folder) mentions in path picker with lazy cache ([cc89118](https://github.com/dongdong306/hailux/commit/cc891180e939b8868c98c000bb548fa4bf05ad59))
+* truncate oversized bash output and glob results ([a8748f0](https://github.com/dongdong306/hailux/commit/a8748f0ee3b312b4e5530a519acac3db82b0763a))
+
+
+### Refactor
+
+* extract ancestor AGENTS.md discovery into dedicated function ([33cd9d6](https://github.com/dongdong306/hailux/commit/33cd9d6df70321e44050d7fe4c0fb2d96427bed1))
+* remove mutex wrapping in streaming loop and tidy constants ([49f0218](https://github.com/dongdong306/hailux/commit/49f0218ef441992e8280cbe1a9079c2ce9bc49e0))
+* stop persisting system prompt to database, inject at runtime ([d2f3f51](https://github.com/dongdong306/hailux/commit/d2f3f51814301525e57b8c00607fef3c21b40c05))
+
 ## [0.5.0](https://github.com/dongdong306/hailux/compare/v0.4.0...v0.5.0) (2026-08-05)
 
 
