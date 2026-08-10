@@ -76,20 +76,6 @@ impl PasteBurst {
         CharDecision::RetainFirstChar
     }
 
-    fn on_plain_char_no_hold(&mut self, now: Instant) -> Option<CharDecision> {
-        self.note_plain_char(now);
-        if self.active {
-            self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
-            return Some(CharDecision::BufferAppend);
-        }
-        if self.consecutive_plain_char_burst >= PASTE_BURST_MIN_CHARS {
-            return Some(CharDecision::BeginBuffer {
-                retro_chars: self.consecutive_plain_char_burst.saturating_sub(1),
-            });
-        }
-        None
-    }
-
     fn note_plain_char(&mut self, now: Instant) {
         match self.last_plain_char_time {
             Some(prev) if now.duration_since(prev) <= PASTE_BURST_CHAR_INTERVAL => {
@@ -156,31 +142,16 @@ impl PasteBurst {
         self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
     }
 
-    fn try_append_char_if_active(&mut self, ch: char, now: Instant) -> bool {
-        if self.active || !self.buffer.is_empty() {
-            self.append_char_to_buffer(ch, now);
-            true
-        } else {
-            false
-        }
-    }
-
     fn decide_begin_buffer(
         &mut self,
         now: Instant,
         before: &str,
         retro_chars: usize,
-    ) -> Option<(usize, String)> {
+    ) -> (usize, String) {
         let start_byte = retro_start_index(before, retro_chars);
         let grabbed = before[start_byte..].to_string();
-        let looks_pastey =
-            grabbed.chars().any(char::is_whitespace) || grabbed.chars().count() >= 16;
-        if looks_pastey {
-            self.begin_with_retro_grabbed(grabbed.clone(), now);
-            Some((start_byte, grabbed))
-        } else {
-            None
-        }
+        self.begin_with_retro_grabbed(grabbed.clone(), now);
+        (start_byte, grabbed)
     }
 
     fn flush_before_modified_input(&mut self) -> Option<String> {
@@ -397,11 +368,7 @@ impl App {
                 let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
                     || key.modifiers.contains(KeyModifiers::ALT);
                 if !has_ctrl_or_alt {
-                    if !c.is_ascii() {
-                        self.handle_non_ascii_char(c, now);
-                    } else {
-                        self.handle_ascii_char(c, now);
-                    }
+                    self.handle_plain_char(c, now);
                     self.refresh_suggestions();
                     self.refresh_file_picker();
                     return Ok(());
@@ -532,63 +499,24 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn handle_ascii_char(&mut self, c: char, now: Instant) {
-        match self.paste_burst.on_plain_char(c, now) {
+    pub(super) fn handle_plain_char(&mut self, ch: char, now: Instant) {
+        match self.paste_burst.on_plain_char(ch, now) {
             CharDecision::RetainFirstChar => {}
             CharDecision::BeginBufferFromPending => {
-                self.paste_burst.append_char_to_buffer(c, now);
+                self.paste_burst.append_char_to_buffer(ch, now);
             }
             CharDecision::BeginBuffer { retro_chars } => {
                 let before = self.input.text_before_cursor().to_string();
-                if let Some((start_byte, _)) =
+                let (start_byte, _) =
                     self.paste_burst
-                        .decide_begin_buffer(now, &before, retro_chars as usize)
-                {
-                    self.input.drain_raw(start_byte..self.input.cursor());
-                    self.paste_burst.append_char_to_buffer(c, now);
-                } else {
-                    self.input.insert_str(&c.to_string());
-                    self.refresh_suggestions();
-                }
+                        .decide_begin_buffer(now, &before, retro_chars as usize);
+                self.input.drain_raw(start_byte..self.input.cursor());
+                self.paste_burst.append_char_to_buffer(ch, now);
             }
             CharDecision::BufferAppend => {
-                self.paste_burst.append_char_to_buffer(c, now);
+                self.paste_burst.append_char_to_buffer(ch, now);
             }
         }
-    }
-
-    pub(super) fn handle_non_ascii_char(&mut self, ch: char, now: Instant) {
-        if self.paste_burst.try_append_char_if_active(ch, now) {
-            return;
-        }
-        if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
-        }
-        if let Some(decision) = self.paste_burst.on_plain_char_no_hold(now) {
-            match decision {
-                CharDecision::BufferAppend => {
-                    self.paste_burst.append_char_to_buffer(ch, now);
-                    return;
-                }
-                CharDecision::BeginBuffer { retro_chars } => {
-                    let before = self.input.text_before_cursor().to_string();
-                    if let Some((start_byte, _)) =
-                        self.paste_burst
-                            .decide_begin_buffer(now, &before, retro_chars as usize)
-                    {
-                        self.input.drain_raw(start_byte..self.input.cursor());
-                        self.paste_burst.append_char_to_buffer(ch, now);
-                        return;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
-        }
-        self.input.insert_str(&ch.to_string());
-        self.refresh_suggestions();
     }
 
     pub(super) fn handle_paste_burst_flush(&mut self, now: Instant) {

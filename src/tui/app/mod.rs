@@ -323,6 +323,32 @@ impl App {
                 break;
             }
 
+            // 在非处理状态下批量消费积压的 InputKey 事件，避免粘贴时逐字符渲染导致卡顿。
+            // 粘贴（尤其无 bracketed paste 的终端）会以独立按键事件发送每个字符，
+            // 若不批量处理，每个字符都会触发一次完整渲染周期。
+            if !self.is_processing && !self.should_quit && matches!(self.state, AppState::Chat) {
+                let batch_start = Instant::now();
+                let mut batch_count = 0usize;
+                loop {
+                    if batch_count >= BATCH_MAX_EVENTS
+                        || batch_start.elapsed() >= BATCH_RENDER_BUDGET
+                    {
+                        break;
+                    }
+                    match self.events.1.try_recv() {
+                        Ok(AppEvent::InputKey(key)) => {
+                            self.handle_chat_key(key).await?;
+                            batch_count += 1;
+                        }
+                        Ok(event) => {
+                            pending_input_events.push_back(event);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+
             // 批量消费积压的流式事件（chunk/tool 等），用户交互事件暂存后逐个处理
             if self.is_processing {
                 let batch_start = Instant::now();
