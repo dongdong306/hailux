@@ -39,18 +39,11 @@ pub enum Message {
     },
     /// subagent 执行过程中的一步（工具调用+结果）
     SubagentStep {
-        #[allow(dead_code)]
-        name: String,
         summary: String,
         is_done: bool,
-        /// 关联的 task 工具调用 ID（用于 messages_to_cells 分组）
-        #[allow(dead_code)]
-        task_call_id: Option<u64>,
     },
     /// 上下文压缩分隔标记（UI 可见，不进入 LLM 上下文）
     CompactMarker {
-        #[allow(dead_code)]
-        summary: String,
         compacted_count: usize,
         total_ms: Option<u64>,
     },

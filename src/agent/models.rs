@@ -24,17 +24,10 @@ pub struct ThinkingConfig {
     pub type_: String,
 }
 
-#[allow(dead_code)]
 impl ThinkingConfig {
     pub fn enabled() -> Self {
         Self {
             type_: "enabled".to_string(),
-        }
-    }
-
-    pub fn disabled() -> Self {
-        Self {
-            type_: "disabled".to_string(),
         }
     }
 }
@@ -167,7 +160,6 @@ impl Serialize for CompatibleCreateChatCompletionRequest {
 }
 
 /// 请求构建器，复用 CreateChatCompletionRequestArgs 并扩展特有字段
-#[allow(dead_code)]
 pub struct CompatibleCreateChatCompletionRequestArgs {
     base: CreateChatCompletionRequestArgs,
     custom_messages: Vec<SharedMessage>,
@@ -186,7 +178,6 @@ impl Default for CompatibleCreateChatCompletionRequestArgs {
     }
 }
 
-#[allow(dead_code)]
 impl CompatibleCreateChatCompletionRequestArgs {
     // === 委托标准字段 ===
 
@@ -217,26 +208,6 @@ impl CompatibleCreateChatCompletionRequestArgs {
 
     pub fn tool_choice(&mut self, choice: ChatCompletionToolChoiceOption) -> &mut Self {
         self.base.tool_choice(choice);
-        self
-    }
-
-    pub fn temperature(&mut self, temp: f32) -> &mut Self {
-        self.base.temperature(temp);
-        self
-    }
-
-    pub fn top_p(&mut self, top_p: f32) -> &mut Self {
-        self.base.top_p(top_p);
-        self
-    }
-
-    pub fn frequency_penalty(&mut self, penalty: f32) -> &mut Self {
-        self.base.frequency_penalty(penalty);
-        self
-    }
-
-    pub fn presence_penalty(&mut self, penalty: f32) -> &mut Self {
-        self.base.presence_penalty(penalty);
         self
     }
 

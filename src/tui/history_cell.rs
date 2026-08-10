@@ -1288,7 +1288,6 @@ pub(crate) fn messages_to_cells(
                 i += 1;
             }
             Message::CompactMarker {
-                summary: _,
                 compacted_count,
                 total_ms,
             } => {

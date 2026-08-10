@@ -38,7 +38,6 @@ impl App {
                 && !msg.compacted
             {
                 display_messages.push(Message::CompactMarker {
-                    summary: compact_summary.clone().unwrap(),
                     compacted_count: idx,
                     total_ms: None,
                 });
@@ -141,7 +140,6 @@ impl App {
             && stored.iter().all(|m| m.compacted)
         {
             display_messages.push(Message::CompactMarker {
-                summary: compact_summary.clone().unwrap(),
                 compacted_count: stored.len(),
                 total_ms: None,
             });

@@ -200,12 +200,10 @@ impl App {
                 subagent_name,
             } => {
                 self.finalize_thinking_ms();
-                if let Some(san) = subagent_name {
+                if subagent_name.is_some() {
                     self.messages.push(Message::SubagentStep {
-                        name: san.clone(),
                         summary: crate::tui::history_cell::tool_call_summary(&name, &arguments),
                         is_done: false,
-                        task_call_id: self.tasks.active_call_id,
                     });
                 } else {
                     if name == "task"
@@ -360,7 +358,6 @@ impl App {
 
                     if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
                         *self.messages.last_mut().unwrap() = Message::CompactMarker {
-                            summary: summary.clone(),
                             compacted_count,
                             total_ms,
                         };
