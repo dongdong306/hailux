@@ -97,11 +97,6 @@ impl Agent {
         &self.permission
     }
 
-    #[allow(dead_code)]
-    pub fn work_dir(&self) -> &str {
-        &self.work_dir
-    }
-
     /// 注册一个工具。
     /// config 中该工具权限类别被 `*` + deny 禁用时直接跳过注册，
     /// 使工具对模型完全不可见（不可被会话级 always 绕过）。

@@ -128,7 +128,6 @@ fn external_dir_request(dir: &Path, description: String) -> PermissionRequest {
         patterns: vec![pattern.clone()],
         always_patterns: vec![pattern],
         description,
-        metadata: serde_json::json!({}),
     }
 }
 
@@ -461,7 +460,6 @@ impl Tool for BashTool {
             patterns: vec![pattern.clone()],
             always_patterns: vec![pattern],
             description,
-            metadata: serde_json::json!({ "command": command }),
         })
     }
 
@@ -661,7 +659,6 @@ impl Tool for ReadTool {
             patterns: vec![path_str.clone()],
             always_patterns: vec!["*".to_string()],
             description: format!("Read file: {}", file_path),
-            metadata: serde_json::json!({ "file_path": file_path }),
         })
     }
 
@@ -834,7 +831,6 @@ impl Tool for EditTool {
             patterns: vec![path_str.clone()],
             always_patterns: vec!["*".to_string()],
             description: format!("Edit {}", file_path),
-            metadata: serde_json::json!({ "file_path": file_path }),
         })
     }
 
@@ -997,7 +993,6 @@ impl Tool for WriteTool {
             patterns: vec![path_str.clone()],
             always_patterns: vec!["*".to_string()],
             description: format!("Write {}", file_path),
-            metadata: serde_json::json!({ "file_path": file_path }),
         })
     }
 
@@ -1188,7 +1183,6 @@ impl Tool for GrepTool {
             patterns: vec![path_str.clone()],
             always_patterns: vec!["*".to_string()],
             description: format!("Search in: {}", path),
-            metadata: serde_json::json!({ "path": path }),
         })
     }
 
@@ -1354,7 +1348,6 @@ impl Tool for GlobTool {
             patterns: vec![path_str.clone()],
             always_patterns: vec!["*".to_string()],
             description: format!("Search in: {}", path),
-            metadata: serde_json::json!({ "path": path }),
         })
     }
 

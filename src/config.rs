@@ -156,14 +156,12 @@ fn default_context_window() -> u32 {
 // ── 可选模型条目（供 UI 使用）─────────────────────────────────
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ModelEntry {
     pub provider_id: String,
     pub provider_name: String,
     pub model_id: String,
     pub model_name: String,
     pub display: String,
-    pub context_window: u32,
     pub needs_setup: bool,
 }
 
@@ -201,14 +199,13 @@ impl Config {
 
             // 优先使用自定义模型
             if let Some(ref custom_models) = entry.models {
-                for (mid, custom) in custom_models {
+                for mid in custom_models.keys() {
                     result.push(ModelEntry {
                         provider_id: pid.clone(),
                         provider_name: provider_name.clone(),
                         model_id: mid.clone(),
                         model_name: mid.clone(),
                         display: format!("{}/{}", pid, mid),
-                        context_window: custom.context_window,
                         needs_setup: false,
                     });
                 }
@@ -226,7 +223,6 @@ impl Config {
                         model_id: m.id.to_string(),
                         model_name: m.name.to_string(),
                         display: format!("{}/{}", pid, m.id),
-                        context_window: m.context_window,
                         needs_setup: false,
                     });
                 }
@@ -243,7 +239,6 @@ impl Config {
                         model_id: m.id.to_string(),
                         model_name: m.name.to_string(),
                         display: format!("{}/{}", def.id, m.id),
-                        context_window: m.context_window,
                         needs_setup: true,
                     });
                 }

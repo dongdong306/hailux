@@ -399,7 +399,6 @@ impl Tool for McpTool {
             patterns: vec![self.registered_name.clone()],
             always_patterns: vec![self.registered_name.clone()],
             description: format!("MCP tool: {}", self.registered_name),
-            metadata: serde_json::json!({}),
         })
     }
 

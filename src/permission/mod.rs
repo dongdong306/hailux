@@ -94,9 +94,6 @@ pub struct PermissionRequest {
     pub always_patterns: Vec<String>,
     /// 给用户看的简短描述
     pub description: String,
-    /// 额外元数据（JSON）
-    #[allow(dead_code)]
-    pub metadata: serde_json::Value,
 }
 
 /// 用户对权限请求的回复
@@ -535,7 +532,6 @@ mod tests {
             patterns: vec!["example-server".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         }
     }
 
@@ -570,7 +566,6 @@ mod tests {
             patterns: vec!["git *".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
@@ -588,7 +583,6 @@ mod tests {
             patterns: vec!["rm *".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
     }
@@ -618,7 +612,6 @@ mod tests {
                 patterns: vec![cmd.into()],
                 always_patterns: vec![],
                 description: "test".into(),
-                metadata: serde_json::json!({}),
             };
             assert!(
                 matches!(pm.check(&req, false), PermissionResult::Allowed),
@@ -636,7 +629,6 @@ mod tests {
             patterns: vec!["C:\\proj\\src\\main.rs".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
@@ -649,7 +641,6 @@ mod tests {
             patterns: vec!["C:\\proj\\*".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         assert!(matches!(
             pm.check(&req, false),
@@ -665,7 +656,6 @@ mod tests {
             patterns: vec![path.into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         // .env / .env.local 默认询问
         assert!(matches!(
@@ -706,7 +696,6 @@ mod tests {
             patterns: vec!["rm -rf ./target *".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
     }
@@ -720,7 +709,6 @@ mod tests {
             patterns: vec!["git *".into()],
             always_patterns: vec![],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
@@ -812,7 +800,6 @@ mod tests {
             patterns: patterns.into_iter().map(String::from).collect(),
             always_patterns: vec!["C:\\proj\\*".into()],
             description: "test".into(),
-            metadata: serde_json::json!({}),
         };
         let first = req(vec!["C:\\proj\\sub\\*"]);
         assert!(matches!(
