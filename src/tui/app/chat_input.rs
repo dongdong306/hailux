@@ -252,6 +252,9 @@ impl App {
                 }
                 KeyCode::Down => {
                     self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    if self.scroll_offset == 0 {
+                        self.should_auto_scroll = true;
+                    }
                 }
                 KeyCode::PageUp => {
                     self.should_auto_scroll = false;
@@ -259,6 +262,9 @@ impl App {
                 }
                 KeyCode::PageDown => {
                     self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                    if self.scroll_offset == 0 {
+                        self.should_auto_scroll = true;
+                    }
                 }
                 KeyCode::Esc => {
                     let now = Instant::now();
@@ -488,6 +494,9 @@ impl App {
                 }
                 self.paste_burst.clear_window_after_non_char();
                 self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                if self.scroll_offset == 0 {
+                    self.should_auto_scroll = true;
+                }
             }
             _ => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {

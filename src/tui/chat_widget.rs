@@ -65,7 +65,8 @@ impl RenderCache {
 }
 
 pub struct RenderResult {
-    pub max_hide: u16,
+    pub total_lines: u16,
+    pub scroll_offset: u16,
 }
 
 pub struct ChatWidget<'a> {
@@ -74,6 +75,8 @@ pub struct ChatWidget<'a> {
     pub input_buffer: &'a str,
     pub input_elements: Vec<(std::ops::Range<usize>, ElementKind)>,
     pub scroll_offset: u16,
+    pub should_auto_scroll: bool,
+    pub last_total_lines: u16,
     pub is_processing: bool,
     pub model_name: &'a str,
     pub input_scroll_row: u16,
@@ -181,7 +184,7 @@ impl<'a> ChatWidget<'a> {
             timing_area.height,
         );
 
-        let max_hide = self.render_messages(messages_area, buf, indent);
+        let (_, total_lines) = self.render_messages(messages_area, buf, indent);
         self.render_timing(timing_area, buf);
         self.render_input(input_area, buf);
         self.render_status(status_area, buf);
@@ -194,10 +197,13 @@ impl<'a> ChatWidget<'a> {
             self.render_file_picker(area, input_area, buf);
         }
 
-        RenderResult { max_hide }
+        RenderResult {
+            total_lines,
+            scroll_offset: self.scroll_offset,
+        }
     }
 
-    fn render_messages(&mut self, messages_area: Rect, buf: &mut Buffer, indent: u16) -> u16 {
+    fn render_messages(&mut self, messages_area: Rect, buf: &mut Buffer, indent: u16) -> (u16, u16) {
         let scrollbar_width: u16 = 2;
         let text_width = messages_area.width.saturating_sub(scrollbar_width);
         let visible_height = messages_area.height;
@@ -219,6 +225,17 @@ impl<'a> ChatWidget<'a> {
         let total_lines: usize = segments.iter().map(|&(_, n)| n + 1).sum();
         let total_lines_u16 = total_lines as u16;
         let max_hide = total_lines_u16.saturating_sub(visible_height);
+
+        if !self.should_auto_scroll && self.scroll_offset > 0 {
+            let content_delta = total_lines_u16.saturating_sub(self.last_total_lines);
+            if content_delta > 0 {
+                self.scroll_offset = self.scroll_offset.saturating_add(content_delta);
+            }
+        }
+        if self.scroll_offset > max_hide {
+            self.scroll_offset = max_hide;
+        }
+
         let hide_from_bottom = self.scroll_offset.min(max_hide);
         let ratatui_scroll = max_hide.saturating_sub(hide_from_bottom);
 
@@ -348,7 +365,7 @@ impl<'a> ChatWidget<'a> {
             Clear.render(scrollbar_area, buf);
         }
 
-        max_hide
+        (max_hide, total_lines_u16)
     }
 
     fn render_input(&self, input_area: Rect, buf: &mut Buffer) {
