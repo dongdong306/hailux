@@ -5,6 +5,7 @@ mod permission;
 mod prompts;
 mod storage;
 mod tui;
+mod updater;
 
 use crate::agent::subagent;
 use crate::agent::{Agent, BashTool, EditTool};
@@ -32,6 +33,9 @@ struct Cli {
     /// 以 YOLO 模式运行（跳过所有权限确认），对 TUI 和非交互模式均生效
     #[arg(long = "yolo", global = true)]
     yolo: bool,
+    /// 检查并更新到最新版本
+    #[arg(long = "update", global = true)]
+    update: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -503,10 +507,18 @@ fn resolve_work_dir(cli_work_dir: Option<&str>) -> Result<PathBuf> {
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
+    // Windows: 清理上次更新可能残留的 .old 文件
+    #[cfg(windows)]
+    updater::cleanup_old_binary();
+
     let cli = Cli::parse();
 
     if cli.rebuild_db {
         return rebuild_database().await;
+    }
+
+    if cli.update {
+        return updater::run_update().await;
     }
 
     match cli.command {
