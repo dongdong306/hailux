@@ -93,6 +93,8 @@ impl App {
             input_buffer: &input_text,
             input_elements: self.input.element_info(),
             scroll_offset: self.scroll_offset,
+            should_auto_scroll: self.should_auto_scroll,
+            last_total_lines: self.last_total_lines,
             is_processing: self.is_processing,
             model_name: &self.resolved.display,
             input_scroll_row: self.input.input_scroll_row(),
@@ -114,9 +116,8 @@ impl App {
             render_cache: &mut self.render.cache,
         };
         let result = widget.render(area, frame.buffer_mut());
-        if self.scroll_offset > result.max_hide {
-            self.scroll_offset = result.max_hide;
-        }
+        self.scroll_offset = result.scroll_offset;
+        self.last_total_lines = result.total_lines;
 
         let show_cursor = match &self.state {
             AppState::Chat => !self.is_processing,
