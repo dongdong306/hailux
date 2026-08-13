@@ -203,7 +203,12 @@ impl<'a> ChatWidget<'a> {
         }
     }
 
-    fn render_messages(&mut self, messages_area: Rect, buf: &mut Buffer, indent: u16) -> (u16, u16) {
+    fn render_messages(
+        &mut self,
+        messages_area: Rect,
+        buf: &mut Buffer,
+        indent: u16,
+    ) -> (u16, u16) {
         let scrollbar_width: u16 = 2;
         let text_width = messages_area.width.saturating_sub(scrollbar_width);
         let visible_height = messages_area.height;
