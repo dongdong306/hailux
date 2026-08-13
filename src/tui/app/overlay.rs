@@ -40,7 +40,8 @@ impl App {
                                         let session_id = sessions[idx].id.clone();
                                         self.storage.delete_session(&session_id).await?;
                                         let work_dir = Self::current_work_dir()?;
-                                        *sessions = self.storage.list_top_level_sessions(&work_dir).await?;
+                                        *sessions =
+                                            self.storage.list_top_level_sessions(&work_dir).await?;
                                         *filtered_indices =
                                             Self::filter_sessions(sessions, search_query);
                                         if *selected_index >= filtered_indices.len()
