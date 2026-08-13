@@ -207,9 +207,22 @@ impl App {
             .to_string())
     }
 
+    /// 恢复当前工作目录下最近的一个顶层 session（用于 `--resume` 启动）。
+    /// 返回 `true` 表示已恢复，`false` 表示无历史 session。
+    pub async fn resume_last_session(&mut self) -> Result<bool> {
+        let work_dir = Self::current_work_dir()?;
+        let sessions = self.storage.list_top_level_sessions(&work_dir).await?;
+        if let Some(latest) = sessions.first() {
+            self.switch_to_session(&latest.id).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub(super) async fn open_session_picker(&mut self) -> Result<()> {
         let work_dir = Self::current_work_dir()?;
-        let sessions = self.storage.list_sessions(&work_dir).await?;
+        let sessions = self.storage.list_top_level_sessions(&work_dir).await?;
         let filtered_indices = (0..sessions.len()).collect();
         self.state = AppState::SessionPicker {
             sessions,

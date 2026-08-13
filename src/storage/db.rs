@@ -575,9 +575,10 @@ impl ChatStorage {
         Ok(())
     }
 
-    pub async fn list_sessions(&self, work_dir: &str) -> Result<Vec<SessionSummary>> {
+    /// 列出指定工作目录下的顶层 session（排除 subagent 子会话），按更新时间倒序。
+    pub async fn list_top_level_sessions(&self, work_dir: &str) -> Result<Vec<SessionSummary>> {
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT id, title, model, updated_at FROM sessions WHERE work_dir = ? ORDER BY updated_at DESC",
+            "SELECT id, title, model, updated_at FROM sessions WHERE work_dir = ? AND parent_id IS NULL ORDER BY updated_at DESC",
         )
         .bind(work_dir)
         .fetch_all(&self.pool)
@@ -671,6 +672,17 @@ impl ChatStorage {
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        // 级联删除 subagent 子会话及其消息，避免残留孤儿行
+        sqlx::query(
+            "DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE parent_id = ?)",
+        )
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM sessions WHERE parent_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM messages WHERE session_id = ?")
             .bind(session_id)
             .execute(&mut *tx)
@@ -1277,7 +1289,7 @@ mod tests {
         assert!(backup_path.is_none());
 
         // 旧数据全部清空
-        let sessions = storage.list_sessions("/tmp").await.unwrap();
+        let sessions = storage.list_top_level_sessions("/tmp").await.unwrap();
         assert!(sessions.is_empty());
         // 迁移错误被清除，schema 就绪
         assert!(storage.migration_error().is_none());
