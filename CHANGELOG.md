@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/dongdong306/hailux/compare/v0.6.0...v0.7.0) (2026-08-13)
+
+
+### Improvements
+
+* add --resume flag to restore latest session on startup ([852b0f7](https://github.com/dongdong306/hailux/commit/852b0f7300d1b54c756aca40e842d51872eeb317))
+* add self-update via GitHub releases with SHA256 verification ([dcde994](https://github.com/dongdong306/hailux/commit/dcde9944353601b24491cf975f7137bf9f9b101b))
+
+
+### Bugfixes
+
+* keep scroll position stable when new content is appended during manual scroll ([d9b9ec5](https://github.com/dongdong306/hailux/commit/d9b9ec588a724a6dacdc3b7347a1d3bfd99653d9))
+
+
+### Refactor
+
+* remove dead code and unused metadata fields across codebase ([1f4949f](https://github.com/dongdong306/hailux/commit/1f4949f124321ef66106eaf50ae4111587f5ddde))
+* simplify paste detection and batch input events for smoother rendering ([5d8fbf9](https://github.com/dongdong306/hailux/commit/5d8fbf910ff93b65bb482e01c5a258a172c8739f))
+
 ## [0.6.0](https://github.com/dongdong306/hailux/compare/v0.5.0...v0.6.0) (2026-08-08)
 
 
