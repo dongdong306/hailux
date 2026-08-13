@@ -33,6 +33,9 @@ struct Cli {
     /// 以 YOLO 模式运行（跳过所有权限确认），对 TUI 和非交互模式均生效
     #[arg(long = "yolo", global = true)]
     yolo: bool,
+    /// 启动时自动恢复最近的 session
+    #[arg(short = 'r', long = "resume", global = true)]
+    resume: bool,
     /// 检查并更新到最新版本
     #[arg(long = "update", global = true)]
     update: bool,
@@ -349,6 +352,7 @@ async fn launch_tui(
     shared: tui::app::AppSharedState,
     events: (tui::event::EventTx, tui::event::EventRx),
     enter_setup: bool,
+    resume: bool,
 ) -> Result<()> {
     let (event_tx, _event_rx) = &events;
     let mcp_cfg = mcp::config::load()?;
@@ -379,6 +383,8 @@ async fn launch_tui(
     );
     if enter_setup {
         app.enter_setup();
+    } else if resume {
+        app.resume_last_session().await?;
     }
     app.run(&mut terminal).await?;
 
@@ -393,6 +399,7 @@ async fn run_tui(
     resolved: config::ResolvedModel,
     work_dir: &Path,
     yolo: bool,
+    resume: bool,
 ) -> Result<()> {
     let (event_tx, event_rx) = tui::event::create_event_channel();
     let (mut agent, skills, command_registry, subagents) =
@@ -442,6 +449,7 @@ async fn run_tui(
         shared,
         (event_tx, event_rx),
         false,
+        resume,
     )
     .await
 }
@@ -490,6 +498,7 @@ async fn run_tui_setup(work_dir: &Path) -> Result<()> {
         shared,
         (event_tx, event_rx),
         true,
+        false,
     )
     .await
 }
@@ -555,7 +564,7 @@ async fn main() -> Result<()> {
                 skill::ensure_default_skills();
                 run_tui_setup(&work_dir).await
             } else {
-                run_tui(cfg, resolved, &work_dir, cli.yolo).await
+                run_tui(cfg, resolved, &work_dir, cli.yolo, cli.resume).await
             }
         }
     }
