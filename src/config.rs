@@ -51,6 +51,12 @@ pub(crate) const PROVIDERS: &[ProviderDef] = &[
         base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
         models: &[
             ModelDef {
+                id: "GLM-5.3",
+                name: "GLM-5.3",
+                max_tokens: 131072,
+                context_window: 1000000,
+            },
+            ModelDef {
                 id: "GLM-5.2",
                 name: "GLM-5.2",
                 max_tokens: 131072,
