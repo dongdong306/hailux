@@ -203,7 +203,7 @@ impl Config {
             }
             let provider_name = self.provider_display_name(pid);
 
-            // 优先使用自定义模型
+            // 自定义模型优先
             if let Some(ref custom_models) = entry.models {
                 for mid in custom_models.keys() {
                     result.push(ModelEntry {
@@ -215,22 +215,25 @@ impl Config {
                         needs_setup: false,
                     });
                 }
-                if !custom_models.is_empty() {
-                    continue;
-                }
             }
 
-            // 回退到预定义模型
+            // 合并预定义模型（跳过已被自定义覆盖的），确保新增预定义模型对已有配置可见
             if let Some(def) = find_provider_def(pid) {
                 for m in def.models {
-                    result.push(ModelEntry {
-                        provider_id: pid.clone(),
-                        provider_name: provider_name.clone(),
-                        model_id: m.id.to_string(),
-                        model_name: m.name.to_string(),
-                        display: format!("{}/{}", pid, m.id),
-                        needs_setup: false,
-                    });
+                    let covered = entry
+                        .models
+                        .as_ref()
+                        .is_some_and(|models| models.contains_key(m.id));
+                    if !covered {
+                        result.push(ModelEntry {
+                            provider_id: pid.clone(),
+                            provider_name: provider_name.clone(),
+                            model_id: m.id.to_string(),
+                            model_name: m.name.to_string(),
+                            display: format!("{}/{}", pid, m.id),
+                            needs_setup: false,
+                        });
+                    }
                 }
             }
         }
