@@ -737,6 +737,8 @@ pub(crate) struct TodoItem {
 pub(crate) struct TodoCell {
     pub items: Vec<TodoItem>,
     pub all_done: bool,
+    /// 写入是否仍在进行（尚无结果、仅从参数提取时为 true）
+    pub writing: bool,
 }
 
 impl TodoCell {
@@ -796,7 +798,11 @@ impl TodoCell {
             && items
                 .iter()
                 .all(|it| it.status == TodoStatus::Completed || it.status == TodoStatus::Cancelled);
-        Self { items, all_done }
+        Self {
+            items,
+            all_done,
+            writing: false,
+        }
     }
 }
 
@@ -804,6 +810,7 @@ impl HistoryCell for TodoCell {
     fn cache_key(&self) -> u64 {
         let mut h = DefaultHasher::new();
         self.all_done.hash(&mut h);
+        self.writing.hash(&mut h);
         self.items.len().hash(&mut h);
         for item in &self.items {
             item.content.hash(&mut h);
@@ -814,7 +821,7 @@ impl HistoryCell for TodoCell {
     }
 
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let verb = if self.all_done { "Updated" } else { "Updating" };
+        let verb = if self.writing { "Updating" } else { "Updated" };
         let bullet = if self.all_done {
             Span::styled(
                 "•".to_string(),
@@ -1228,6 +1235,7 @@ pub(crate) fn messages_to_cells(
                         cells.push(Box::new(TodoCell {
                             items,
                             all_done: false,
+                            writing: true,
                         }));
                         i += 1;
                     }

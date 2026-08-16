@@ -1,5 +1,5 @@
 // 工具调用：assistant-ui 官方 base 样式（ToolFallback），适配 hailux result.output/display
-import { useState } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   Check,
@@ -120,12 +120,146 @@ function DiffView({ display }: { display: string }) {
   );
 }
 
+interface TodoItemData {
+  content?: string;
+  status?: string;
+  priority?: string;
+}
+
+const TODO_ICONS: Record<string, { icon: string; className: string }> = {
+  completed: { icon: "✓", className: "text-emerald-600 dark:text-emerald-400" },
+  in_progress: { icon: "→", className: "text-cyan-600 dark:text-cyan-400" },
+  pending: { icon: "○", className: "text-muted-foreground/60" },
+  cancelled: { icon: "✗", className: "text-muted-foreground/60" },
+};
+
+/** todo_write 展示（对齐 TUI TodoCell：checkbox 风格列表，不展示入参/出参原文） */
+function TodoView({ argsText, running }: { argsText: string; running: boolean }) {
+  let todos: TodoItemData[] = [];
+  try {
+    const args = JSON.parse(argsText) as { todos?: TodoItemData[] };
+    if (Array.isArray(args.todos)) todos = args.todos;
+  } catch {
+    // 流式期间入参可能不完整，先按空列表渲染
+  }
+
+  const done = todos.filter(
+    (t) => t.status === "completed" || t.status === "cancelled",
+  ).length;
+  const allDone = todos.length > 0 && done === todos.length;
+
+  return (
+    <div className="border-border bg-muted/30 my-2 w-full rounded-lg border px-3 py-2 text-sm">
+      <div className="flex items-center gap-2 py-1 leading-none">
+        <span
+          className={cn(
+            allDone
+              ? "text-emerald-600 dark:text-emerald-400 font-bold"
+              : "text-cyan-600 dark:text-cyan-400",
+          )}
+        >
+          •
+        </span>
+        <span className="font-medium">
+          {running && !allDone ? "Updating" : "Updated"} plan
+        </span>
+        {todos.length > 0 && (
+          <span className="text-muted-foreground/70 text-xs tabular-nums">
+            {done}/{todos.length}
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col gap-0.5 ps-4 pt-0.5">
+        {todos.map((t, i) => {
+          const meta = TODO_ICONS[t.status ?? "pending"] ?? TODO_ICONS.pending!;
+          const isDone = t.status === "completed";
+          const isCancelled = t.status === "cancelled";
+          return (
+            <div key={i} className="flex items-start gap-2 leading-relaxed">
+              <span className={`${meta.className} shrink-0 select-none`} aria-hidden>
+                {meta.icon}
+              </span>
+              <span
+                className={cn(
+                  "min-w-0 break-words",
+                  (isDone || isCancelled) &&
+                    "text-muted-foreground/70 line-through",
+                  t.status === "in_progress" && "text-foreground font-medium",
+                )}
+              >
+                {t.content || "—"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const statusIconMap = {
   running: Loader2,
   complete: Check,
   incomplete: XCircle,
   "requires-action": AlertCircle,
 } as const;
+
+/** 连续工具调用合并卡片内的行渲染标记：嵌入模式去掉外层卡片边框 */
+const ToolGroupContext = createContext(false);
+
+/** 连续工具调用合并卡片：头部展示调用次数，内部为各工具的折叠行 */
+export function ToolGroup({
+  count,
+  running,
+  children,
+}: {
+  count: number;
+  running: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const [userToggled, setUserToggled] = useState(false);
+  // 运行中默认展开，结束后收起；用户手动切换后尊重手动状态
+  const effectiveOpen = userToggled ? open : running;
+  const Icon = running ? Loader2 : Check;
+
+  return (
+    <div className="border-border my-2 w-full rounded-lg border px-3 py-2">
+      <button
+        type="button"
+        onClick={() => {
+          setUserToggled(true);
+          setOpen(!effectiveOpen);
+        }}
+        className="text-muted-foreground hover:text-foreground flex w-full items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+      >
+        <Icon
+          className={cn(
+            "size-4 shrink-0",
+            running && "animate-spin [animation-duration:0.6s]",
+          )}
+        />
+        <span className="min-w-0 truncate leading-none">
+          {running ? "正在执行" : "执行了"} {count} 次工具调用
+        </span>
+        <ChevronDown
+          className={cn(
+            "ml-auto size-4 shrink-0 transition-transform duration-200",
+            effectiveOpen ? "rotate-0" : "-rotate-90",
+          )}
+        />
+      </button>
+
+      {effectiveOpen && (
+        <div className="divide-y divide-border/70 pt-1 pb-1">
+          <ToolGroupContext.Provider value={true}>
+            {children}
+          </ToolGroupContext.Provider>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function formatDuration(ms: number) {
   if (ms < 1000) return "<1s";
@@ -156,15 +290,27 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
   result,
   status,
 }) => {
+  const inGroup = useContext(ToolGroupContext);
   const [open, setOpen] = useState(false);
   const elapsedMs = useToolCallElapsed();
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
 
+  // todo_write：不展示入参/出参，渲染为 checkbox 风格 todo 列表
+  if (toolName === "todo_write") {
+    return <TodoView argsText={argsText ?? ""} running={isRunning} />;
+  }
+
   const Icon = statusIconMap[statusType as keyof typeof statusIconMap] ?? Check;
 
   return (
-    <div className="my-2 w-full rounded-lg border border-border px-3 py-2">
+    <div
+      className={
+        inGroup
+          ? "w-full py-1"
+          : "border-border my-2 w-full rounded-lg border px-3 py-2"
+      }
+    >
       <button
         type="button"
         onClick={() => setOpen(!open)}
