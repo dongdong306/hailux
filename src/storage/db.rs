@@ -753,21 +753,6 @@ impl ChatStorage {
         Ok(())
     }
 
-    pub async fn update_last_message_runtime_meta(
-        &self,
-        session_id: &str,
-        runtime_meta: &str,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE messages SET runtime_meta = ? WHERE id = (SELECT MAX(id) FROM messages WHERE session_id = ?)",
-        )
-        .bind(runtime_meta)
-        .bind(session_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn update_last_assistant_runtime_meta(
         &self,
         session_id: &str,

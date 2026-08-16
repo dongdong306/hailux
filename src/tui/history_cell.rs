@@ -1350,19 +1350,95 @@ pub(crate) const CHAT_FILE_MENTION: Color = Color::Rgb(251, 191, 36); // #FBBF24
 /// Plan 模式徽标
 pub(crate) const PLAN_BADGE: Color = Color::Rgb(217, 159, 7); // #D99F07
 
+/// 预计算格式的单个 hunk（见 tools.rs `serialize_diff_data`）
+struct DiffHunk {
+    old_start: Option<usize>,
+    new_start: Option<usize>,
+    changes: Vec<(char, String)>,
+}
+
+enum DiffPayload {
+    /// 新格式：工具执行时预计算的 hunk 数据（`format: "diff"`）
+    Hunks {
+        additions: usize,
+        deletions: usize,
+        old_lines: usize,
+        new_lines: usize,
+        is_new_file: bool,
+        hunks: Vec<DiffHunk>,
+    },
+    /// 旧格式：完整 old/new 全文，渲染时现场计算 diff。
+    /// TODO(过渡期兼容): 仅用于渲染本次升级前落库的存量数据，
+    /// 过渡期结束后（如 0.10.0）删除此分支，届时旧数据不再渲染 diff。
+    Legacy { old: Option<String>, new: String },
+}
+
 struct DiffData {
-    old: Option<String>,
-    new: String,
     path: String,
+    payload: DiffPayload,
 }
 
 fn parse_diff_data(json: &str) -> Option<DiffData> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let path = v["path"].as_str()?.to_string();
+
+    if v["format"].as_str() == Some("diff") {
+        let hunks = v["hunks"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|h| {
+                        let changes = h["changes"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|c| {
+                                Some((c[0].as_str()?.chars().next()?, c[1].as_str()?.to_string()))
+                            })
+                            .collect::<Vec<_>>();
+                        Some(DiffHunk {
+                            old_start: h["old_start"].as_u64().map(|n| n as usize),
+                            new_start: h["new_start"].as_u64().map(|n| n as usize),
+                            changes,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return Some(DiffData {
+            path,
+            payload: DiffPayload::Hunks {
+                additions: v["additions"].as_u64()? as usize,
+                deletions: v["deletions"].as_u64()? as usize,
+                old_lines: v["old_lines"].as_u64().unwrap_or(0) as usize,
+                new_lines: v["new_lines"].as_u64().unwrap_or(0) as usize,
+                is_new_file: v["is_new_file"].as_bool().unwrap_or(false),
+                hunks,
+            },
+        });
+    }
+
     Some(DiffData {
-        old: v["old"].as_str().map(|s| s.to_string()),
-        new: v["new"].as_str()?.to_string(),
-        path: v["path"].as_str()?.to_string(),
+        path,
+        payload: DiffPayload::Legacy {
+            old: v["old"].as_str().map(|s| s.to_string()),
+            new: v["new"].as_str()?.to_string(),
+        },
     })
+}
+
+/// 渲染用的中间行
+struct DiffLine {
+    sign: char,
+    ln: Option<usize>,
+    text: String,
+}
+
+fn advance_line_counter(counter: &mut Option<usize>) -> Option<usize> {
+    let cur = *counter;
+    if let Some(c) = counter {
+        *c += 1;
+    }
+    cur
 }
 
 fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>> {
@@ -1371,36 +1447,119 @@ fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>> {
         None => return Vec::new(),
     };
 
-    use similar::{ChangeTag, TextDiff};
-
-    let old_lines: Vec<&str> = data
-        .old
-        .as_deref()
-        .map(|s| s.lines().collect())
-        .unwrap_or_default();
-    let new_lines: Vec<&str> = data.new.lines().collect();
-    let diff = TextDiff::from_slices(&old_lines, &new_lines);
-
-    // 统计
-    let mut additions = 0usize;
-    let mut deletions = 0usize;
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Insert => additions += 1,
-            ChangeTag::Delete => deletions += 1,
-            _ => {}
+    // 展开为中间行 + hunk 边界 + 统计行
+    let (mut diff_lines, hunk_starts, stats_text, ln_width) = match &data.payload {
+        DiffPayload::Hunks {
+            additions,
+            deletions,
+            old_lines,
+            new_lines,
+            is_new_file,
+            hunks,
+        } => {
+            let mut diff_lines = Vec::new();
+            let mut hunk_starts = Vec::new();
+            for hunk in hunks {
+                hunk_starts.push(diff_lines.len());
+                let mut old_counter = hunk.old_start;
+                let mut new_counter = hunk.new_start;
+                for (sign, text) in &hunk.changes {
+                    let ln = match sign {
+                        '-' => advance_line_counter(&mut old_counter),
+                        '+' => advance_line_counter(&mut new_counter),
+                        _ => {
+                            let n = new_counter;
+                            advance_line_counter(&mut new_counter);
+                            advance_line_counter(&mut old_counter);
+                            n
+                        }
+                    };
+                    diff_lines.push(DiffLine {
+                        sign: *sign,
+                        ln,
+                        text: text.clone(),
+                    });
+                }
+            }
+            let stats_text = if *is_new_file {
+                format!("(+{} new file)", additions)
+            } else {
+                format!("(+{} -{})", additions, deletions)
+            };
+            (
+                diff_lines,
+                hunk_starts,
+                stats_text,
+                (*old_lines).max(*new_lines).to_string().len(),
+            )
         }
+        DiffPayload::Legacy { old, new } => {
+            use similar::{ChangeTag, TextDiff};
+
+            let old_lines: Vec<&str> = old
+                .as_deref()
+                .map(|s| s.lines().collect())
+                .unwrap_or_default();
+            let new_lines: Vec<&str> = new.lines().collect();
+            let diff = TextDiff::from_slices(&old_lines, &new_lines);
+
+            let mut additions = 0usize;
+            let mut deletions = 0usize;
+            for change in diff.iter_all_changes() {
+                match change.tag() {
+                    ChangeTag::Insert => additions += 1,
+                    ChangeTag::Delete => deletions += 1,
+                    _ => {}
+                }
+            }
+
+            let stats_text = if old.is_none() {
+                format!("(+{} new file)", additions)
+            } else {
+                format!("(+{} -{})", additions, deletions)
+            };
+
+            let mut diff_lines = Vec::new();
+            let mut hunk_starts = Vec::new();
+            for group in diff.grouped_ops(3) {
+                hunk_starts.push(diff_lines.len());
+                for op in &group {
+                    for change in diff.iter_changes(op) {
+                        let sign = match change.tag() {
+                            ChangeTag::Insert => '+',
+                            ChangeTag::Delete => '-',
+                            ChangeTag::Equal => ' ',
+                        };
+                        let ln = match change.tag() {
+                            ChangeTag::Insert => change.new_index().map(|i| i + 1),
+                            ChangeTag::Delete => change.old_index().map(|i| i + 1),
+                            ChangeTag::Equal => change.new_index().map(|i| i + 1),
+                        };
+                        diff_lines.push(DiffLine {
+                            sign,
+                            ln,
+                            text: change.value().to_string(),
+                        });
+                    }
+                }
+            }
+            (
+                diff_lines,
+                hunk_starts,
+                stats_text,
+                new_lines.len().to_string().len(),
+            )
+        }
+    };
+
+    // 渲染上限：无论数据来自预计算 hunk 还是旧格式全文，最多显示 40 行
+    let truncated = diff_lines.len() > MAX_DISPLAY_DIFF_LINES;
+    if truncated {
+        diff_lines.truncate(MAX_DISPLAY_DIFF_LINES);
     }
 
-    // 简短路径
-    let short_path = data.path.rsplit(['/', '\\']).next().unwrap_or(&data.path);
-
     // 统计行：path (+N -M) 或 path (new file, +N lines)
-    let stats_text = if data.old.is_none() {
-        format!("(+{} new file)", additions)
-    } else {
-        format!("(+{} -{})", additions, deletions)
-    };
+    let short_path = data.path.rsplit(['/', '\\']).next().unwrap_or(&data.path);
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
@@ -1423,24 +1582,13 @@ fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>> {
     // diff body — 带行号 gutter 和背景色
     let indent = "    ";
 
-    // 计算行号宽度
-    let max_ln = new_lines.len();
-    let ln_width = max_ln.to_string().len();
-
     // 前缀宽度: 4(indent) + ln_width + 1(gutter空格) + 1(sign)
     let prefix_w = 4 + ln_width + 2;
     let content_w = width.saturating_sub(prefix_w as u16) as usize;
 
-    let mut shown = 0u32;
-    let mut is_first_group = true;
-
-    for group in diff.grouped_ops(3) {
-        if shown >= MAX_DISPLAY_DIFF_LINES as u32 {
-            break;
-        }
-
-        if !is_first_group {
-            // hunk 分隔符 ⋮
+    for (idx, dl) in diff_lines.iter().enumerate() {
+        // hunk 分隔符 ⋮（首组除外）
+        if idx > 0 && hunk_starts.contains(&idx) {
             let spacer = format!("{:width$} ", "", width = ln_width.max(1));
             lines.push(Line::from(vec![
                 Span::raw(indent),
@@ -1451,76 +1599,53 @@ fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>> {
                 ),
             ]));
         }
-        is_first_group = false;
 
-        for op in &group {
-            if shown >= MAX_DISPLAY_DIFF_LINES as u32 {
-                break;
+        let (sign_color, content_color, bg_color) = match dl.sign {
+            '+' => (Color::Green, Color::Green, Some(ADD_LINE_BG)),
+            '-' => (Color::Red, Color::Red, Some(DEL_LINE_BG)),
+            _ => (Color::DarkGray, Color::DarkGray, None),
+        };
+
+        // 行号（insert/new 用新行号，delete 用旧行号，context 用新行号）
+        let gutter_text = match dl.ln {
+            Some(n) => format!("{:>width$} ", n, width = ln_width),
+            None => format!("{:width$} ", "", width = ln_width),
+        };
+
+        let wrapped = if content_w > 0 {
+            wrap_text(&dl.text, content_w as u16)
+        } else {
+            vec![dl.text.clone()]
+        };
+
+        for (i, wl) in wrapped.iter().enumerate() {
+            let mut spans = vec![Span::raw(indent)];
+
+            if i == 0 {
+                spans.push(Span::styled(
+                    gutter_text.clone(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+                spans.push(Span::styled(
+                    dl.sign.to_string(),
+                    Style::default().fg(sign_color),
+                ));
+            } else {
+                let pad = format!("{:width$}  ", "", width = ln_width);
+                spans.push(Span::raw(pad));
             }
-            for change in diff.iter_changes(op) {
-                if shown >= MAX_DISPLAY_DIFF_LINES as u32 {
-                    break;
-                }
-                shown += 1;
 
-                let (tag, value) = (change.tag(), change.value());
-                let old_ln = change.old_index().map(|i| i + 1);
-                let new_ln = change.new_index().map(|i| i + 1);
+            spans.push(Span::styled(wl.clone(), Style::default().fg(content_color)));
 
-                let (sign, sign_color, content_color, bg_color) = match tag {
-                    ChangeTag::Insert => ('+', Color::Green, Color::Green, Some(ADD_LINE_BG)),
-                    ChangeTag::Delete => ('-', Color::Red, Color::Red, Some(DEL_LINE_BG)),
-                    ChangeTag::Equal => (' ', Color::DarkGray, Color::DarkGray, None),
-                };
-
-                // 行号（insert/new 用新行号，delete 用旧行号，context 用新行号）
-                let ln = match tag {
-                    ChangeTag::Insert => new_ln,
-                    ChangeTag::Delete => old_ln,
-                    ChangeTag::Equal => new_ln,
-                };
-
-                let gutter_text = match ln {
-                    Some(n) => format!("{:>width$} ", n, width = ln_width),
-                    None => format!("{:width$} ", "", width = ln_width),
-                };
-
-                let wrapped = if content_w > 0 {
-                    wrap_text(value, content_w as u16)
-                } else {
-                    vec![value.to_string()]
-                };
-
-                for (i, wl) in wrapped.iter().enumerate() {
-                    let mut spans = vec![Span::raw(indent)];
-
-                    if i == 0 {
-                        spans.push(Span::styled(
-                            gutter_text.clone(),
-                            Style::default().add_modifier(Modifier::DIM),
-                        ));
-                        spans.push(Span::styled(
-                            sign.to_string(),
-                            Style::default().fg(sign_color),
-                        ));
-                    } else {
-                        let pad = format!("{:width$}  ", "", width = ln_width);
-                        spans.push(Span::raw(pad));
-                    }
-
-                    spans.push(Span::styled(wl.clone(), Style::default().fg(content_color)));
-
-                    let mut line = Line::from(spans);
-                    if let Some(bg) = bg_color {
-                        line = line.style(Style::default().bg(bg));
-                    }
-                    lines.push(line);
-                }
+            let mut line = Line::from(spans);
+            if let Some(bg) = bg_color {
+                line = line.style(Style::default().bg(bg));
             }
+            lines.push(line);
         }
     }
 
-    if shown >= MAX_DISPLAY_DIFF_LINES as u32 {
+    if truncated {
         lines.push(Line::from(vec![
             Span::raw(indent),
             Span::styled(
@@ -1933,7 +2058,122 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_seconds;
+    use super::{format_seconds, render_diff_from_json};
+
+    fn line_texts(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn renders_hunk_format_diff() {
+        let json = serde_json::json!({
+            "format": "diff",
+            "path": "src/main.rs",
+            "additions": 1,
+            "deletions": 1,
+            "old_lines": 10,
+            "new_lines": 10,
+            "is_new_file": false,
+            "truncated": false,
+            "hunks": [{
+                "old_start": 2,
+                "new_start": 2,
+                "changes": [[" ", "a"], ["-", "b"], ["+", "B"], [" ", "c"]]
+            }]
+        })
+        .to_string();
+        let lines = render_diff_from_json(&json, 100);
+        let texts = line_texts(&lines);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("main.rs") && t.contains("(+1 -1)"))
+        );
+        // 行号从 old_start/new_start=2 起步连续推进：
+        // context(a)=2 → delete(b)=old 3 → insert(B)=new 3 → context(c)=new 4
+        assert!(texts.iter().any(|t| t.contains("-b")));
+        assert!(texts.iter().any(|t| t.contains("+B")));
+        let del = texts.iter().find(|t| t.contains("-b")).unwrap();
+        assert_eq!(del.trim_end(), "     3 -b");
+        let ins = texts.iter().find(|t| t.contains("+B")).unwrap();
+        assert_eq!(ins.trim_end(), "     3 +B");
+    }
+
+    #[test]
+    fn renders_hunk_format_new_file() {
+        let json = serde_json::json!({
+            "format": "diff",
+            "path": "new.txt",
+            "additions": 3,
+            "deletions": 0,
+            "old_lines": 0,
+            "new_lines": 3,
+            "is_new_file": true,
+            "hunks": [{
+                "old_start": null,
+                "new_start": 1,
+                "changes": [["+", "x"], ["+", "y"]]
+            }]
+        })
+        .to_string();
+        let lines = render_diff_from_json(&json, 100);
+        let texts = line_texts(&lines);
+        assert!(texts.iter().any(|t| t.contains("(+3 new file)")));
+        // 新文件行：无旧行号，行号从 new_start=1 推进
+        let first = texts.iter().find(|t| t.contains("+x")).unwrap();
+        assert!(
+            first.contains("1"),
+            "new file line numbers start at 1: {first}"
+        );
+    }
+
+    #[test]
+    fn renders_hunk_format_display_cap() {
+        // 存储不限制，但渲染最多显示 MAX_DISPLAY_DIFF_LINES 行
+        let changes: Vec<serde_json::Value> = (0..60)
+            .map(|i| serde_json::json!(["+", format!("line{i}")]))
+            .collect();
+        let json = serde_json::json!({
+            "format": "diff",
+            "path": "big.txt",
+            "additions": 60,
+            "deletions": 0,
+            "old_lines": 0,
+            "new_lines": 60,
+            "is_new_file": true,
+            "hunks": [{"old_start": null, "new_start": 1, "changes": changes}]
+        })
+        .to_string();
+        let lines = render_diff_from_json(&json, 100);
+        let texts = line_texts(&lines);
+        let shown = texts.iter().filter(|t| t.contains("+line")).count();
+        assert_eq!(shown, super::MAX_DISPLAY_DIFF_LINES);
+        assert!(texts.iter().any(|t| t.contains("truncated")));
+    }
+
+    #[test]
+    fn renders_legacy_format_diff() {
+        // 旧格式（无 format 字段）：存量数据仍走 old/new 全文 + 现场 TextDiff
+        let json = serde_json::json!({
+            "old": "a\nb\nc\n",
+            "new": "a\nB\nc\n",
+            "path": "legacy.rs",
+        })
+        .to_string();
+        let lines = render_diff_from_json(&json, 100);
+        let texts = line_texts(&lines);
+        assert!(texts.iter().any(|t| t.contains("legacy.rs")));
+        assert!(texts.iter().any(|t| t.contains("-b")));
+        assert!(texts.iter().any(|t| t.contains("+B")));
+    }
 
     #[test]
     fn format_seconds_zero() {

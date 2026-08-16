@@ -197,7 +197,7 @@ pub async fn chat_handler(
                     }
                     let total_ms = started.elapsed().as_millis() as u64;
                     let _ = session.storage()
-                        .update_last_message_runtime_meta(
+                        .update_last_assistant_runtime_meta(
                             &session_id,
                             &runtime_meta_json(total_ms, &resolved.display, protocol::status_str(&status)),
                         )

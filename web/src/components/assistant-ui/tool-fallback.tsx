@@ -18,6 +18,108 @@ interface ToolOutput {
   display?: string;
 }
 
+interface DiffChange {
+  0: string; // sign: " " | "-" | "+"
+  1: string; // text
+}
+
+interface DiffHunk {
+  old_start: number | null;
+  new_start: number | null;
+  changes: DiffChange[];
+}
+
+interface DiffDisplay {
+  format: "diff";
+  path: string;
+  additions: number;
+  deletions: number;
+  old_lines?: number;
+  new_lines?: number;
+  is_new_file?: boolean;
+  hunks: DiffHunk[];
+}
+
+/** diff 展示（对齐 TUI 渲染：行号 gutter + 符号配色 + hunk 头） */
+function DiffView({ display }: { display: string }) {
+  let v: DiffDisplay | null = null;
+  try {
+    const p = JSON.parse(display) as DiffDisplay;
+    if (p?.format === "diff" && Array.isArray(p.hunks)) v = p;
+  } catch {
+    // 忽略解析失败
+  }
+
+  // 数据异常（缺 hunks 字段等）：原样文本展示
+  if (!v) {
+    return (
+      <pre className="bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
+        {display}
+      </pre>
+    );
+  }
+
+  const lnWidth = Math.max(
+    1,
+    String(Math.max(v.old_lines ?? 0, v.new_lines ?? 0)).length,
+  );
+  const gutter = (ln: number | null) =>
+    ln !== null ? String(ln).padStart(lnWidth) : " ".repeat(lnWidth);
+
+  const rows: React.ReactNode[] = [];
+  rows.push(
+    <div key="stats" className="hlx-diff-hunk">
+      {v.path} (+{v.additions} -{v.deletions})
+    </div>,
+  );
+
+  for (let hi = 0; hi < v.hunks.length; hi++) {
+    const h = v.hunks[hi]!;
+    const oldLen = h.changes.filter((c) => c[0] !== "+").length;
+    const newLen = h.changes.filter((c) => c[0] !== "-").length;
+    rows.push(
+      <div key={`hunk-${hi}`} className="hlx-diff-hunk">
+        @@ -{h.old_start ?? 0},{oldLen} +{h.new_start ?? 0},{newLen} @@
+      </div>,
+    );
+    // 行号推进规则对齐 TUI：delete 走旧行号，insert/context 走新行号
+    let oc = h.old_start;
+    let nc = h.new_start;
+    for (let ci = 0; ci < h.changes.length; ci++) {
+      const c = h.changes[ci]!;
+      const sign = c[0];
+      const text = c[1];
+      let ln: number | null;
+      if (sign === "-") {
+        ln = oc;
+        if (oc !== null) oc++;
+      } else {
+        ln = nc;
+        if (nc !== null) nc++;
+        if (sign === " " && oc !== null) oc++;
+      }
+      const cls = sign === "+" ? "hlx-diff-add" : sign === "-" ? "hlx-diff-del" : "";
+      rows.push(
+        <div key={`hunk-${hi}-${ci}`} className={cls}>
+          <span className="text-muted-foreground/70 pr-2 tabular-nums select-none">
+            {gutter(ln)}
+          </span>
+          <span className="whitespace-pre-wrap">
+            {sign}
+            {text || " "}
+          </span>
+        </div>,
+      );
+    }
+  }
+
+  return (
+    <div className="bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 font-mono text-xs overflow-x-auto">
+      {rows}
+    </div>
+  );
+}
+
 const statusIconMap = {
   running: Loader2,
   complete: Check,
@@ -36,24 +138,7 @@ function formatDuration(ms: number) {
 function ResultBody({ result }: { result: unknown }) {
   const display = (result as ToolOutput | undefined)?.display;
   if (display) {
-    return (
-      <pre className="bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {display.split("\n").map((line, i) => {
-          const cls = line.startsWith("+")
-            ? "hlx-diff-add"
-            : line.startsWith("-")
-              ? "hlx-diff-del"
-              : line.startsWith("@@")
-                ? "hlx-diff-hunk"
-                : "";
-          return (
-            <span key={i} className={cls}>
-              {line || " "}
-            </span>
-          );
-        })}
-      </pre>
-    );
+    return <DiffView display={display} />;
   }
   const text =
     (result as ToolOutput | undefined)?.output ??
