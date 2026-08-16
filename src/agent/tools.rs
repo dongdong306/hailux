@@ -646,7 +646,7 @@ async fn run_shell_command(
             message: e.to_string(),
         })?
     };
-    const MAX_OUTPUT_CHARS: usize = 5000;
+    const MAX_OUTPUT_CHARS: usize = 10000;
 
     let raw = if output.status.success() {
         decode_output(&output.stdout)
@@ -1405,7 +1405,7 @@ impl Tool for GrepTool {
                             return Ok(false);
                         }
                         match_count += 1;
-                        file_lines.push(format!("  Line {}: {}\n", lnum, line.trim_end()));
+                        file_lines.push(format!("  {}: {}\n", lnum, line.trim_end()));
                         Ok(true)
                     }),
                 ) {
