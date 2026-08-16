@@ -15,11 +15,15 @@ import { ToolFallback, ToolGroup } from "./tool-fallback";
 import { toThreadMessages, type SystemRow } from "../../runtime/hailux-runtime";
 
 /** 自定义分组：reasoning 连续段 → 思考组；连续普通工具调用 → 工具合并卡；
- *  todo_write（todo 卡片）与文本不分组。
+ *  todo_write（todo 卡片）与 ask_user（问答卡）不分组。
  *  模块级定义保持函数引用稳定，GroupedParts 树 memo 不失效 */
 const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[] => {
   if (part.type === "reasoning") return ["group-reasoning"];
-  if (part.type === "tool-call" && part.toolName !== "todo_write")
+  if (
+    part.type === "tool-call" &&
+    part.toolName !== "todo_write" &&
+    part.toolName !== "ask_user"
+  )
     return ["group-tools"];
   return [];
 };

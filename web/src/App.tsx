@@ -23,6 +23,8 @@ export default function App() {
   const activeView = useApp((s) => s.activeView);
   const promptTokens = useApp((s) => s.promptTokens);
   const completionTokens = useApp((s) => s.completionTokens);
+  // 提问 requestId 变化时通过 key 强制重挂载 AskUserDialog，内部状态零残留
+  const askRequestId = useApp((s) => s.askUser?.requestId);
 
   useEffect(() => {
     // 启动：初始化项目目录（上次访问 > 服务器默认目录）并拉取该项目会话
@@ -111,7 +113,7 @@ export default function App() {
         </main>
 
         <PermissionDialog />
-        <AskUserDialog />
+        <AskUserDialog key={askRequestId} />
         <ModelPicker />
         <WorkdirPicker />
       </div>

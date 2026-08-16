@@ -204,6 +204,76 @@ const statusIconMap = {
   "requires-action": AlertCircle,
 } as const;
 
+/** 从 ask_user 结果解析 "question"="answer" 对（对齐 TUI parse_ask_user_pairs：
+ *  引号扫描 + `\\`/`\"` 转义还原 + key=value 配对） */
+function parseAskUserPairs(result: string): [string, string][] {
+  const pairs: [string, string][] = [];
+  let i = 0;
+  const readQuoted = (): string | null => {
+    if (result[i] !== '"') return null;
+    let j = i + 1;
+    let val = "";
+    while (j < result.length) {
+      if (result[j] === "\\") {
+        // `\\`→`\`、`\"`→`"`；孤立反斜杠（异常输入/旧数据）原样保留
+        const next = result[j + 1];
+        if (next === "\\" || next === '"') {
+          val += next;
+          j += 2;
+          continue;
+        }
+      }
+      if (result[j] === '"') break;
+      val += result[j];
+      j++;
+    }
+    if (j >= result.length) return null;
+    i = j + 1;
+    return val;
+  };
+  while (i < result.length) {
+    if (result[i] === '"') {
+      const key = readQuoted();
+      if (key === null) break;
+      // 跳过空白找 =
+      while (i < result.length && result[i] === " ") i++;
+      if (result[i] !== "=") continue;
+      i++;
+      while (i < result.length && result[i] === " ") i++;
+      const val = readQuoted();
+      if (val !== null) pairs.push([key, val]);
+    } else {
+      i++;
+    }
+  }
+  return pairs;
+}
+
+/** ask_user 结果展示（对齐 TUI render_ask_user_result：Q&A 列表 / cancelled 灰显） */
+function AskUserView({ result }: { result: string }) {
+  if (result.includes("[User Cancelled]")) {
+    return (
+      <div className="text-muted-foreground/60 my-1 text-sm">cancelled</div>
+    );
+  }
+  const pairs = parseAskUserPairs(result);
+  return (
+    <div className="my-1 flex flex-col gap-1">
+      {pairs.length === 0 ? (
+        <div className="text-muted-foreground/60 text-sm">Unanswered</div>
+      ) : (
+        pairs.map(([q, a], i) => (
+          <div key={i} className="text-sm leading-relaxed">
+            <span className="text-muted-foreground/70">{q}</span>
+            <span className="text-muted-foreground/40"> → </span>
+            <span className="text-foreground font-medium">{a}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 /** 连续工具调用合并卡片内的行渲染标记：嵌入模式去掉外层卡片边框 */
 const ToolGroupContext = createContext(false);
 
@@ -299,6 +369,31 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
   // todo_write：不展示入参/出参，渲染为 checkbox 风格 todo 列表
   if (toolName === "todo_write") {
     return <TodoView argsText={argsText ?? ""} running={isRunning} />;
+  }
+
+  // ask_user：运行中显示 Asking，完成后渲染 Q&A 列表（不展示原始入参/出参）
+  if (toolName === "ask_user") {
+    const text = (result as ToolOutput | undefined)?.output;
+    return (
+      <div
+        className={cn(
+          "my-2 w-full rounded-lg border px-3 py-2 text-sm",
+          inGroup ? "border-border/50" : "border-border",
+        )}
+      >
+        <div className="flex items-center gap-2 py-1 leading-none">
+          {isRunning ? (
+            <Loader2 className="text-muted-foreground size-4 shrink-0 animate-spin [animation-duration:0.6s]" />
+          ) : (
+            <Check className="text-muted-foreground size-4 shrink-0" />
+          )}
+          <span className="font-medium">
+            {isRunning ? "正在提问" : "已提问"}
+          </span>
+        </div>
+        {!isRunning && text && <AskUserView result={text} />}
+      </div>
+    );
   }
 
   const Icon = statusIconMap[statusType as keyof typeof statusIconMap] ?? Check;
