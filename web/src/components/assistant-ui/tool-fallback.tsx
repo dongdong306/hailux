@@ -398,6 +398,26 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
 
   const Icon = statusIconMap[statusType as keyof typeof statusIconMap] ?? Check;
 
+  // skill：标题对齐 TUI ToolCategory::Skill，显示 "Load skill {name}"
+  let title: ReactNode = (
+    <>
+      使用工具：<b>{toolName}</b>
+    </>
+  );
+  if (toolName === "skill") {
+    let skillName = "";
+    try {
+      skillName = (JSON.parse(argsText ?? "{}") as { name?: string }).name ?? "";
+    } catch {
+      // 流式期间入参可能不完整
+    }
+    title = (
+      <>
+        Load skill <b>{skillName || toolName}</b>
+      </>
+    );
+  }
+
   return (
     <div
       className={
@@ -417,9 +437,7 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
             isRunning && "animate-spin [animation-duration:0.6s]",
           )}
         />
-        <span className="min-w-0 truncate leading-none">
-          使用工具：<b>{toolName}</b>
-        </span>
+        <span className="min-w-0 truncate leading-none">{title}</span>
         {elapsedMs !== undefined && (
           <span className="text-muted-foreground text-xs tabular-nums">
             {formatDuration(elapsedMs)}
