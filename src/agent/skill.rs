@@ -3,6 +3,7 @@ use crate::agent::utils;
 use color_eyre::{Result, eyre::Context};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -210,10 +211,119 @@ pub fn ensure_default_skills() {
     let _ = std::fs::write(&skill_file, DEFAULT_HELP_SKILL_MD);
 }
 
+/// 文件树最多展示的文件数
+const MAX_SKILL_FILE_LIST: usize = 15;
+
+/// 递归收集 `dir` 下所有文件（相对 `root` 的路径），跳过根级 SKILL.md（其正文已注入）。
+fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_relative_files(root, &path, out);
+        } else if file_type.is_file()
+            && let Ok(rel) = path.strip_prefix(root)
+            && rel != Path::new(SKILL_FILE_NAME)
+        {
+            out.push(rel.to_path_buf());
+        }
+    }
+}
+
+/// 从有序文件列表中选出至多 `max` 个文件，优先保证每个子目录（任意深度）至少展示一个文件
+/// （目录按深度、路径排序，浅层优先），剩余名额按（深度, 路径）补齐。
+fn select_skill_files(files: &[PathBuf], max: usize) -> Vec<PathBuf> {
+    if files.len() <= max {
+        return files.to_vec();
+    }
+    let mut by_dir: HashMap<PathBuf, Vec<&PathBuf>> = HashMap::new();
+    for f in files {
+        let parent = f.parent().unwrap_or(Path::new("")).to_path_buf();
+        by_dir.entry(parent).or_default().push(f);
+    }
+    let mut dirs: Vec<(PathBuf, Vec<&PathBuf>)> = by_dir.into_iter().collect();
+    dirs.sort_by_key(|(d, _)| (d.components().count(), d.clone()));
+
+    let mut selected: Vec<PathBuf> = Vec::new();
+    for (_, group) in &dirs {
+        if selected.len() >= max {
+            break;
+        }
+        selected.push((*group[0]).clone());
+    }
+    let mut remaining: Vec<&PathBuf> = files.iter().collect();
+    remaining.sort_by_key(|p| (p.components().count(), (*p).clone()));
+    for f in remaining {
+        if selected.len() >= max {
+            break;
+        }
+        if !selected.contains(f) {
+            selected.push(f.clone());
+        }
+    }
+    selected.sort();
+    selected
+}
+
+#[derive(Default)]
+struct FileTreeNode {
+    dirs: BTreeMap<String, FileTreeNode>,
+    files: Vec<String>,
+}
+
+fn render_file_tree(node: &FileTreeNode, indent: usize, out: &mut String) {
+    let pad = "  ".repeat(indent);
+    for (name, child) in &node.dirs {
+        out.push_str(&format!("{pad}{name}/\n"));
+        render_file_tree(child, indent + 1, out);
+    }
+    let mut files = node.files.clone();
+    files.sort();
+    for name in &files {
+        out.push_str(&format!("{pad}{name}\n"));
+    }
+}
+
+/// 构建 skill 目录下其他文件（不含 SKILL.md）的树状列表。
+/// 返回 (树状文本, 未展示的文件数)；目录为空时返回空文本。
+fn format_skill_file_tree(base_dir: &Path) -> (String, usize) {
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_relative_files(base_dir, base_dir, &mut files);
+    files.sort();
+    if files.is_empty() {
+        return (String::new(), 0);
+    }
+    let total = files.len();
+    let selected = select_skill_files(&files, MAX_SKILL_FILE_LIST);
+
+    let mut root = FileTreeNode::default();
+    for p in &selected {
+        let components: Vec<String> = p.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+        let mut node = &mut root;
+        for (i, name) in components.iter().enumerate() {
+            if i + 1 == components.len() {
+                node.files.push(name.clone());
+            } else {
+                node = node.dirs.entry(name.clone()).or_default();
+            }
+        }
+    }
+
+    let mut tree = String::new();
+    render_file_tree(&root, 0, &mut tree);
+    (tree, total - selected.len())
+}
+
 /// Skill 工具：渐进式加载命名的 skill 定义。
 ///
 /// LLM 在 system prompt 中看到 `<available_skills>` 摘要后，调用本工具传入 `name`，
-/// 即可获取该 skill 的完整指令正文与其所在目录的绝对路径；
+/// 即可获取该 skill 的完整指令正文、所在目录的绝对路径，以及目录内其他文件的
+/// 树状列表（最多 15 个文件，优先保证每个子目录至少展示一个）；
 /// skill 引用的同目录脚本/文件则由 LLM 随后用 `read`/`glob` 工具按需加载。
 pub struct SkillTool {
     skills: Vec<SkillInfo>,
@@ -296,7 +406,8 @@ impl Tool for SkillTool {
             output.push_str(&format!("<skill_content name=\"{}\">\n", info.name));
             output.push_str(&format!("# Skill: {}\n\n", info.name));
             output.push_str(info.content.trim());
-            output.push_str("\n\n");
+            output.push_str("\n</skill_content>\n\n");
+            output.push_str("<skill_context>\n");
             output.push_str(&format!(
                 "Base directory for this skill: {}\n",
                 base.display()
@@ -304,10 +415,20 @@ impl Tool for SkillTool {
             output.push_str(
                 "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.\n",
             );
+            let (tree, hidden) = format_skill_file_tree(&base);
+            if !tree.is_empty() {
+                output.push_str("\nFiles in this skill's directory:\n");
+                output.push_str(&tree);
+                if hidden > 0 {
+                    output.push_str(&format!(
+                        "... and {hidden} more files not shown; use `glob` on the base directory for the full list\n"
+                    ));
+                }
+            }
             output.push_str(
                 "Use the `read` or `glob` tool to load any referenced scripts or files.\n",
             );
-            output.push_str("</skill_content>");
+            output.push_str("</skill_context>");
 
             Ok(output)
         })
@@ -385,6 +506,106 @@ mod tests {
         assert!(out.contains("Base directory for this skill:"));
         assert!(out.contains("run scripts/x.sh"));
         assert!(out.contains("<skill_content name=\"wf\">"));
+        assert!(out.contains("<skill_context>"));
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn skill_tool_lists_directory_tree() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("hailux-skill-tree-{}", uuid::Uuid::new_v4()));
+        let skill_dir = tmp.join(CONFIG_DIR_NAME).join(SKILL_DIR_NAME).join("tree");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::create_dir_all(skill_dir.join("reference").join("api")).unwrap();
+        fs::write(
+            skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: tree\ndescription: demo\n---\nbody",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("scripts").join("deploy.ps1"), "echo").unwrap();
+        fs::write(
+            skill_dir.join("reference").join("api").join("endpoints.md"),
+            "# API",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("README.md"), "readme").unwrap();
+
+        let skills = discover_skills(&tmp).unwrap();
+        let tool = SkillTool::new(skills);
+        let out = tool.execute_async(r#"{"name":"tree"}"#).await.unwrap();
+        assert!(out.contains("Files in this skill's directory:"));
+        assert!(out.contains("scripts/\n  deploy.ps1"));
+        assert!(out.contains("reference/\n  api/\n    endpoints.md"));
+        assert!(out.contains("README.md"));
+        // SKILL.md 本身不重复列出
+        assert!(!out.contains("SKILL.md\n"));
+        // 附属信息在 <skill_context> 内：正文先于 context 块结束
+        let content_end = out.find("</skill_content>").unwrap();
+        let ctx_start = out.find("<skill_context>").unwrap();
+        assert!(content_end < ctx_start);
+        assert!(out.trim_end().ends_with("</skill_context>"));
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    fn pb(parts: &[&str]) -> PathBuf {
+        parts.iter().collect::<PathBuf>()
+    }
+
+    #[test]
+    fn select_skill_files_caps_and_covers_each_dir() {
+        // 13 个根级文件 + 3 个子目录文件 = 16 > 15：截断时每个子目录仍至少展示一个
+        let files: Vec<PathBuf> = vec![
+            pb(&["a.md"]),
+            pb(&["b.md"]),
+            pb(&["c.md"]),
+            pb(&["d.md"]),
+            pb(&["e.md"]),
+            pb(&["f.md"]),
+            pb(&["g.md"]),
+            pb(&["h.md"]),
+            pb(&["i.md"]),
+            pb(&["j.md"]),
+            pb(&["k.md"]),
+            pb(&["l.md"]),
+            pb(&["m.md"]),
+            pb(&["docs", "x.md"]),
+            pb(&["docs", "y.md"]),
+            pb(&["scripts", "run.sh"]),
+        ];
+        let selected = select_skill_files(&files, MAX_SKILL_FILE_LIST);
+        assert_eq!(selected.len(), MAX_SKILL_FILE_LIST);
+        assert!(selected.contains(&pb(&["docs", "x.md"])));
+        assert!(selected.contains(&pb(&["scripts", "run.sh"])));
+        // 结果保持有序
+        let mut sorted = selected.clone();
+        sorted.sort();
+        assert_eq!(selected, sorted);
+    }
+
+    #[test]
+    fn select_skill_files_small_list_passthrough() {
+        let files = vec![pb(&["a.md"]), pb(&["scripts", "x.sh"])];
+        assert_eq!(select_skill_files(&files, MAX_SKILL_FILE_LIST), files);
+    }
+
+    #[test]
+    fn format_skill_file_tree_reports_hidden_count() {
+        use std::fs;
+        let tmp =
+            std::env::temp_dir().join(format!("hailux-skill-hidden-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(tmp.join("docs")).unwrap();
+        for i in 0..17 {
+            fs::write(tmp.join(format!("f{i}.md")), "x").unwrap();
+        }
+        fs::write(tmp.join("docs").join("d.md"), "x").unwrap();
+
+        let (tree, hidden) = format_skill_file_tree(&tmp);
+        let lines: Vec<&str> = tree.lines().collect();
+        assert_eq!(lines.len(), MAX_SKILL_FILE_LIST + 1); // 15 个文件 + docs/ 目录行
+        assert!(lines.contains(&"docs/"));
+        assert_eq!(hidden, 3); // 18 个文件 - 15 个展示
 
         fs::remove_dir_all(&tmp).ok();
     }
