@@ -269,7 +269,7 @@ function Welcome() {
               hailux
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              终端级能力，浏览器直达
+              把想法交给我，把时间留给自己
             </p>
           </div>
         </div>
