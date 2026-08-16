@@ -426,10 +426,23 @@ export const useApp = create<AppState>((set, get) => ({
     if (detail.compact_summary) {
       items.push({ kind: "compact-marker", text: detail.compact_summary });
     }
-    const toolResults = new Map<string, string>();
+    // Tool 消息的 runtime_meta 仅识别新格式 diff 展示数据（format: "diff"）；
+    // 旧格式 {old,new} 存量数据显示 result 文本，计时 JSON（无 format 字段）同样排除
+    const toolResults = new Map<string, { result: string; display?: string }>();
     for (const msg of detail.messages) {
       if (msg.role === "Tool" && msg.tool_call_id) {
-        toolResults.set(msg.tool_call_id, msg.content);
+        let display: string | undefined;
+        if (msg.runtime_meta) {
+          try {
+            const v = JSON.parse(msg.runtime_meta) as { format?: string };
+            if (v.format === "diff") {
+              display = msg.runtime_meta;
+            }
+          } catch {
+            // 非 JSON，不作为 diff 展示
+          }
+        }
+        toolResults.set(msg.tool_call_id, { result: msg.content, display });
       }
     }
     for (const msg of detail.messages) {
@@ -456,12 +469,13 @@ export const useApp = create<AppState>((set, get) => ({
                 name: call.function?.name ?? "",
                 arguments: call.function?.arguments ?? "",
               });
-              const result = toolResults.get(call.id);
-              if (result !== undefined) {
+              const tr = toolResults.get(call.id);
+              if (tr !== undefined) {
                 items.push({
                   kind: "tool-result",
                   name: call.function?.name ?? "",
-                  result,
+                  result: tr.result,
+                  display: tr.display,
                 });
               }
             }

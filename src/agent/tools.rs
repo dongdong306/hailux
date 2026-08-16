@@ -832,11 +832,80 @@ impl Tool for ReadTool {
     }
 }
 
+/// 每个变更组保留的上下文行数
+const DIFF_CONTEXT_LINES: usize = 3;
+
+/// 序列化 edit/write 的 diff 展示数据。
+///
+/// 只存储预计算的 hunk（变更行 + 上下文行），不存储文件全文，
+/// 避免大文件多次编辑导致 runtime_meta 落库膨胀。
 fn serialize_diff_data(old: Option<&str>, new: &str, file_path: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+
+    let old_lines: Vec<&str> = old.map(|s| s.lines().collect()).unwrap_or_default();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    let diff = TextDiff::from_slices(&old_lines, &new_lines);
+
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => additions += 1,
+            ChangeTag::Delete => deletions += 1,
+            _ => {}
+        }
+    }
+
+    let mut hunks = Vec::new();
+
+    for group in diff.grouped_ops(DIFF_CONTEXT_LINES) {
+        let mut old_start: Option<usize> = None;
+        let mut new_start: Option<usize> = None;
+        let mut changes: Vec<(char, String)> = Vec::new();
+
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                if old_start.is_none()
+                    && let Some(i) = change.old_index()
+                {
+                    old_start = Some(i + 1);
+                }
+                if new_start.is_none()
+                    && let Some(i) = change.new_index()
+                {
+                    new_start = Some(i + 1);
+                }
+                let sign = match change.tag() {
+                    ChangeTag::Insert => '+',
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Equal => ' ',
+                };
+                changes.push((sign, change.value().to_string()));
+            }
+        }
+
+        if !changes.is_empty() {
+            hunks.push(serde_json::json!({
+                "old_start": old_start,
+                "new_start": new_start,
+                "changes": changes
+                    .iter()
+                    .map(|(sign, text)| serde_json::json!([sign.to_string(), text]))
+                    .collect::<Vec<_>>(),
+            }));
+        }
+    }
+
     serde_json::json!({
-        "old": old,
-        "new": new,
+        "format": "diff",
         "path": file_path,
+        "additions": additions,
+        "deletions": deletions,
+        "old_lines": old_lines.len(),
+        "new_lines": new_lines.len(),
+        "is_new_file": old.is_none(),
+        "hunks": hunks,
     })
     .to_string()
 }
@@ -1662,6 +1731,78 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hailux_perm_test_{}", name));
         let _ = std::fs::create_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn diff_data_small_change_not_truncated() {
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let new = "a\nb\nX\nd\ne\nf\ng\nh\ni\nj\n";
+        let v: serde_json::Value =
+            serde_json::from_str(&serialize_diff_data(Some(old), new, "src/main.rs")).unwrap();
+        assert_eq!(v["format"], "diff");
+        assert_eq!(v["path"], "src/main.rs");
+        assert_eq!(v["additions"], 1);
+        assert_eq!(v["deletions"], 1);
+        assert_eq!(v["old_lines"], 10);
+        assert_eq!(v["new_lines"], 10);
+        assert_eq!(v["is_new_file"], false);
+        let hunks = v["hunks"].as_array().unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["old_start"], 1);
+        assert_eq!(hunks[0]["new_start"], 1);
+        let changes = hunks[0]["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 7); // 2 前置上下文 + 1 删 + 1 增 + 3 后置上下文
+        let signs: Vec<&str> = changes.iter().map(|c| c[0].as_str().unwrap()).collect();
+        assert_eq!(signs, vec![" ", " ", "-", "+", " ", " ", " "]);
+    }
+
+    #[test]
+    fn diff_data_new_file() {
+        let v: serde_json::Value =
+            serde_json::from_str(&serialize_diff_data(None, "x\ny\n", "a.txt")).unwrap();
+        assert_eq!(v["is_new_file"], true);
+        assert_eq!(v["additions"], 2);
+        assert_eq!(v["deletions"], 0);
+        assert_eq!(v["old_lines"], 0);
+        let hunks = v["hunks"].as_array().unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["old_start"], serde_json::Value::Null);
+        assert_eq!(hunks[0]["new_start"], 1);
+        let signs: Vec<&str> = hunks[0]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c[0].as_str().unwrap())
+            .collect();
+        assert_eq!(signs, vec!["+", "+"]);
+    }
+
+    #[test]
+    fn diff_data_keeps_large_diffs_untruncated() {
+        let old: String = (0..100).map(|i| format!("old{i}\n")).collect();
+        let new: String = (0..100).map(|i| format!("new{i}\n")).collect();
+        let v: serde_json::Value =
+            serde_json::from_str(&serialize_diff_data(Some(&old), &new, "big.txt")).unwrap();
+        assert_eq!(v["additions"], 100);
+        assert_eq!(v["deletions"], 100);
+        // 全量保留：整文件替换无相同行 → 无上下文，100 删 + 100 增
+        let total: usize = v["hunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["changes"].as_array().unwrap().len())
+            .sum();
+        assert_eq!(total, 200);
+    }
+
+    #[test]
+    fn diff_data_identical_content_yields_no_hunks() {
+        let v: serde_json::Value =
+            serde_json::from_str(&serialize_diff_data(Some("a\nb\n"), "a\nb\n", "same.txt"))
+                .unwrap();
+        assert_eq!(v["additions"], 0);
+        assert_eq!(v["deletions"], 0);
+        assert_eq!(v["hunks"].as_array().unwrap().len(), 0);
     }
 
     #[test]

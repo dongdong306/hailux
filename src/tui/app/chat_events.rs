@@ -111,7 +111,7 @@ impl App {
                     .to_string();
                     if let Err(e) = self
                         .storage
-                        .update_last_message_runtime_meta(session_id, &meta)
+                        .update_last_assistant_runtime_meta(session_id, &meta)
                         .await
                     {
                         eprintln!("[warn] failed to persist runtime_meta: {e}");
