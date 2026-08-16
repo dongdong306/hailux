@@ -11,15 +11,18 @@ fn main() {
     let index = dist.join("index.html");
     if !index.exists() || is_placeholder(index.to_str().unwrap_or_default()) {
         println!("cargo:warning=Building frontend (web/dist)...");
-        let ok = Command::new("npm")
+        // Windows 上 npm 是 npm.cmd，CreateProcess 不解析 .cmd 扩展名，需显式指定
+        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+        let ok = Command::new(npm)
             .args(["run", "build"])
             .current_dir("web")
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
-            println!(
-                "cargo:warning=Failed to build frontend automatically. \
+            // 前端缺失时 rust-embed 会在编译期报错，此处直接 panic 给出可操作的提示
+            panic!(
+                "Failed to build frontend automatically. \
                  Run `cd web && npm install && npm run build` manually, \
                  or build with `--no-default-features` (TUI only)."
             );
