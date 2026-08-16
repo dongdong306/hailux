@@ -17,6 +17,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(windows)]
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
