@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/dongdong306/hailux/compare/v0.7.0...v0.8.0) (2026-08-16)
+
+
+### Improvements
+
+* add GLM-5.3 model to Zhipu provider ([cba6236](https://github.com/dongdong306/hailux/commit/cba6236d699901111ca5c956a168875975cfa86d))
+* add Web UI mode with shared core event architecture ([0d951dd](https://github.com/dongdong306/hailux/commit/0d951dd2dc0a37eaee7ec69710470fddc01b8232))
+* enhance ask_user experience in web UI and align TUI behavior ([7ced47c](https://github.com/dongdong306/hailux/commit/7ced47c7e571c0b43dc98d0354ea13a63394ec31))
+* group consecutive tool calls and render todo_write as todo card in web UI ([1cd48c1](https://github.com/dongdong306/hailux/commit/1cd48c18222963680e0b5edc2ce7fe9c660a1412))
+* list skill directory files in skill tool output ([3b19d1f](https://github.com/dongdong306/hailux/commit/3b19d1f929377f9184d00817b5d118a0ee753e5d))
+* show "Load skill" title for skill tool calls in web UI ([2a077a7](https://github.com/dongdong306/hailux/commit/2a077a7bc8497b5d7d56e56d38be54d703726cc1))
+
+
+### Bugfixes
+
+* **ci:** build web frontend before release binaries ([c711cea](https://github.com/dongdong306/hailux/commit/c711ceab68061d15d3cea99fbf5cc45e99242248))
+* correct tool result summary parsing to match actual output ([f9d06ae](https://github.com/dongdong306/hailux/commit/f9d06ae684c5174ca91a2fc1cde9cfeced7dfe7a))
+* gate OnceLock import behind windows cfg to fix linux clippy ([6458aad](https://github.com/dongdong306/hailux/commit/6458aad15627dfa783d93e0e871bb6951587a1e2))
+* merge predefined models into configured providers' model list ([bffaa4e](https://github.com/dongdong306/hailux/commit/bffaa4eaadfccb42756db688f961662659487350))
+* resolve mojibake in bash tool output on Chinese Windows ([bcc8536](https://github.com/dongdong306/hailux/commit/bcc8536e671ba3cca366510d4e75dfe89e70f8cb))
+* **web:** reuse empty latest session instead of always creating a new one ([d1ddc8f](https://github.com/dongdong306/hailux/commit/d1ddc8f2d366f4ef7ed4336b81c686d4d348d4f6))
+
+
+### Performance
+
+* precompute diff hunks for edit/write display data ([5447a5a](https://github.com/dongdong306/hailux/commit/5447a5a774f22d251b547309bd43737011cb7a23))
+
+
+### Refactor
+
+* remove redundant plan mode badge in web chat input ([6565cbe](https://github.com/dongdong306/hailux/commit/6565cbe6bd50685805f9786bd09f05ea24ff8214))
+
+
+### Documentation
+
+* add English README and move Chinese to README.zh-CN.md ([432c615](https://github.com/dongdong306/hailux/commit/432c6151dd06c16cbe8cb146bcf093a5529ee6f9))
+* update AGENTS.md to reflect web UI architecture and current workflows ([e0c4cea](https://github.com/dongdong306/hailux/commit/e0c4cea4b9633b202521d59101e3375f2f12f327))
+
 ## [0.7.0](https://github.com/dongdong306/hailux/compare/v0.6.0...v0.7.0) (2026-08-13)
 
 
