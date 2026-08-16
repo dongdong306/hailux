@@ -4,6 +4,7 @@ use std::time::Instant;
 use super::{App, AppState, Message};
 use crate::agent::Tool;
 use crate::agent::command_def::INIT_COMMAND_NAME;
+use crate::agent::event::CoreEvent;
 use crate::agent::subagent::{self, TaskTool};
 use crate::storage::{MessageRole, StoredMessage};
 use crate::tui::command;
@@ -22,6 +23,7 @@ fn estimate_compact_prompt(old_prompt: u32, usage: CompactUsage) -> u32 {
 impl App {
     pub(super) async fn handle_chat_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
+            AppEvent::Core(core) => self.handle_core_event(core).await?,
             AppEvent::InputKey(key) => self.handle_chat_key(key).await?,
             AppEvent::InputPaste(text) => {
                 self.handle_paste(text);
@@ -33,7 +35,27 @@ impl App {
                     self.handle_user_message(input).await?;
                 }
             }
-            AppEvent::AgentChunk(chunk) => {
+            AppEvent::Resize => {}
+            AppEvent::ScrollUp => {
+                self.should_auto_scroll = false;
+                self.scroll_offset = self.scroll_offset.saturating_add(3);
+            }
+            AppEvent::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                if self.scroll_offset == 0 {
+                    self.should_auto_scroll = true;
+                }
+            }
+            AppEvent::McpReady(_) => {}
+            AppEvent::MouseClick => {}
+        }
+        Ok(())
+    }
+
+    /// 领域事件处理（agent / subagent 产出，UI 无关的 CoreEvent 在此落地为 TUI 状态）
+    pub(super) async fn handle_core_event(&mut self, event: CoreEvent) -> Result<()> {
+        match event {
+            CoreEvent::AgentChunk(chunk) => {
                 self.finalize_thinking_ms();
                 match self.messages.last_mut() {
                     Some(Message::AgentStreaming(text)) => {
@@ -47,7 +69,7 @@ impl App {
                     self.scroll_offset = 0;
                 }
             }
-            AppEvent::AgentReasoningChunk(chunk) => {
+            CoreEvent::AgentReasoningChunk(chunk) => {
                 match self.messages.last_mut() {
                     Some(Message::AgentThinking { text, think_ms, .. }) if think_ms.is_none() => {
                         text.push_str(&chunk);
@@ -64,7 +86,7 @@ impl App {
                     self.scroll_offset = 0;
                 }
             }
-            AppEvent::AgentComplete {
+            CoreEvent::AgentComplete {
                 messages: final_messages,
                 usages,
                 status,
@@ -144,13 +166,13 @@ impl App {
                     .await?;
                 }
             }
-            AppEvent::UsageUpdate {
+            CoreEvent::UsageUpdate {
                 prompt_tokens,
                 completion_tokens,
             } => {
                 self.set_session_usage(prompt_tokens, completion_tokens);
             }
-            AppEvent::PersistMessage {
+            CoreEvent::PersistMessage {
                 msg,
                 usage,
                 display,
@@ -194,7 +216,7 @@ impl App {
                     self.storage.append_message(session_id, &stored).await?;
                 }
             }
-            AppEvent::ToolCallStart {
+            CoreEvent::ToolCallStart {
                 name,
                 arguments,
                 subagent_name,
@@ -234,7 +256,7 @@ impl App {
                     self.scroll_offset = 0;
                 }
             }
-            AppEvent::ToolResult {
+            CoreEvent::ToolResult {
                 name,
                 result,
                 display,
@@ -280,18 +302,7 @@ impl App {
                     self.scroll_offset = 0;
                 }
             }
-            AppEvent::Resize => {}
-            AppEvent::ScrollUp => {
-                self.should_auto_scroll = false;
-                self.scroll_offset = self.scroll_offset.saturating_add(3);
-            }
-            AppEvent::ScrollDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                if self.scroll_offset == 0 {
-                    self.should_auto_scroll = true;
-                }
-            }
-            AppEvent::AskUser {
+            CoreEvent::AskUser {
                 questions,
                 response_tx,
             } => {
@@ -309,9 +320,7 @@ impl App {
                 };
                 self.timing.pause();
             }
-            AppEvent::McpReady(_) => {}
-            AppEvent::MouseClick => {}
-            AppEvent::CompactChunk(chunk) => {
+            CoreEvent::CompactChunk(chunk) => {
                 if let Some(Message::CompactStreaming(text)) = self.messages.last_mut() {
                     text.push_str(&chunk);
                 }
@@ -319,7 +328,7 @@ impl App {
                     self.scroll_offset = 0;
                 }
             }
-            AppEvent::CompactComplete {
+            CoreEvent::CompactComplete {
                 summary,
                 session_id,
                 usage,
@@ -371,7 +380,7 @@ impl App {
                 self.is_processing = false;
                 self.input.set_processing(false);
             }
-            AppEvent::CompactError(msg) => {
+            CoreEvent::CompactError(msg) => {
                 if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
                     *self.messages.last_mut().unwrap() =
                         Message::Agent(format!("[压缩失败: {}]", msg));
@@ -384,7 +393,7 @@ impl App {
                 self.render.dirty = true;
             }
             // 权限请求在 App::handle_event 顶部统一入队，不会到达此处
-            AppEvent::PermissionRequest { .. } => {}
+            CoreEvent::PermissionRequest { .. } => {}
         }
         Ok(())
     }
@@ -551,7 +560,7 @@ impl App {
                     self.shared.current_session.clone(),
                     self.shared.mcp_backends.clone(),
                     self.shared.config.clone(),
-                    Some(self.events.0.clone()),
+                    self.agent.event_hub().clone(),
                     self.agent.permission().clone(),
                 );
 
@@ -634,7 +643,7 @@ impl App {
             }
         }
 
-        let tx = self.events.0.clone();
+        let tx = self.core_tx.clone();
         if let Err(e) = self.agent.chat_stream(&input, tx) {
             self.messages.push(Message::Agent(format!("[错误: {}]", e)));
             self.is_processing = false;
@@ -681,7 +690,7 @@ impl App {
         self.messages.push(Message::CompactStreaming(label));
         self.render.dirty = true;
 
-        let tx = self.events.0.clone();
+        let tx = self.core_tx.clone();
         if let Err(e) = self.agent.request_compaction(tx, session_id) {
             if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
                 *self.messages.last_mut().unwrap() = Message::Agent(format!("[压缩失败: {}]", e));

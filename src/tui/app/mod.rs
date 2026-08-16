@@ -190,6 +190,8 @@ pub struct App {
     pub(super) should_quit: bool,
     pub(super) agent: Agent,
     pub(super) events: (EventTx, event::EventRx),
+    /// agent 领域事件发送器（经 forwarder 包装为 AppEvent::Core 进入事件循环）
+    pub(super) core_tx: crate::agent::event::CoreEventTx,
     pub(super) resolved: ResolvedModel,
     pub(super) state: AppState,
     pub(super) storage: ChatStorage,
@@ -232,6 +234,7 @@ impl App {
         subagents: Vec<SubagentConfig>,
         shared: AppSharedState,
         events: (EventTx, event::EventRx),
+        core_tx: crate::agent::event::CoreEventTx,
     ) -> Self {
         let work_dir = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -249,6 +252,7 @@ impl App {
             should_quit: false,
             agent,
             events,
+            core_tx,
             resolved,
             state: AppState::Chat,
             storage,
@@ -438,13 +442,13 @@ impl App {
                 tokio::time::timeout(Duration::from_millis(100), self.events.1.recv()).await
             {
                 match &event {
-                    AppEvent::AgentComplete { .. } => {
+                    AppEvent::Core(crate::agent::event::CoreEvent::AgentComplete { .. }) => {
                         if let Err(e) = self.handle_event(event).await {
                             eprintln!("[warn] cleanup handle_event error: {e}");
                         }
                         return;
                     }
-                    AppEvent::PersistMessage { .. } => {
+                    AppEvent::Core(crate::agent::event::CoreEvent::PersistMessage { .. }) => {
                         if let Err(e) = self.handle_event(event).await {
                             eprintln!("[warn] cleanup persist error: {e}");
                         }
@@ -484,18 +488,20 @@ impl App {
     async fn process_event(&mut self, event: AppEvent) -> Result<()> {
         let streaming = matches!(
             &event,
-            AppEvent::AgentChunk(_)
-                | AppEvent::AgentReasoningChunk(_)
-                | AppEvent::AgentComplete { .. }
-                | AppEvent::CompactChunk(_)
-                | AppEvent::CompactComplete { .. }
+            AppEvent::Core(
+                crate::agent::event::CoreEvent::AgentChunk(_)
+                    | crate::agent::event::CoreEvent::AgentReasoningChunk(_)
+                    | crate::agent::event::CoreEvent::AgentComplete { .. }
+                    | crate::agent::event::CoreEvent::CompactChunk(_)
+                    | crate::agent::event::CoreEvent::CompactComplete { .. },
+            )
         );
         let is_subagent_result = matches!(
             &event,
-            AppEvent::ToolResult {
+            AppEvent::Core(crate::agent::event::CoreEvent::ToolResult {
                 subagent_name: Some(_),
                 ..
-            }
+            })
         );
         let len_before = self.messages.len();
         self.handle_event(event).await?;
@@ -507,17 +513,20 @@ impl App {
 
     /// 判断事件是否为可批量消费的高频流式事件
     fn is_batchable_event(event: &AppEvent) -> bool {
-        matches!(
-            event,
-            AppEvent::AgentChunk(_)
-                | AppEvent::AgentReasoningChunk(_)
-                | AppEvent::UsageUpdate { .. }
-                | AppEvent::PersistMessage { .. }
-                | AppEvent::ToolCallStart { .. }
-                | AppEvent::ToolResult { .. }
-                | AppEvent::AgentComplete { .. }
-                | AppEvent::CompactChunk(_)
-        )
+        match event {
+            AppEvent::Core(e) => matches!(
+                e,
+                crate::agent::event::CoreEvent::AgentChunk(_)
+                    | crate::agent::event::CoreEvent::AgentReasoningChunk(_)
+                    | crate::agent::event::CoreEvent::UsageUpdate { .. }
+                    | crate::agent::event::CoreEvent::PersistMessage { .. }
+                    | crate::agent::event::CoreEvent::ToolCallStart { .. }
+                    | crate::agent::event::CoreEvent::ToolResult { .. }
+                    | crate::agent::event::CoreEvent::AgentComplete { .. }
+                    | crate::agent::event::CoreEvent::CompactChunk(_)
+            ),
+            _ => false,
+        }
     }
 
     async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
@@ -530,11 +539,11 @@ impl App {
         // 权限请求统一在此入队，不受当前 state 限制。
         // 必须优先处理：若此时处于其他弹窗（如 AskUser）而把请求
         // 交给对应 handler，事件会被吞掉，agent 端 oneshot 永不 resolve 而死锁。
-        if let AppEvent::PermissionRequest {
+        if let AppEvent::Core(crate::agent::event::CoreEvent::PermissionRequest {
             request,
             response_tx,
             subagent_name,
-        } = event
+        }) = event
         {
             let pending = crate::tui::app::types::PermissionPending {
                 request,

@@ -1,5 +1,7 @@
 use crate::agent::CommandRegistry;
 
+pub use crate::agent::parse_slash_input;
+
 /// UI-action 命令的静态信息（仅用于内建 UI 命令的展示）。
 pub struct SlashCommand {
     pub name: &'static str,
@@ -90,26 +92,6 @@ fn match_ui_command(name: &str) -> Option<Command> {
         "yolo" => Some(Command::Yolo),
         "exit" | "quit" | "q" => Some(Command::Exit),
         _ => None,
-    }
-}
-
-/// 解析 `/name args` 格式的输入，返回 (命令名, 参数文本)。
-/// 输入必须以 `/` 开头。命令名和参数之间以首个空格分隔。
-fn parse_slash_input(input: &str) -> Option<(String, String)> {
-    let trimmed = input.trim();
-    if !trimmed.starts_with('/') {
-        return None;
-    }
-    let body = trimmed[1..].trim_start();
-    if body.is_empty() {
-        return None;
-    }
-    if let Some(space_pos) = body.find(char::is_whitespace) {
-        let name = body[..space_pos].to_string();
-        let args = body[space_pos..].trim().to_string();
-        Some((name, args))
-    } else {
-        Some((body.to_string(), String::new()))
     }
 }
 
