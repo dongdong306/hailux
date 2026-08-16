@@ -1,40 +1,43 @@
+English | [简体中文](README.zh-CN.md)
+
 # hailux
 
-> 一个基于终端的 AI 编程助手，让你在命令行中完成代码编写、审查、重构和问题排查。基于 Rust 构建，编译为单一可执行文件，无需安装任何外部运行时（Node、Python 等），低内存占用，开箱即用。
+> A terminal-based AI coding assistant that lets you write, review, refactor, and debug code right from your command line (or browser). Built in Rust and compiled to a single binary — no external runtimes required (Node, Python, etc.), low memory footprint, ready out of the box. Ships with a built-in Web UI: one command switches you to the browser.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.96.0%2B-orange.svg)](https://www.rust-lang.org)
 [![CI](https://github.com/dongdong306/hailux/actions/workflows/ci.yml/badge.svg)](https://github.com/dongdong306/hailux/actions/workflows/ci.yml)
 
-## 功能特性
+## Features
 
-- **流式对话** — 实时显示 AI 回复，支持推理过程展示
-- **工具调用** — 内置文件读写、搜索、Bash 执行、网页获取等工具，AI 可自主调用完成复杂任务
-- **MCP 协议支持** — 可接入任意 MCP 服务拓展能力
-- **SKILL 系统** — 通过 SKILL.md 定义可复用的工作流和知识库，支持项目级和全局技能
-- **规划模式** — 切换到只读模式，让 AI 先分析后执行，避免误操作
-- **子代理** — 支持委派复杂任务给子代理并行处理
-- **会话管理** — 自动保存对话历史，支持多会话切换
-- **多模型支持** — 内置 DeepSeek、Zhipu AI 等模型，支持自定义 API 提供商
-- **文件提及** — 使用 `@路径` 快速引用文件内容
+- **Streaming chat** — Real-time AI responses with visible reasoning process
+- **Tool calling** — Built-in file read/write, search, Bash execution, web fetching and more; the AI autonomously calls tools to complete complex tasks
+- **Web UI** — `hailux --web` switches to a browser interface sharing sessions and config with the TUI, with visual management for skills / MCP / subagents
+- **MCP support** — Connect any MCP server to extend capabilities
+- **Skill system** — Define reusable workflows and knowledge bases via SKILL.md, at project or global level
+- **Plan mode** — Switch to read-only mode so the AI analyzes before executing, avoiding unintended changes
+- **Subagents** — Delegate complex tasks to subagents running in parallel
+- **Session management** — Chat history saved automatically, switch between multiple sessions
+- **Multi-model support** — DeepSeek, Zhipu AI and more built in; custom API providers supported
+- **File mentions** — Reference file contents quickly with `@path`
 
-## 快速开始
+## Getting Started
 
-### 安装
+### Installation
 
-**一键安装（推荐）：**
+**One-line install (recommended):**
 
-Linux：
+Linux:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dongdong306/hailux/main/scripts/install.sh | bash
 ```
 
-Windows (PowerShell)：
+Windows (PowerShell):
 ```powershell
 irm https://raw.githubusercontent.com/dongdong306/hailux/main/scripts/install.ps1 | iex
 ```
 
-**从源码编译：**
+**Build from source:**
 
 ```sh
 git clone https://github.com/dongdong306/hailux.git
@@ -42,26 +45,26 @@ cd hailux
 cargo build --release
 ```
 
-编译后的二进制文件位于 `target/release/hailux`。
+The binary is located at `target/release/hailux`.
 
-**前提条件（源码编译）：**
-- Rust 1.96.0+（Edition 2024）
+**Prerequisites (building from source):**
+- Rust 1.96.0+ (Edition 2024)
 - Windows / Linux / macOS
 
-### 首次配置
+### First-time Setup
 
-首次运行 `hailux` 后，配置文件会自动生成在 `~/.hailux/` 目录下：
+After running `hailux` for the first time, config files are generated under `~/.hailux/`:
 
 ```
 ~/.hailux/
-├── config.toml    # API 配置
-├── mcp.toml       # MCP 服务器配置
-├── db/chat.db     # 对话历史数据库
-├── AGENTS.md      # 全局指令（注入到系统提示词）
-└── skills/        # 自定义技能
+├── config.toml    # API configuration
+├── mcp.toml       # MCP server configuration
+├── db/chat.db     # chat history database
+├── AGENTS.md      # global instructions (injected into the system prompt)
+└── skills/        # custom skills
 ```
 
-编辑 `~/.hailux/config.toml` 配置 API Key：
+Edit `~/.hailux/config.toml` to set your API key:
 
 ```toml
 main_model = "deepseek/deepseek-v4-pro"
@@ -70,59 +73,73 @@ main_model = "deepseek/deepseek-v4-pro"
 api_key = "your-api-key-here"
 ```
 
-### 启动
+### Launch
 
 ```sh
-hailux              # 在当前目录启动
+hailux              # start the TUI in the current directory
+hailux --web        # start the Web UI (default http://127.0.0.1:18080)
+hailux web --open   # start the Web UI and open the browser
 ```
 
-首次启动时会引导你选择模型并输入 API Key。
+On first launch you will be guided to pick a model and enter an API key.
 
-### 使用示例
+### Web UI
+
+The Web UI shares configuration, session history, and the skill system with the TUI:
+
+```sh
+hailux web --host 127.0.0.1 --port 18080 --open
+```
+
+- Listens on the loopback address (`127.0.0.1`) by default. The server can access any local directory — exposing it on `0.0.0.0` is an explicit trust decision; be careful.
+- Frontend assets are embedded in the binary; no separate frontend deployment needed.
+- Manage sessions, skills, and MCP servers directly in the browser. Permission confirmations / ask_user dialogs behave the same as in the TUI.
+
+### Example
 
 ```sh
 $ hailux
-> 这个项目的测试是怎么组织的？
+> How are the tests organized in this project?
 ```
 
-hailux 会读取当前目录上下文（AGENTS.md、技能等），调用 `grep` / `read` 等工具定位测试代码后给出答案。涉及文件修改的任务（如"给 CLI 加个 --verbose 参数"），它会自动使用编辑工具修改代码并汇报 diff；输入 `@路径` 可强制引用指定文件内容。
+hailux reads the current directory's context (AGENTS.md, skills, etc.), calls tools like `grep` / `read` to locate test code, and answers. For tasks involving file changes (e.g. "add a --verbose flag to the CLI"), it edits the code automatically and reports a diff; type `@path` to force-include a file's content.
 
-## 使用指南
+## Usage Guide
 
-### 斜杠命令
+### Slash Commands
 
-在输入框中以 `/` 开头输入命令：
+Type `/` in the input box:
 
-| 命令 | 说明 |
-|------|------|
-| `/sessions` | 打开会话选择器 |
-| `/new` | 新建会话 |
-| `/models` | 切换模型 |
-| `/skills` | 查看已加载的技能 |
-| `/mcp` | 查看 MCP 服务器状态 |
-| `/tasks` | 查看子代理执行情况 |
-| `/plan` | 切换规划模式（只读） |
-| `/compact` | 压缩对话历史（节省上下文） |
-| `/init` | 为当前目录生成 AGENTS.md 模板 |
-| `/exit` | 退出程序（`quit` / `q` 亦可） |
+| Command | Description |
+|---------|-------------|
+| `/sessions` | Open the session picker |
+| `/new` | Start a new session |
+| `/models` | Switch model |
+| `/skills` | List loaded skills |
+| `/mcp` | Show MCP server status |
+| `/tasks` | Show subagent task status |
+| `/plan` | Toggle plan mode (read-only) |
+| `/compact` | Compact conversation history (saves context) |
+| `/init` | Generate an AGENTS.md template for this directory |
+| `/exit` | Quit (`quit` / `q` also work) |
 
-### 快捷键
+### Keyboard Shortcuts
 
-| 按键 | 功能 |
-|------|------|
-| `Enter` | 发送消息 |
-| `Shift+Enter` / `Alt+Enter` | 换行 |
-| `Tab` | 补全命令 / 确认建议 |
-| `Shift+Tab` | 切换规划模式 |
-| `Ctrl+O` | 折叠/展开推理过程 |
-| `↑` / `↓` | 浏览历史输入 / 多行编辑中移动光标 |
-| `PageUp` / `PageDown` | 滚动对话 |
-| `Esc` | 关闭建议 / 清空输入 |
-| `@` | 触发文件提及 |
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Shift+Enter` / `Alt+Enter` | Newline |
+| `Tab` | Complete command / accept suggestion |
+| `Shift+Tab` | Toggle plan mode |
+| `Ctrl+O` | Collapse/expand reasoning |
+| `↑` / `↓` | Browse input history / move cursor in multi-line editing |
+| `PageUp` / `PageDown` | Scroll conversation |
+| `Esc` | Dismiss suggestion / clear input |
+| `@` | Trigger file mention |
 
-### 配置自定义模型
+### Custom Models
 
-在 `~/.hailux/config.toml` 中添加自定义提供商：
+Add a custom provider in `~/.hailux/config.toml`:
 
 ```toml
 main_model = "my-provider/my-model"
@@ -136,55 +153,63 @@ max_tokens = 8192
 context_window = 32768
 ```
 
-### MCP 服务器
+### MCP Servers
 
-编辑 `~/.hailux/mcp.toml` 添加 MCP 服务器：
+Edit `~/.hailux/mcp.toml` to add MCP servers:
 
 ```toml
-# stdio 方式（本地进程）
+# stdio (local process)
 [my-server]
 command = "node"
 args = ["/path/to/server.js"]
 
-# http 方式（远程服务）
+# http (remote service)
 [remote-server]
 url = "https://example.com/mcp"
 ```
 
-### SKILL 系统
+### Skill System
 
-在 `~/.hailux/skills/<name>/SKILL.md` 创建技能：
+Create a skill at `~/.hailux/skills/<name>/SKILL.md`:
 
 ```markdown
 ---
 name: my-skill
-description: 技能描述，会显示在系统提示词中
+description: Skill description, shown in the system prompt
 ---
 
-技能的完整内容，在用户请求时加载。
+Full skill content, loaded on demand.
 ```
 
-## 开发
+## Development
 
 ```sh
-cargo build     # 编译
-cargo run       # 运行
-cargo test      # 运行测试
-cargo clippy    # 代码检查
-cargo fmt       # 格式化代码
+cargo build     # build (Web UI feature enabled by default)
+cargo run       # run the TUI
+cargo test      # run tests
+cargo clippy    # lint
+cargo fmt       # format code
+
+cargo run -- --web              # run the Web UI
+cd web && npm install && npm run build   # rebuild the frontend after editing web/src
+cargo build --no-default-features       # TUI-only build, no Node required
 ```
 
-## 技术栈
+Building the Web UI from source requires Node.js 22+.
 
-- **语言**：Rust (Edition 2024)
-- **TUI 框架**：[ratatui](https://ratatui.rs/) + [crossterm](https://github.com/crossterm-rs/crossterm)
-- **LLM 交互**：[async-openai](https://github.com/64bit/async-openai)
-- **MCP 客户端**：[rmcp](https://github.com/modelcontextprotocol/rust-sdk)
-- **存储**：SQLite ([sqlx](https://github.com/launchbadge/sqlx))
-- **Markdown 渲染**：[pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) + [syntect](https://github.com/trishume/syntect)
-- **代码搜索**：[grep](https://github.com/BurntSushi/ripgrep) + [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore)
-- **CLI**：[clap](https://github.com/clap-rs/clap)
+## Tech Stack
 
-## 许可证
+- **Language**: Rust (Edition 2024)
+- **TUI**: [ratatui](https://ratatui.rs/) + [crossterm](https://github.com/crossterm-rs/crossterm)
+- **Web backend**: [axum](https://github.com/tokio-rs/axum) (SSE + REST, static assets embedded via [rust-embed](https://github.com/pyrossh/rust-embed))
+- **Web frontend**: [React 19](https://react.dev/) + [assistant-ui](https://www.assistant-ui.com/) + [zustand](https://github.com/pmndrs/zustand) + [vite](https://vitejs.dev/) + Tailwind 4
+- **LLM interaction**: [async-openai](https://github.com/64bit/async-openai)
+- **MCP client**: [rmcp](https://github.com/modelcontextprotocol/rust-sdk)
+- **Storage**: SQLite ([sqlx](https://github.com/launchbadge/sqlx))
+- **Markdown rendering**: [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) + [syntect](https://github.com/trishume/syntect)
+- **Code search**: [grep](https://github.com/BurntSushi/ripgrep) + [ignore](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore)
+- **CLI**: [clap](https://github.com/clap-rs/clap)
+
+## License
 
 [MIT License](LICENSE)
