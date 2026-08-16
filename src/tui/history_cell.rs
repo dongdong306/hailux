@@ -2005,14 +2005,14 @@ pub(crate) fn tool_result_summary(name: &str, result: &str) -> String {
         }
         "web_fetch" => format!("{} chars", result.chars().count()),
         "grep" => {
-            if result.starts_with("未找到") {
+            if result.starts_with("No matches found") {
                 "no matches".to_string()
             } else {
                 let file_count = result
                     .lines()
                     .filter(|l| l.ends_with(':') && !l.starts_with(' '))
                     .count();
-                let line_matches = result.lines().filter(|l| l.starts_with("  Line ")).count();
+                let line_matches = result.lines().filter(|l| l.starts_with("  ")).count();
                 if file_count > 0 {
                     format!("{} files, {} matches", file_count, line_matches)
                 } else {
@@ -2021,7 +2021,7 @@ pub(crate) fn tool_result_summary(name: &str, result: &str) -> String {
             }
         }
         "glob" => {
-            if result.starts_with("未找到") {
+            if result.starts_with("No matching files found") {
                 "no matches".to_string()
             } else {
                 let count = result.lines().filter(|l| !l.trim().is_empty()).count();
