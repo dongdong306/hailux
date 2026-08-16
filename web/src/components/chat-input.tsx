@@ -374,16 +374,6 @@ export function ChatInput() {
           </p>
         )}
 
-        {/* 模式徽标（YOLO 状态在输入框工具栏展示，此处不重复） */}
-        {planMode && (
-          <div className="mb-2 flex gap-1.5">
-            <span className="inline-flex items-center gap-1 rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs text-warning">
-              <ClipboardList className="size-3" />
-              规划模式（只读）· Shift+Tab 退出
-            </span>
-          </div>
-        )}
-
         <div
           className={cn(
             "relative mx-auto flex w-full flex-col rounded-3xl border border-border bg-background",
