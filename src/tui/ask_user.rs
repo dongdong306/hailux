@@ -11,6 +11,12 @@ use super::model_picker::wrap_input;
 
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
 
+/// ask_user 应答文本转义：`\` 与 `"` 均转义（先 `\` 后 `"`，避免 `\"` 歧义），
+/// 与 history_cell::parse_ask_user_pairs 的还原规则配对
+pub(crate) fn ask_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub(crate) struct AskUserState {
     pub questions: Vec<event::QuestionInfo>,
     pub response_tx: Option<tokio::sync::oneshot::Sender<String>>,
@@ -53,8 +59,8 @@ impl AskUserState {
                 .enumerate()
                 .map(|(i, q)| {
                     let ans = self.answers[i].as_deref().unwrap_or("Unanswered");
-                    let esc_q = q.question.replace('"', "\\\"");
-                    let esc_a = ans.replace('"', "\\\"");
+                    let esc_q = ask_escape(&q.question);
+                    let esc_a = ask_escape(ans);
                     format!("\"{esc_q}\"=\"{esc_a}\"")
                 })
                 .collect::<Vec<_>>()
@@ -66,31 +72,27 @@ impl AskUserState {
         }
     }
 
-    pub fn try_select(&mut self, single: bool, confirm_tab: usize) {
+    pub fn try_select(&mut self, confirm_tab: usize) {
         let q = &self.questions[self.current_tab];
         let opts = &q.options;
         if self.selected < opts.len() {
             self.answers[self.current_tab] = Some(opts[self.selected].label.clone());
-            if single {
-                self.submit_and_finish();
-            } else {
-                self.current_tab += 1;
-                if self.current_tab > confirm_tab {
-                    self.current_tab = confirm_tab;
-                }
-                self.selected = 0;
-                self.editing_custom = false;
+            // 对齐 Web：选中后不自动提交，统一进入 Confirm 页确认
+            self.current_tab += 1;
+            if self.current_tab > confirm_tab {
+                self.current_tab = confirm_tab;
             }
+            self.selected = 0;
+            self.editing_custom = false;
         } else {
             self.editing_custom = true;
         }
     }
 
     pub fn handle_event(&mut self, event: AppEvent, state: &mut AppState) -> Result<()> {
-        let single = self.questions.len() == 1;
-        let tabs_total = if single { 1 } else { self.questions.len() + 1 };
         let confirm_tab = self.questions.len();
-        let is_confirm = !single && self.current_tab == confirm_tab;
+        let tabs_total = confirm_tab + 1;
+        let is_confirm = self.current_tab == confirm_tab;
 
         match event {
             AppEvent::InputPaste(text) => {
@@ -112,7 +114,7 @@ impl AskUserState {
             }
             AppEvent::InputKey(key) => {
                 if self.editing_custom && !is_confirm {
-                    Self::handle_editing_key(self, key, single);
+                    Self::handle_editing_key(self, key);
                     if self.response_tx.is_none() {
                         *state = AppState::Chat;
                     } else {
@@ -186,7 +188,7 @@ impl AskUserState {
                             let total = q.options.len() + 1;
                             if (digit as usize) <= total.min(9) {
                                 self.selected = (digit - 1) as usize;
-                                self.try_select(single, confirm_tab);
+                                self.try_select(confirm_tab);
                             }
                         }
                     }
@@ -198,7 +200,7 @@ impl AskUserState {
                             *state = AppState::Chat;
                             return Ok(());
                         } else {
-                            self.try_select(single, confirm_tab);
+                            self.try_select(confirm_tab);
                         }
                     }
                     _ => {}
@@ -218,7 +220,7 @@ impl AskUserState {
         Ok(())
     }
 
-    fn handle_editing_key(st: &mut AskUserState, key: KeyEvent, single: bool) {
+    fn handle_editing_key(st: &mut AskUserState, key: KeyEvent) {
         let tab = st.current_tab;
         let ci = &mut st.custom_inputs[tab];
         match key.code {
@@ -233,10 +235,7 @@ impl AskUserState {
                 }
                 *ci = text.clone();
                 st.answers[st.current_tab] = Some(text.clone());
-                if single {
-                    st.submit_and_finish();
-                    return;
-                }
+                // 对齐 Web：自定义输入回车后进入 Confirm 页，不自动提交
                 let confirm_tab = st.questions.len();
                 st.current_tab += 1;
                 if st.current_tab > confirm_tab {
@@ -331,9 +330,8 @@ pub(crate) fn render_ask_user(
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
     use textwrap::wrap;
 
-    let single = questions.len() == 1;
     let confirm_tab = questions.len();
-    let is_confirm = !single && current_tab == confirm_tab;
+    let is_confirm = current_tab == confirm_tab;
     let custom_input = custom_inputs
         .get(current_tab)
         .map(|s| s.as_str())
@@ -342,8 +340,7 @@ pub(crate) fn render_ask_user(
     let dialog_width = (area.width as usize).clamp(50, 80);
     let inner_w = dialog_width.saturating_sub(4);
 
-    let tab_lines = if single { 0 } else { 1 };
-
+    // 标签栏恒占 1 行（单问题也含 Confirm 页），+3 为边框、+1 为帮助行
     let question_lines = if is_confirm {
         let mut total = 0;
         for (i, q) in questions.iter().enumerate() {
@@ -368,7 +365,7 @@ pub(crate) fn render_ask_user(
         lines + 1 + edit_lines
     };
 
-    let dialog_height = (tab_lines + question_lines + 4) as u16;
+    let dialog_height = (question_lines + 5) as u16;
     let dialog_x = (area.width as usize).saturating_sub(dialog_width) / 2;
     let dialog_y = (area.height as usize).saturating_sub(dialog_height as usize) / 2;
 
@@ -404,7 +401,7 @@ pub(crate) fn render_ask_user(
     let mut cursor_pos = None;
     let mut editing_line_idx: Option<usize> = None;
 
-    if !single {
+    {
         let mut tab_spans = Vec::new();
         for (i, q) in questions.iter().enumerate() {
             let active = i == current_tab;
@@ -598,8 +595,6 @@ pub(crate) fn render_ask_user(
 
     let help_text = if is_confirm {
         "enter=submit  esc=cancel"
-    } else if single {
-        "↑↓=select  1-9=quick pick  enter=confirm  esc=cancel"
     } else {
         "←→=tab  ↑↓=select  1-9=quick pick  enter=confirm  esc=cancel"
     };

@@ -1779,6 +1779,28 @@ fn skill_call_summary(name: &str, args: &serde_json::Value) -> String {
 
 /// 从 ask_user 工具结果中解析 "question"="answer" 对
 fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
+    /// 还原 ask_escape 的转义：`\\`→`\`、`\"`→`"`；孤立反斜杠（异常输入/旧数据）原样保留
+    fn unescape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('\\') => out.push('\\'),
+                    Some('"') => out.push('"'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     let mut pairs = Vec::new();
     let bytes = result.as_bytes();
     let mut i = 0;
@@ -1800,7 +1822,7 @@ fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
             if j >= bytes.len() {
                 break;
             }
-            let key = result[key_start..j].replace("\\\"", "\"");
+            let key = unescape(&result[key_start..j]);
 
             // 寻找 =
             let mut k = j + 1;
@@ -1836,7 +1858,7 @@ fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
             if m >= bytes.len() {
                 break;
             }
-            let val = result[val_start..m].replace("\\\"", "\"");
+            let val = unescape(&result[val_start..m]);
 
             pairs.push((key, val));
             i = m + 1;
@@ -2201,5 +2223,42 @@ mod tests {
     #[test]
     fn format_seconds_large() {
         assert_eq!(format_seconds(12_345), "12.3");
+    }
+
+    #[test]
+    fn parse_ask_user_pairs_escape_roundtrip() {
+        // ask_escape 转义（`\` 与 `"`）→ parse_ask_user_pairs 无损还原
+        let cases = [
+            ("简单问题", "D:\\project\\hailux"),
+            ("含引号 \" 和反斜杠 \\", "尾部反斜杠\\"),
+            ("路径", "C:\\Users\\name\\"),
+        ];
+        for (q, a) in cases {
+            let formatted = format!(
+                "\"{}\"=\"{}\"",
+                super::super::ask_user::ask_escape(q),
+                super::super::ask_user::ask_escape(a)
+            );
+            let pairs = super::parse_ask_user_pairs(&formatted);
+            assert_eq!(
+                pairs,
+                vec![(q.to_string(), a.to_string())],
+                "input: {formatted}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_pairs_multiple_and_legacy() {
+        // 多对逗号连接 + 旧格式（仅 \" 转义）兼容
+        let s = "\"q1\"=\"a1\", \"q2\"=\"Unanswered\", \"say \\\"hi\\\"\"=\"ok\"";
+        assert_eq!(
+            super::parse_ask_user_pairs(s),
+            vec![
+                ("q1".to_string(), "a1".to_string()),
+                ("q2".to_string(), "Unanswered".to_string()),
+                ("say \"hi\"".to_string(), "ok".to_string()),
+            ]
+        );
     }
 }

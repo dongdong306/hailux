@@ -12,17 +12,20 @@ import {
 } from "lucide-react";
 import { useApp } from "../store/app-store";
 import { cn, shortDir } from "../lib/utils";
-import type { FsEntry } from "../runtime/types";
+import type { FsEntry, QuestionInfo } from "../runtime/types";
 
 export function Overlay({
   children,
   onClose,
   wide,
+  closeOnMask = true,
 }: {
   children: ReactNode;
   /** 不传则 Esc/点击遮罩不可关闭（权限确认等必须作答的弹窗） */
   onClose?: () => void;
   wide?: boolean;
+  /** false 时 Esc 仍可关闭，但点击遮罩不关闭（防误触丢弃已填内容） */
+  closeOnMask?: boolean;
 }) {
   useEffect(() => {
     if (!onClose) return;
@@ -36,7 +39,7 @@ export function Overlay({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
-      onClick={onClose}
+      onClick={closeOnMask ? onClose : undefined}
     >
       <div
         className={cn(
@@ -109,30 +112,100 @@ export function PermissionDialog() {
 }
 
 /* ── 用户提问 ───────────────────────────────────────────────── */
+
+/** 提交格式对齐 TUI AskUserState::submit_and_finish：
+ *  "question"="answer" 逗号连接，`\` 与 `"` 均转义（先 `\` 后 `"`），未答为 Unanswered */
+function formatAskReply(questions: QuestionInfo[], answers: (string | null)[]) {
+  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return questions
+    .map((q, i) => {
+      const ans = answers[i]?.trim() || "Unanswered";
+      return `"${esc(q.question)}"="${esc(ans)}"`;
+    })
+    .join(", ");
+}
+
 export function AskUserDialog() {
   const askUser = useApp((s) => s.askUser);
   const reply = useApp((s) => s.replyAsk);
-  const [answers, setAnswers] = useState<(string | null)[]>([]);
+  const count = askUser?.questions.length ?? 0;
+  // 父组件以 key={requestId} 挂载：新一轮提问整体重挂载，初始状态即本轮题目
+  const [answers, setAnswers] = useState<(string | null)[]>(() =>
+    Array.from({ length: count }, () => null),
+  );
+  const [customOpen, setCustomOpen] = useState<boolean[]>(() =>
+    Array.from({ length: count }, () => false),
+  );
 
   if (!askUser) return null;
   const questions = askUser.questions;
-  const current = answers.length ? answers : questions.map(() => null);
 
-  const allAnswered = current.every(
-    (a, i) => a !== null || questions[i]!.options.length === 0,
-  );
-
-  const submit = () => {
-    const parts = current.map((a, i) => {
-      const q = questions[i]!;
-      const label = q.options.find((o) => o.label === a)?.label ?? a ?? "";
-      return `${q.header}: ${label}`;
-    });
-    reply(parts.join("\n"));
+  /** 答案是自定义文字（非选项、非空） */
+  const isCustomAnswer = (qi: number) => {
+    const v = answers[qi]?.trim();
+    return !!v && !questions[qi]!.options.some((o) => o.label === v);
   };
 
+  const submit = () => reply(formatAskReply(questions, answers));
+
+  const pick = (qi: number, label: string) => {
+    // 选中选项与自定义回答互斥：设置答案并收起自定义输入
+    setAnswers((prev) => {
+      const next = [...prev];
+      next[qi] = label;
+      return next;
+    });
+    setCustomOpen((prev) => {
+      const c = [...prev];
+      c[qi] = false;
+      return c;
+    });
+  };
+
+  /** 展开/收起自定义输入；展开时撤销已选的选项（与选项互斥） */
+  const toggleCustom = (qi: number) => {
+    const opening = !customOpen[qi];
+    setCustomOpen((prev) => {
+      const c = [...prev];
+      c[qi] = opening;
+      return c;
+    });
+    if (opening && !isCustomAnswer(qi)) {
+      setAnswers((prev) => {
+        const next = [...prev];
+        next[qi] = null;
+        return next;
+      });
+    }
+  };
+
+  /** 自定义输入变化：实时写入答案 */
+  const setCustomAnswer = (qi: number, value: string) => {
+    setAnswers((prev) => {
+      const next = [...prev];
+      next[qi] = value;
+      return next;
+    });
+  };
+
+  /** 单选圈：选项/自定义共用 */
+  const Circle = ({ filled }: { filled: boolean }) => (
+    <span
+      className={cn(
+        "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border",
+        filled
+          ? "border-primary bg-primary text-primary-foreground"
+          : "border-muted-foreground/40",
+      )}
+    >
+      {filled && <Check className="size-3" />}
+    </span>
+  );
+
+  const unanswered = answers.some((a) => a === null || !a!.trim());
+
   return (
-    <Overlay>
+    <Overlay onClose={() => reply("[User Cancelled]")} closeOnMask={false}>
       {questions.map((q, qi) => (
         <div key={qi} className="mb-4">
           <h4 className="mb-0.5 text-sm font-medium">{q.question}</h4>
@@ -146,24 +219,13 @@ export function AskUserDialog() {
                   key={o.label}
                   className={cn(
                     "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 text-sm transition-colors",
-                    current[qi] === o.label
+                    answers[qi] === o.label
                       ? "border-primary/30 bg-primary/[0.06]"
                       : "border-border/50 hover:bg-muted/60",
                   )}
+                  onClick={() => pick(qi, o.label)}
                 >
-                  <input
-                    type="radio"
-                    name={`q-${qi}`}
-                    className="mt-0.5 accent-primary"
-                    checked={current[qi] === o.label}
-                    onChange={() =>
-                      setAnswers((prev) => {
-                        const next = prev.length ? [...prev] : questions.map(() => null);
-                        next[qi] = o.label;
-                        return next;
-                      })
-                    }
-                  />
+                  <Circle filled={answers[qi] === o.label} />
                   <span>
                     <span className="font-medium">{o.label}</span>
                     {o.description && (
@@ -174,19 +236,52 @@ export function AskUserDialog() {
                   </span>
                 </label>
               ))}
+
+              {/* 自定义输入（对齐 TUI 固定附加的 "Type your own answer"） */}
+              <button
+                type="button"
+                className={cn(
+                  "flex w-full cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                  customOpen[qi] || isCustomAnswer(qi)
+                    ? "border-primary/30 bg-primary/[0.06] text-foreground"
+                    : "border-border/50 text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
+                onClick={() => toggleCustom(qi)}
+              >
+                <Circle filled={customOpen[qi] || isCustomAnswer(qi)} />
+                输入自定义回答
+              </button>
+              {customOpen[qi] && (
+                <input
+                  type="text"
+                  autoFocus
+                  value={isCustomAnswer(qi) ? answers[qi]! : ""}
+                  className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
+                  placeholder="输入自定义回答"
+                  onChange={(e) => setCustomAnswer(qi, e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      setCustomAnswer(qi, e.currentTarget.value.trim());
+                    }
+                  }}
+                />
+              )}
             </div>
           ) : (
             <input
               type="text"
               autoFocus
+              value={answers[qi] ?? ""}
               className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
-              onChange={(e) =>
-                setAnswers((prev) => {
-                  const next = prev.length ? [...prev] : questions.map(() => null);
-                  next[qi] = e.target.value;
-                  return next;
-                })
-              }
+              placeholder="输入回答"
+              onChange={(e) => setCustomAnswer(qi, e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  setCustomAnswer(qi, e.currentTarget.value.trim());
+                }
+              }}
             />
           )}
         </div>
@@ -199,13 +294,8 @@ export function AskUserDialog() {
         >
           取消
         </button>
-        <button
-          type="button"
-          className={btnPrimary}
-          disabled={!allAnswered}
-          onClick={submit}
-        >
-          提交
+        <button type="button" className={btnPrimary} onClick={submit}>
+          提交{unanswered ? "（未答项记为 Unanswered）" : ""}
         </button>
       </div>
     </Overlay>
