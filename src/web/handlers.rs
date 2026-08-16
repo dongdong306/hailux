@@ -128,6 +128,26 @@ async fn create_session(
         Err(e) => return err500(e),
     };
     let session = session_arc.lock().await;
+    // 最新会话仍是空白新对话（标题为空 = 从未发过消息）时直接复用，避免堆叠空会话
+    let reuse = match session
+        .storage()
+        .list_top_level_sessions(&session.work_dir.display().to_string())
+        .await
+    {
+        Ok(list) => list.first().filter(|s| s.title.is_empty()).cloned(),
+        Err(_) => None,
+    };
+    if let Some(latest) = reuse {
+        session.set_current_session(Some(latest.id.clone()));
+        return Json(SessionInfo {
+            id: latest.id,
+            title: String::new(),
+            model: latest.model,
+            updated_at: latest.updated_at,
+            work_dir: strip_verbatim(&session.work_dir.display().to_string()),
+        })
+        .into_response();
+    }
     match session.create_session(&resolved.display).await {
         Ok(id) => Json(SessionInfo {
             id,
