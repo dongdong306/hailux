@@ -4,9 +4,8 @@ use super::models::{
     SharedMessage, ThinkingConfig,
 };
 use super::tools::ToolRegistry;
+use crate::agent::event::{CompactUsage, CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
 use crate::permission::{PermissionManager, PermissionReply, PermissionResult};
-use crate::tui::AppEvent;
-use crate::tui::event::{CompactUsage, EventTx, MessageUsage, TaskStatus};
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -54,6 +53,7 @@ pub struct Agent {
     cancel: Arc<AtomicBool>,
     permission: PermissionManager,
     work_dir: String,
+    event_hub: super::event::EventHub,
 }
 
 impl Agent {
@@ -74,17 +74,33 @@ impl Agent {
             cancel: Arc::new(AtomicBool::new(false)),
             permission,
             work_dir: work_dir.to_string(),
+            event_hub: super::event::EventHub::new(),
         }
+    }
+
+    /// 事件通道句柄（ask_user / subagent 转发等无法在构造期拿到通道的场景）
+    pub fn event_hub(&self) -> &super::event::EventHub {
+        &self.event_hub
     }
 
     pub fn interrupt(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// 取消标志句柄（Web 中断端点不经过会话锁，直接置位）
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
     /// 开关规划模式。开启后，发给 LLM 的工具列表会过滤掉 edit/write，
     /// 并在用户消息中注入规划模式只读提示词。
     pub fn set_plan_mode(&mut self, on: bool) {
         self.plan_mode = on;
+    }
+
+    /// 当前是否处于规划模式
+    pub fn plan_mode(&self) -> bool {
+        self.plan_mode
     }
 
     pub fn switch_model(&mut self, config: OpenAIConfig, model: &str, max_tokens: u32) {
@@ -150,7 +166,7 @@ impl Agent {
     pub fn chat_stream(
         &mut self,
         user_input: &str,
-        event_tx: EventTx,
+        event_tx: CoreEventTx,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.messages.push(Arc::new(
             ChatCompletionRequestUserMessage {
@@ -182,7 +198,7 @@ impl Agent {
         self.cancel.store(false, Ordering::Relaxed);
         tokio::spawn(async move {
             if let Err(e) = run_stream_loop(&mut state, cancel, &tx_clone).await {
-                let _ = tx_clone.try_send(AppEvent::AgentChunk(format!("\n[Error: {}]", e)));
+                let _ = tx_clone.try_send(CoreEvent::AgentChunk(format!("\n[Error: {}]", e)));
                 finalize_messages(
                     &mut state.messages,
                     format!("[Error: {}]", e),
@@ -237,7 +253,7 @@ impl Agent {
     /// 摘要 chunk 通过 `CompactChunk` 事件发送，完成后发送 `CompactComplete`。
     pub fn request_compaction(
         &self,
-        event_tx: EventTx,
+        event_tx: CoreEventTx,
         session_id: String,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let client = self.client.clone();
@@ -302,7 +318,7 @@ impl Agent {
             let request = match builder.build() {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.try_send(AppEvent::CompactError(e.to_string()));
+                    let _ = tx.try_send(CoreEvent::CompactError(e.to_string()));
                     return;
                 }
             };
@@ -314,7 +330,7 @@ impl Agent {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.try_send(AppEvent::CompactError(e.to_string()));
+                    let _ = tx.try_send(CoreEvent::CompactError(e.to_string()));
                     return;
                 }
             };
@@ -323,7 +339,7 @@ impl Agent {
             let mut last_usage: Option<CompactUsage> = None;
             while let Some(chunk_result) = stream.next().await {
                 if cancel.load(Ordering::Relaxed) {
-                    let _ = tx.try_send(AppEvent::CompactError("压缩已取消".to_string()));
+                    let _ = tx.try_send(CoreEvent::CompactError("压缩已取消".to_string()));
                     return;
                 }
                 match chunk_result {
@@ -336,22 +352,22 @@ impl Agent {
                         }
                         for choice in chunk.choices {
                             if let Some(content) = choice.delta.base.content {
-                                let _ = tx.try_send(AppEvent::CompactChunk(content.clone()));
+                                let _ = tx.try_send(CoreEvent::CompactChunk(content.clone()));
                                 summary.push_str(&content);
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = tx.try_send(AppEvent::CompactError(e.to_string()));
+                        let _ = tx.try_send(CoreEvent::CompactError(e.to_string()));
                         return;
                     }
                 }
             }
 
             if summary.trim().is_empty() {
-                let _ = tx.try_send(AppEvent::CompactError("压缩结果为空".to_string()));
+                let _ = tx.try_send(CoreEvent::CompactError("压缩结果为空".to_string()));
             } else {
-                let _ = tx.try_send(AppEvent::CompactComplete {
+                let _ = tx.try_send(CoreEvent::CompactComplete {
                     summary,
                     session_id,
                     usage: last_usage,
@@ -411,12 +427,12 @@ impl AgentStreamState {
 }
 
 fn emit_persist_message(
-    event_tx: &EventTx,
+    event_tx: &CoreEventTx,
     msg: &SharedMessage,
     usage: Option<(u32, u32)>,
     display: Option<String>,
 ) {
-    let _ = event_tx.try_send(AppEvent::PersistMessage {
+    let _ = event_tx.try_send(CoreEvent::PersistMessage {
         msg: Arc::clone(msg),
         usage,
         display,
@@ -429,7 +445,7 @@ fn emit_persist_message(
 fn finalize_messages(
     messages: &mut Vec<SharedMessage>,
     fallback_content: String,
-    event_tx: &EventTx,
+    event_tx: &CoreEventTx,
     usages: Vec<MessageUsage>,
     status: TaskStatus,
 ) {
@@ -454,7 +470,7 @@ fn finalize_messages(
         emit_persist_message(event_tx, &msg, None, None);
     }
     let final_messages = std::mem::take(messages);
-    let _ = event_tx.try_send(AppEvent::AgentComplete {
+    let _ = event_tx.try_send(CoreEvent::AgentComplete {
         messages: final_messages,
         usages,
         status,
@@ -464,7 +480,7 @@ fn finalize_messages(
 async fn run_stream_loop(
     state: &mut AgentStreamState,
     cancel: Arc<AtomicBool>,
-    event_tx: &EventTx,
+    event_tx: &CoreEventTx,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut all_usages: Vec<MessageUsage> = Vec::new();
     loop {
@@ -491,7 +507,7 @@ async fn run_stream_loop(
                     }
                     _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
                         if cancel.load(Ordering::Relaxed) {
-                            let _ = event_tx.try_send(AppEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
+                            let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
                             finalize_cancelled(state, event_tx, all_usages).await?;
                             return Ok(());
                         }
@@ -519,12 +535,12 @@ async fn run_stream_loop(
                             }
                             for choice in chunk.choices {
                                 if let Some(content) = choice.delta.base.content {
-                                    let _ = event_tx.try_send(AppEvent::AgentChunk(content.clone()));
+                                    let _ = event_tx.try_send(CoreEvent::AgentChunk(content.clone()));
                                     ai_message.push_str(&content);
                                 }
 
                                 if let Some(reasoning) = choice.delta.reasoning_content {
-                                    let _ = event_tx.try_send(AppEvent::AgentReasoningChunk(reasoning.clone()));
+                                    let _ = event_tx.try_send(CoreEvent::AgentReasoningChunk(reasoning.clone()));
                                     ai_reasoning.push_str(&reasoning);
                                 }
 
@@ -566,7 +582,7 @@ async fn run_stream_loop(
         }
 
         if stream_cancelled {
-            let _ = event_tx.try_send(AppEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
+            let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
             push_partial_assistant(state, &ai_message, &ai_reasoning, &tool_calls_map, event_tx)
                 .await?;
             finalize_cancelled(state, event_tx, all_usages).await?;
@@ -615,7 +631,7 @@ async fn run_stream_loop(
                         prompt_tokens: pt,
                         completion_tokens: ct,
                     });
-                    let _ = event_tx.try_send(AppEvent::UsageUpdate {
+                    let _ = event_tx.try_send(CoreEvent::UsageUpdate {
                         prompt_tokens: pt,
                         completion_tokens: ct,
                     });
@@ -655,7 +671,7 @@ async fn run_stream_loop(
                         prompt_tokens: pt,
                         completion_tokens: ct,
                     });
-                    let _ = event_tx.try_send(AppEvent::UsageUpdate {
+                    let _ = event_tx.try_send(CoreEvent::UsageUpdate {
                         prompt_tokens: pt,
                         completion_tokens: ct,
                     });
@@ -669,7 +685,7 @@ async fn run_stream_loop(
     }
 
     let final_messages = std::mem::take(&mut state.messages);
-    let _ = event_tx.try_send(AppEvent::AgentComplete {
+    let _ = event_tx.try_send(CoreEvent::AgentComplete {
         messages: final_messages,
         usages: all_usages,
         status: TaskStatus::Completed,
@@ -682,7 +698,7 @@ async fn push_partial_assistant(
     ai_message: &str,
     ai_reasoning: &str,
     tool_calls_map: &BTreeMap<u32, PartialToolCall>,
-    event_tx: &EventTx,
+    event_tx: &CoreEventTx,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     if ai_message.is_empty() && ai_reasoning.is_empty() && tool_calls_map.is_empty() {
         return Ok(());
@@ -765,7 +781,7 @@ async fn push_partial_assistant(
 
 async fn finalize_cancelled(
     state: &mut AgentStreamState,
-    event_tx: &EventTx,
+    event_tx: &CoreEventTx,
     usages: Vec<MessageUsage>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // 检查最后一条 assistant 消息是否有 orphaned tool_calls（缺少对应的 tool result）
@@ -804,7 +820,7 @@ async fn finalize_cancelled(
                 ChatCompletionRequestToolMessageContent::Text(t) => t.clone(),
                 _ => String::new(),
             };
-            let _ = event_tx.try_send(AppEvent::ToolResult {
+            let _ = event_tx.try_send(CoreEvent::ToolResult {
                 name: String::new(),
                 result: result_text,
                 display: None,
@@ -831,16 +847,16 @@ async fn handle_tool_calls_stream(
     state: &mut AgentStreamState,
     tool_calls: &[ChatCompletionMessageToolCalls],
     cancel: &Arc<AtomicBool>,
-    event_tx: &EventTx,
+    event_tx: &CoreEventTx,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     for tool_call in tool_calls {
         if cancel.load(Ordering::Relaxed) {
-            let _ = event_tx.try_send(AppEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
+            let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
             let (id, name) = match tool_call {
                 ChatCompletionMessageToolCalls::Function(f) => (&f.id, &f.function.name),
                 ChatCompletionMessageToolCalls::Custom(c) => (&c.id, &c.custom_tool.name),
             };
-            let _ = event_tx.try_send(AppEvent::ToolResult {
+            let _ = event_tx.try_send(CoreEvent::ToolResult {
                 name: name.clone(),
                 result: "Tool execution aborted".to_string(),
                 display: None,
@@ -900,7 +916,7 @@ async fn handle_tool_calls_stream(
                             let always_patterns = req.always_patterns.clone();
                             let (tx, rx) = oneshot::channel::<PermissionReply>();
                             if event_tx
-                                .try_send(AppEvent::PermissionRequest {
+                                .try_send(CoreEvent::PermissionRequest {
                                     request: req,
                                     response_tx: tx,
                                     subagent_name: None,
@@ -949,7 +965,7 @@ async fn handle_tool_calls_stream(
 
         // 权限通过后才上报「工具已开始」，被拒的工具不显示
         if permission_denied.is_none() {
-            let _ = event_tx.try_send(AppEvent::ToolCallStart {
+            let _ = event_tx.try_send(CoreEvent::ToolCallStart {
                 name: name.clone(),
                 arguments: arguments.clone(),
                 subagent_name: None,
@@ -986,7 +1002,7 @@ async fn handle_tool_calls_stream(
         };
         let (result, display) = result_display;
 
-        let _ = event_tx.try_send(AppEvent::ToolResult {
+        let _ = event_tx.try_send(CoreEvent::ToolResult {
             name: name.clone(),
             result: result.clone(),
             display: display.clone(),

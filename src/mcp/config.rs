@@ -1,5 +1,5 @@
 use color_eyre::{Result, eyre::Context, eyre::ContextCompat};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -9,20 +9,20 @@ const MCP_CONFIG_FILE_NAME: &str = "mcp.toml";
 /// 单个 MCP 服务器的配置。通过 untagged enum 区分传输方式：
 /// - 包含 `command` 字段 → stdio 本地子进程
 /// - 包含 `url` 字段 → 远程 streamable-http / SSE
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ServerConfig {
     Stdio {
         command: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
     },
     Http {
         url: String,
         /// 附加到每个 HTTP 请求的自定义 header（可用于鉴权，如 Authorization / X-API-Key）
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
     },
 }
@@ -47,7 +47,7 @@ impl ServerConfig {
 /// [mcp_servers.remote]
 /// url = "https://example.com/mcp"
 /// ```
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, ServerConfig>,
@@ -129,6 +129,22 @@ pub fn load() -> Result<McpConfig> {
     let config: McpConfig = toml::from_str(&content)
         .wrap_err_with(|| format!("无法解析 MCP 配置文件: {}", path.display()))?;
     Ok(config)
+}
+
+/// 将配置写回 `~/.hailux/mcp.toml`（全量序列化，文件内注释不保留）。
+/// 必要时创建父目录。
+pub fn save(config: &McpConfig) -> Result<()> {
+    let path = mcp_config_file_path()?;
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("无法创建 MCP 配置目录: {}", parent.display()))?;
+    }
+    let content = toml::to_string_pretty(config).wrap_err("序列化 MCP 配置失败")?;
+    std::fs::write(&path, content)
+        .wrap_err_with(|| format!("无法写入 MCP 配置文件: {}", path.display()))?;
+    Ok(())
 }
 
 /// 将示例模板写入指定路径，必要时创建父目录。失败时打印警告但不阻断启动。
@@ -237,5 +253,37 @@ url = "https://example.com/mcp"
     fn empty_config_is_default() {
         let config: McpConfig = toml::from_str("").unwrap();
         assert!(config.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn serializes_roundtrip() {
+        let mut config = McpConfig::default();
+        config.mcp_servers.insert(
+            "context7".to_string(),
+            ServerConfig::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "@upstash/context7-mcp".to_string()],
+                env: BTreeMap::new(),
+            },
+        );
+        config.mcp_servers.insert(
+            "remote".to_string(),
+            ServerConfig::Http {
+                url: "https://example.com/mcp".to_string(),
+                headers: BTreeMap::new(),
+            },
+        );
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: McpConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.mcp_servers.len(), 2);
+        assert!(matches!(
+            &parsed.mcp_servers["context7"],
+            ServerConfig::Stdio { command, args, .. }
+            if command == "npx" && args.len() == 2
+        ));
+        assert!(matches!(
+            &parsed.mcp_servers["remote"],
+            ServerConfig::Http { url, .. } if url == "https://example.com/mcp"
+        ));
     }
 }

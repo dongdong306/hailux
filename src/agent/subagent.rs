@@ -1,6 +1,7 @@
 use super::Agent;
 use super::models::CompatibleChatCompletionRequestMessage;
 use super::tools::{Tool, ToolExecuteError};
+use crate::agent::event::{CoreEvent, create_core_event_channel};
 use crate::agent::skill::{SkillInfo, format_available_skills};
 use crate::agent::utils;
 use crate::agent::{
@@ -9,7 +10,6 @@ use crate::agent::{
 };
 use crate::mcp::{McpTool, SharedMcpBackends};
 use crate::storage::{ChatStorage, MessageRole};
-use crate::tui::event::{AppEvent, EventTx, create_event_channel};
 use async_openai::config::OpenAIConfig;
 use color_eyre::Result;
 use ignore::WalkBuilder;
@@ -297,8 +297,8 @@ pub struct TaskTool {
     mcp_backends: SharedMcpBackends,
     description_cache: String,
     config: SharedConfig,
-    /// 主 TUI 的事件发送器，用于将 subagent 的工具调用过程实时转发到聊天区
-    main_event_tx: Option<EventTx>,
+    /// 主会话的事件通道句柄，用于将 subagent 的工具调用过程实时转发到聊天区
+    main_event_hub: crate::agent::event::EventHub,
     /// 权限管理器（与主 Agent 共享）
     permission: crate::permission::PermissionManager,
 }
@@ -316,7 +316,7 @@ impl TaskTool {
         current_session_id: Arc<Mutex<Option<String>>>,
         mcp_backends: SharedMcpBackends,
         config: SharedConfig,
-        main_event_tx: Option<EventTx>,
+        main_event_hub: crate::agent::event::EventHub,
         permission: crate::permission::PermissionManager,
     ) -> Self {
         let names: Vec<&str> = subagents.iter().map(|s| s.name.as_str()).collect();
@@ -339,7 +339,7 @@ impl TaskTool {
             mcp_backends,
             description_cache,
             config,
-            main_event_tx,
+            main_event_hub,
             permission,
         }
     }
@@ -395,7 +395,7 @@ impl TaskTool {
         register_if(Box::new(WriteTool), &mut agent, allowed);
         register_if(Box::new(GrepTool), &mut agent, allowed);
         register_if(Box::new(GlobTool), &mut agent, allowed);
-        register_if(Box::new(WebFetchTool::new()), &mut agent, allowed);
+        register_if(Box::<WebFetchTool>::default(), &mut agent, allowed);
         register_if(Box::new(TodoWriteTool), &mut agent, allowed);
         // ask_user 不注册给 subagent
 
@@ -548,7 +548,7 @@ impl Tool for TaskTool {
         let current_session_id = self.current_session_id.clone();
         let mcp_backends = self.mcp_backends.clone();
         let app_config = self.config.clone();
-        let main_event_tx = self.main_event_tx.clone();
+        let main_event_hub = self.main_event_hub.clone();
 
         Box::pin(async move {
             // 获取 parent session_id
@@ -587,7 +587,7 @@ impl Tool for TaskTool {
                     mcp_backends: mcp_backends.clone(),
                     description_cache: String::new(),
                     config: app_config.clone(),
-                    main_event_tx: main_event_tx.clone(),
+                    main_event_hub: main_event_hub.clone(),
                     permission: self.permission.clone(),
                 };
                 let mut restore_agent = task_tool_for_restore.build_subagent(&config)?;
@@ -672,7 +672,7 @@ impl Tool for TaskTool {
                     mcp_backends: mcp_backends.clone(),
                     description_cache: String::new(),
                     config: app_config.clone(),
-                    main_event_tx: main_event_tx.clone(),
+                    main_event_hub: main_event_hub.clone(),
                     permission: self.permission.clone(),
                 };
                 let agent = task_tool.build_subagent(&config)?;
@@ -683,7 +683,7 @@ impl Tool for TaskTool {
             let mut agent = agent;
 
             // 创建局部 event channel
-            let (sub_tx, mut sub_rx) = create_event_channel();
+            let (sub_tx, mut sub_rx) = create_core_event_channel();
 
             // 启动 subagent 流式对话
             agent
@@ -696,10 +696,10 @@ impl Tool for TaskTool {
             let mut final_text = String::new();
             while let Some(event) = sub_rx.recv().await {
                 match event {
-                    AppEvent::AgentChunk(chunk) => {
+                    CoreEvent::AgentChunk(chunk) => {
                         final_text.push_str(&chunk);
                     }
-                    AppEvent::AgentComplete { messages, .. } => {
+                    CoreEvent::AgentComplete { messages, .. } => {
                         // 从最终消息中提取最后一条 assistant 消息的文本
                         for msg in messages.iter().rev() {
                             if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg.as_ref()
@@ -712,7 +712,7 @@ impl Tool for TaskTool {
                         }
                         break;
                     }
-                    AppEvent::PersistMessage {
+                    CoreEvent::PersistMessage {
                         msg,
                         usage,
                         display,
@@ -728,7 +728,7 @@ impl Tool for TaskTool {
                         }
                         let _ = storage.append_message(&sub_session_id, &stored).await;
                     }
-                    AppEvent::UsageUpdate {
+                    CoreEvent::UsageUpdate {
                         prompt_tokens,
                         completion_tokens,
                     } => {
@@ -740,51 +740,44 @@ impl Tool for TaskTool {
                             )
                             .await;
                     }
-                    AppEvent::ToolCallStart {
+                    CoreEvent::ToolCallStart {
                         name, arguments, ..
                     } => {
-                        if let Some(ref tx) = main_event_tx {
-                            let _ = tx.try_send(AppEvent::ToolCallStart {
-                                name,
-                                arguments,
-                                subagent_name: Some(subagent_name.to_string()),
-                            });
-                        }
+                        let _ = main_event_hub.send(CoreEvent::ToolCallStart {
+                            name,
+                            arguments,
+                            subagent_name: Some(subagent_name.to_string()),
+                        });
                     }
-                    AppEvent::ToolResult {
+                    CoreEvent::ToolResult {
                         name,
                         result,
                         display,
                         ..
                     } => {
-                        if let Some(ref tx) = main_event_tx {
-                            let truncated = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
-                                let safe: String =
-                                    result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
-                                format!("{safe}...(truncated)")
-                            } else {
-                                result
-                            };
-                            let _ = tx.try_send(AppEvent::ToolResult {
-                                name,
-                                result: truncated,
-                                display,
-                                subagent_name: Some(subagent_name.to_string()),
-                            });
-                        }
+                        let truncated = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
+                            let safe: String = result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
+                            format!("{safe}...(truncated)")
+                        } else {
+                            result
+                        };
+                        let _ = main_event_hub.send(CoreEvent::ToolResult {
+                            name,
+                            result: truncated,
+                            display,
+                            subagent_name: Some(subagent_name.to_string()),
+                        });
                     }
-                    AppEvent::PermissionRequest {
+                    CoreEvent::PermissionRequest {
                         request,
                         response_tx,
                         ..
                     } => {
-                        if let Some(ref tx) = main_event_tx {
-                            let _ = tx.try_send(AppEvent::PermissionRequest {
-                                request,
-                                response_tx,
-                                subagent_name: Some(subagent_name.to_string()),
-                            });
-                        }
+                        let _ = main_event_hub.send(CoreEvent::PermissionRequest {
+                            request,
+                            response_tx,
+                            subagent_name: Some(subagent_name.to_string()),
+                        });
                     }
                     // 其他事件全部忽略
                     _ => {}

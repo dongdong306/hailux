@@ -56,6 +56,27 @@ impl PromptCommand for CustomCommand {
     }
 }
 
+/// 解析 `/name args` 格式的输入，返回 (命令名, 参数文本)。
+/// 输入必须以 `/` 开头。命令名和参数之间以首个空格分隔。
+/// （TUI 与 Web 后端共用）
+pub fn parse_slash_input(input: &str) -> Option<(String, String)> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let body = trimmed[1..].trim_start();
+    if body.is_empty() {
+        return None;
+    }
+    if let Some(space_pos) = body.find(char::is_whitespace) {
+        let name = body[..space_pos].to_string();
+        let args = body[space_pos..].trim().to_string();
+        Some((name, args))
+    } else {
+        Some((body.to_string(), String::new()))
+    }
+}
+
 /// 解析命令 `.md` 文件的 YAML frontmatter，提取 description。
 /// 复用 `utils::split_frontmatter` / `utils::strip_frontmatter_value`，
 /// 避免与 skill.rs、subagent.rs 中的解析逻辑重复。
@@ -182,6 +203,13 @@ impl CommandRegistry {
             .iter()
             .find(|c| c.name() == name)
             .map(|c| c.as_ref())
+    }
+
+    /// 将 prompt 型斜杠命令（`/name args`）展开为完整提示词。
+    /// 非命令输入或命令名未注册时返回 `None`（调用方按普通消息处理）。
+    pub fn render_prompt_command(&self, input: &str) -> Option<String> {
+        let (name, args) = parse_slash_input(input)?;
+        self.find(&name).map(|cmd| cmd.render(&args))
     }
 
     pub fn list(&self) -> Vec<(&str, &str)> {

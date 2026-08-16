@@ -19,7 +19,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum MessageRole {
     System,
     User,
@@ -78,7 +78,7 @@ pub struct SubsessionSummary {
     pub completion_tokens: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StoredMessage {
     pub role: MessageRole,
     pub content: String,
@@ -576,11 +576,17 @@ impl ChatStorage {
     }
 
     /// 列出指定工作目录下的顶层 session（排除 subagent 子会话），按更新时间倒序。
+    ///
+    /// work_dir 做变体匹配：兼容 TUI 写入的 `\\?\` verbatim 前缀
+    /// 与 Web 写入的剥离形式（历史数据与两进程写入并存）。
     pub async fn list_top_level_sessions(&self, work_dir: &str) -> Result<Vec<SessionSummary>> {
+        let variants = work_dir_variants(work_dir);
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT id, title, model, updated_at FROM sessions WHERE work_dir = ? AND parent_id IS NULL ORDER BY updated_at DESC",
+            "SELECT id, title, model, updated_at FROM sessions \
+             WHERE work_dir IN (?, ?) AND parent_id IS NULL ORDER BY updated_at DESC",
         )
-        .bind(work_dir)
+        .bind(&variants[0])
+        .bind(&variants[1])
         .fetch_all(&self.pool)
         .await?;
 
@@ -595,6 +601,39 @@ impl ChatStorage {
             .collect())
     }
 
+    /// 列出所有工作目录下的顶层 session（排除 subagent 子会话），带 work_dir，按更新时间倒序。
+    pub async fn list_all_top_level_sessions(&self) -> Result<Vec<(SessionSummary, String)>> {
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT id, title, model, updated_at, work_dir FROM sessions WHERE parent_id IS NULL ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, title, model, updated_at, work_dir)| {
+                (
+                    SessionSummary {
+                        id,
+                        title,
+                        model,
+                        updated_at,
+                    },
+                    work_dir,
+                )
+            })
+            .collect())
+    }
+
+    /// 查询某 session 的标题；不存在返回 None。
+    pub async fn get_session_title(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT title FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(title,)| title))
+    }
+
     pub async fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
@@ -604,6 +643,25 @@ impl ChatStorage {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// 列出历史会话中出现过的全部工作目录（DISTINCT，按最近使用倒序）
+    pub async fn list_work_dirs(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT work_dir FROM (SELECT work_dir, MAX(updated_at) AS latest FROM sessions GROUP BY work_dir) ORDER BY latest DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(d,)| d).collect())
+    }
+
+    /// 查询会话归属的工作目录
+    pub async fn get_session_work_dir(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT work_dir FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(d,)| d))
     }
 
     pub async fn touch_session(&self, session_id: &str) -> Result<()> {
@@ -789,6 +847,17 @@ impl ChatStorage {
 
         Ok(())
     }
+}
+
+/// work_dir 的 DB 匹配变体：原样 + Windows verbatim 前缀形式（去重后至多两个）。
+/// 兼容历史数据中 TUI（带 `\\?\` 前缀）与 Web（剥离前缀）两种写入写法。
+fn work_dir_variants(dir: &str) -> [String; 2] {
+    let verbatim = if dir.starts_with(r"\\?\") {
+        dir.strip_prefix(r"\\?\").unwrap_or(dir).to_string()
+    } else {
+        format!(r"\\?\{}", dir)
+    };
+    [dir.to_string(), verbatim]
 }
 
 fn extract_user_content(content: &ChatCompletionRequestUserMessageContent) -> String {

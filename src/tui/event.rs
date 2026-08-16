@@ -1,99 +1,30 @@
-use crate::agent::models::SharedMessage;
+use crate::agent::event::CoreEvent;
+pub use crate::agent::event::{
+    CompactUsage, MessageUsage, QuestionInfo, QuestionOption, TaskStatus,
+};
 use crate::mcp::McpConnection;
-use crate::permission::{PermissionReply, PermissionRequest};
 use crossterm::event::{
     Event as CrosstermEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-#[derive(Debug, Clone)]
-pub struct MessageUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct QuestionOption {
-    pub label: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct QuestionInfo {
-    pub question: String,
-    pub header: String,
-    pub options: Vec<QuestionOption>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TaskStatus {
-    Completed,
-    Interrupted,
-    Error,
-}
-
+/// TUI 事件 = 领域事件（包装）+ 终端专有事件。
+///
+/// agent 只产出 `CoreEvent`；本模块的转发任务将其包装为 `AppEvent::Core`
+/// 送入终端事件循环，终端输入（键盘/粘贴/缩放/鼠标）则直接产生专有变体。
 #[derive(Debug)]
 pub enum AppEvent {
+    /// 领域事件（agent / subagent 产出）
+    Core(CoreEvent),
     InputKey(KeyEvent),
     InputPaste(String),
     UserSubmit(String),
-    AgentChunk(String),
-    AgentReasoningChunk(String),
-    AgentComplete {
-        messages: Vec<SharedMessage>,
-        usages: Vec<MessageUsage>,
-        status: TaskStatus,
-    },
-    UsageUpdate {
-        prompt_tokens: u32,
-        completion_tokens: u32,
-    },
-    PersistMessage {
-        msg: SharedMessage,
-        usage: Option<(u32, u32)>,
-        display: Option<String>,
-    },
-    ToolCallStart {
-        name: String,
-        arguments: String,
-        /// 若来自 subagent 转发，携带 subagent 名称
-        subagent_name: Option<String>,
-    },
-    ToolResult {
-        name: String,
-        result: String,
-        display: Option<String>,
-        /// 若来自 subagent 转发，携带 subagent 名称
-        subagent_name: Option<String>,
-    },
-    AskUser {
-        questions: Vec<QuestionInfo>,
-        response_tx: oneshot::Sender<String>,
-    },
-    PermissionRequest {
-        request: PermissionRequest,
-        response_tx: oneshot::Sender<PermissionReply>,
-        subagent_name: Option<String>,
-    },
     Resize,
     ScrollUp,
     ScrollDown,
     MouseClick,
     /// MCP 后台连接完成，携带所有连接结果供 UI 更新与工具注册
     McpReady(Vec<McpConnection>),
-    CompactChunk(String),
-    CompactComplete {
-        summary: String,
-        session_id: String,
-        usage: Option<CompactUsage>,
-    },
-    CompactError(String),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct CompactUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
 }
 
 pub type EventTx = mpsc::Sender<AppEvent>;
@@ -101,6 +32,18 @@ pub type EventRx = mpsc::Receiver<AppEvent>;
 
 pub fn create_event_channel() -> (EventTx, EventRx) {
     mpsc::channel(4096)
+}
+
+/// 将领域事件流转发进 TUI 事件循环（`CoreEvent` → `AppEvent::Core`）。
+/// TUI 事件通道关闭时自动退出。
+pub fn spawn_core_forwarder(mut core_rx: crate::agent::event::CoreEventRx, tx: EventTx) {
+    tokio::spawn(async move {
+        while let Some(event) = core_rx.recv().await {
+            if tx.send(AppEvent::Core(event)).await.is_err() {
+                break;
+            }
+        }
+    });
 }
 
 pub async fn collect_terminal_events(tx: EventTx) {

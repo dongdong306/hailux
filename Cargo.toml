@@ -16,6 +16,10 @@ debug = true
 [profile.release]
 opt-level = 3
 
+[features]
+default = ["web"]
+web = ["dep:axum", "dep:tower-http", "dep:rust-embed", "dep:async-stream"]
+
 [dependencies]
 async-openai = { version = "0.41.1", features = ["chat-completion", "byot"] }
 reqwest = "0.13"
@@ -45,6 +49,11 @@ toml = { version = "1.1", features = ["preserve_order"] }
 similar = { version = "3", features = ["text"] }
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
+# web 后端（feature = "web"，默认开启；--no-default-features 可剔除 Node/web 依赖链）
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+async-stream = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"

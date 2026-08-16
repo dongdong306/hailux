@@ -1,7 +1,7 @@
+use crate::agent::event::{CoreEvent, QuestionInfo, QuestionOption};
 use crate::agent::utils::compare_mtime;
 use crate::permission::PermissionRequest;
 use crate::permission::bash_arity::extract_bash_pattern;
-use crate::tui::event::{AppEvent, EventTx, QuestionInfo, QuestionOption};
 use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
 use grep::regex::RegexMatcher;
 use grep::searcher::Searcher;
@@ -182,12 +182,12 @@ pub trait Tool: Send + Sync {
 
 /// 向用户提出问题并等待回答
 pub struct AskTool {
-    event_tx: EventTx,
+    event_hub: crate::agent::event::EventHub,
 }
 
 impl AskTool {
-    pub fn new(event_tx: EventTx) -> Self {
-        Self { event_tx }
+    pub fn new(event_hub: crate::agent::event::EventHub) -> Self {
+        Self { event_hub }
     }
 }
 
@@ -297,10 +297,17 @@ impl Tool for AskTool {
 
             let (tx, rx) = oneshot::channel::<String>();
 
-            let _ = self.event_tx.try_send(AppEvent::AskUser {
+            let delivered = self.event_hub.send(CoreEvent::AskUser {
                 questions,
                 response_tx: tx,
             });
+            if !delivered {
+                // 通道未绑定或已关闭（如 Web 请求已断开）：
+                // 立即失败，避免 agent 永久挂起等待用户回复
+                return Err(ToolExecuteError {
+                    message: "ask_user unavailable: no active event channel".to_string(),
+                });
+            }
 
             let response = rx.await.map_err(|_| ToolExecuteError {
                 message: "sender dropped".to_string(),
@@ -1066,6 +1073,12 @@ impl Tool for WriteTool {
 
 pub struct WebFetchTool {
     client: Client,
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WebFetchTool {
