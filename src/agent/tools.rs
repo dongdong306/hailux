@@ -17,6 +17,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -327,12 +328,31 @@ impl Tool for AskTool {
         false
     }
 }
-fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
-    let stdout = String::from_utf8_lossy(stdout);
-    if stdout.is_empty() {
-        String::from_utf8_lossy(stderr).to_string()
+/// 智能解码子进程输出：中文 Windows 上 powershell.exe 重定向管道按系统 ANSI 代码页
+/// （GBK）编码输出，直接按 UTF-8 解码会产生乱码。策略：
+/// 1. 通过严格 UTF-8 校验 → 原样返回（纯 ASCII / UTF-8 输出零变化）；
+/// 2. 否则比较 UTF-8 lossy 与 GBK 两种解码结果中的 U+FFFD 数量，取更少者（平手取 UTF-8）。
+fn decode_output(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let utf8_lossy = String::from_utf8_lossy(bytes);
+    let (gbk, _, _) = encoding_rs::GBK.decode(bytes);
+    let utf8_errors = utf8_lossy.chars().filter(|&c| c == '\u{FFFD}').count();
+    let gbk_errors = gbk.chars().filter(|&c| c == '\u{FFFD}').count();
+    if gbk_errors < utf8_errors {
+        gbk.into_owned()
     } else {
-        format!("{}\n{}", stdout, String::from_utf8_lossy(stderr))
+        utf8_lossy.into_owned()
+    }
+}
+
+fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = decode_output(stdout);
+    if stdout.is_empty() {
+        decode_output(stderr)
+    } else {
+        format!("{}\n{}", stdout, decode_output(stderr))
     }
 }
 
@@ -427,6 +447,30 @@ pub(crate) fn plan_mode_bash_denial(arguments: &str) -> Option<String> {
             "[Bash write operation blocked in plan mode: {command}. Plan mode is read-only; exit with /plan or Shift+Tab to execute.]"
         ))
     }
+}
+
+/// Windows shell 程序选择：优先 PowerShell 7+（pwsh.exe，管道输出默认 UTF-8），
+/// 未安装时回退 powershell.exe（GBK 输出由 decode_output 兜底还原）。
+/// 探测结果进程内缓存，只查 PATH 中文件是否存在、不额外起进程。
+#[cfg(windows)]
+fn windows_shell_program() -> &'static str {
+    static SHELL: OnceLock<&'static str> = OnceLock::new();
+    SHELL.get_or_init(|| {
+        let has_pwsh = std::env::var_os("PATH")
+            .map(|paths| {
+                paths
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|p| !p.trim().is_empty())
+                    .any(|p| Path::new(p).join("pwsh.exe").is_file())
+            })
+            .unwrap_or(false);
+        if has_pwsh {
+            "pwsh.exe"
+        } else {
+            "powershell.exe"
+        }
+    })
 }
 
 pub struct BashTool;
@@ -526,7 +570,7 @@ impl Tool for BashTool {
             command,
         ];
         Box::pin(run_shell_command(
-            "powershell.exe",
+            windows_shell_program(),
             cmd_args,
             workdir,
             timeout_secs,
@@ -605,7 +649,7 @@ async fn run_shell_command(
     const MAX_OUTPUT_CHARS: usize = 5000;
 
     let raw = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
+        decode_output(&output.stdout)
     } else {
         combine_output(&output.stdout, &output.stderr)
     };
@@ -1687,5 +1731,39 @@ mod tests {
         let reason = deny(r#"{"command_string":"rm -rf target"}"#).unwrap();
         assert!(reason.contains("rm -rf target"));
         assert!(reason.contains("plan mode"));
+    }
+
+    #[test]
+    fn decode_output_passthrough_utf8() {
+        // 纯 ASCII 与合法 UTF-8（含中文）原样返回
+        assert_eq!(decode_output(b"hello world"), "hello world");
+        let text = "中文输出 cargo build";
+        assert_eq!(decode_output(text.as_bytes()), text);
+    }
+
+    #[test]
+    fn decode_output_restores_gbk_text() {
+        // powershell.exe 在中文 Windows 上按 GBK 输出错误记录，应正确还原
+        let text = "拒绝访问。 (os error 5)\n所在位置 行:1 字符: 247";
+        let (bytes, _, _) = encoding_rs::GBK.encode(text);
+        assert_eq!(decode_output(&bytes), text);
+    }
+
+    #[test]
+    fn decode_output_prefers_utf8_on_error_tie() {
+        // UTF-8 主体 + 少量坏字节：错误数打平（或 UTF-8 更少）时不应整体转 GBK
+        let mut bytes = "中文输出 cargo build".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xFF, 0xFE]);
+        let decoded = decode_output(&bytes);
+        assert!(decoded.starts_with("中文输出 cargo build"));
+        assert!(decoded.contains('\u{FFFD}'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_program_resolves() {
+        // PATH 探测不 panic，且返回两个候选之一
+        let shell = windows_shell_program();
+        assert!(shell == "pwsh.exe" || shell == "powershell.exe");
     }
 }
