@@ -1537,6 +1537,7 @@ dependencies = [
  "crossterm",
  "crossterm_winapi",
  "dirs",
+ "encoding_rs",
  "futures-util",
  "globset",
  "grep",
