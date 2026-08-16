@@ -80,6 +80,17 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
