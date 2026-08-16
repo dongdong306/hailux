@@ -2,17 +2,27 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ActionBarPrimitive,
-  groupPartByType,
   MessagePrimitive,
   ThreadPrimitive,
+  type PartState,
 } from "@assistant-ui/react";
 import { ArrowDown, Check, Copy, Gauge, Terminal } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { useApp } from "../../store/app-store";
 import { MarkdownText } from "./markdown-text";
 import { ReasoningGroup } from "./reasoning";
-import { ToolFallback } from "./tool-fallback";
+import { ToolFallback, ToolGroup } from "./tool-fallback";
 import { toThreadMessages, type SystemRow } from "../../runtime/hailux-runtime";
+
+/** 自定义分组：reasoning 连续段 → 思考组；连续普通工具调用 → 工具合并卡；
+ *  todo_write（todo 卡片）与文本不分组。
+ *  模块级定义保持函数引用稳定，GroupedParts 树 memo 不失效 */
+const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[] => {
+  if (part.type === "reasoning") return ["group-reasoning"];
+  if (part.type === "tool-call" && part.toolName !== "todo_write")
+    return ["group-tools"];
+  return [];
+};
 
 /* ── 用户消息：官方 base（bg-muted 气泡）────────────────────── */
 function UserMessage() {
@@ -184,11 +194,7 @@ function AssistantMessage({
   return (
     <MessagePrimitive.Root className="relative">
       <div className="text-foreground px-2 leading-relaxed break-words">
-        <MessagePrimitive.GroupedParts
-          groupBy={groupPartByType({
-            reasoning: ["group-reasoning"],
-          })}
-        >
+        <MessagePrimitive.GroupedParts groupBy={groupBy}>
           {({ part, children }) => {
             switch (part.type) {
               case "group-reasoning":
@@ -200,6 +206,18 @@ function AssistantMessage({
                     {children}
                   </ReasoningGroup>
                 );
+              case "group-tools": {
+                // 单次调用无合并意义，退化为独立卡片
+                if (part.indices.length <= 1) return <>{children}</>;
+                return (
+                  <ToolGroup
+                    count={part.indices.length}
+                    running={part.status.type === "running"}
+                  >
+                    {children}
+                  </ToolGroup>
+                );
+              }
               case "text":
                 return (
                   <div className="my-2">
