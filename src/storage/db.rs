@@ -1038,7 +1038,7 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
 
 #[cfg(test)]
 impl ChatStorage {
-    async fn new_in_memory() -> Result<Self> {
+    pub(crate) async fn new_in_memory() -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(":memory:")
             .create_if_missing(true);

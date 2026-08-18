@@ -132,6 +132,12 @@ impl SessionManager {
             .unwrap_or_default()
     }
 
+    /// 取指定目录已构建的会话条目（未构建返回 None；键归一化同 `get_or_create`）
+    pub fn get(&self, work_dir: &Path) -> Option<SessionEntry> {
+        let key = normalize_key(work_dir);
+        self.sessions.read().ok().and_then(|m| m.get(&key).cloned())
+    }
+
     /// 使指定目录的会话缓存失效（skills 等磁盘配置变更后调用）。
     /// 运行中的请求持有 Arc 不受影响；下次访问重新发现并构建。
     /// Web 每个请求都携带 session_id 重建上下文（见 sse::ensure_session），可安全调用。
