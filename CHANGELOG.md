@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1](https://github.com/dongdong306/hailux/compare/v0.8.0...v0.8.1) (2026-08-18)
+
+
+### Bugfixes
+
+* **bash:** return on process exit instead of waiting for pipe EOF ([999a0d1](https://github.com/dongdong306/hailux/commit/999a0d1ebee766d04ac80b3d2fb7f2a721610e6e))
+* **session:** clear stale in-memory agent context on session create/switch/delete ([87aef17](https://github.com/dongdong306/hailux/commit/87aef17d89e6caba31335e08e7c929a70817a1d4))
+
 ## [0.8.0](https://github.com/dongdong306/hailux/compare/v0.7.0...v0.8.0) (2026-08-16)
 
 
