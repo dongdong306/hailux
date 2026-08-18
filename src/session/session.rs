@@ -199,8 +199,10 @@ impl ChatSession {
             .and_then(|g| g.clone())
     }
 
-    /// 新建数据库会话并设为当前会话
-    pub async fn create_session(&self, model_display: &str) -> Result<String> {
+    /// 新建数据库会话并设为当前会话。
+    /// 同时清空内存上下文（Web 单实例跨会话复用 Agent，必须先清残留消息）
+    pub async fn create_session(&mut self, model_display: &str) -> Result<String> {
+        self.reset_context();
         let id = self
             .storage
             .create_session(model_display, &self.work_dir.display().to_string())
@@ -236,36 +238,35 @@ impl ChatSession {
             }
         }
 
-        if !chat_messages.is_empty() {
-            let system_prompt = self.agent.take_system_prompt();
-            let mut final_messages = Vec::new();
-            if let Some(prompt) = &system_prompt {
-                final_messages.push(std::sync::Arc::new(
-                    async_openai::types::chat::ChatCompletionRequestSystemMessage {
-                        content:
-                            async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
-                                prompt.clone(),
-                            ),
-                        name: None,
-                    }
-                    .into(),
-                ));
-            }
-            if let Some(ref summary) = compact_summary {
-                final_messages.push(std::sync::Arc::new(
-                    async_openai::types::chat::ChatCompletionRequestUserMessage {
-                        content:
-                            async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
-                                format!("[Context Summary]\n{}", summary),
-                            ),
-                        name: None,
-                    }
-                    .into(),
-                ));
-            }
-            final_messages.extend(chat_messages);
-            self.agent.sync_messages(final_messages);
+        // 无论目标会话是否有消息都整体重建：切到空会话时清掉上一会话的残留
+        let system_prompt = self.agent.take_system_prompt();
+        let mut final_messages = Vec::new();
+        if let Some(prompt) = &system_prompt {
+            final_messages.push(std::sync::Arc::new(
+                async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                    content:
+                        async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                            prompt.clone(),
+                        ),
+                    name: None,
+                }
+                .into(),
+            ));
         }
+        if let Some(ref summary) = compact_summary {
+            final_messages.push(std::sync::Arc::new(
+                async_openai::types::chat::ChatCompletionRequestUserMessage {
+                    content:
+                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                            format!("[Context Summary]\n{}", summary),
+                        ),
+                    name: None,
+                }
+                .into(),
+            ));
+        }
+        final_messages.extend(chat_messages);
+        self.agent.sync_messages(final_messages);
 
         Ok(stored)
     }
@@ -273,6 +274,11 @@ impl ChatSession {
     /// 重置为空会话（不新建 DB 记录，下次发消息时懒创建）
     pub fn reset_session(&mut self) {
         self.set_current_session(None);
+        self.reset_context();
+    }
+
+    /// 清空内存上下文（消息历史 + 会话级权限规则），保留 system prompt
+    pub(crate) fn reset_context(&mut self) {
         self.agent.permission().clear_session();
         let system_prompt = self.agent.take_system_prompt();
         self.agent.clear_messages();
@@ -327,5 +333,117 @@ pub(crate) fn normalize_key(path: &Path) -> PathBuf {
         PathBuf::from(stripped)
     } else {
         canonical
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::models::SharedMessage;
+    use crate::storage::MessageRole;
+
+    async fn make_session() -> (ChatSession, PathBuf) {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let work_dir =
+            std::env::temp_dir().join(format!("hailux-session-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let resolved = config::ResolvedModel {
+            config: async_openai::config::OpenAIConfig::new(),
+            model_id: "test-model".to_string(),
+            max_tokens: 1024,
+            context_window: 8192,
+            display: "test/test-model".to_string(),
+        };
+        let session = ChatSession::new(
+            &resolved,
+            &config::Config::default(),
+            &work_dir,
+            storage,
+            Arc::new(Mutex::new(Vec::new())),
+            None,
+        )
+        .unwrap();
+        (session, work_dir)
+    }
+
+    fn user_message(text: &str) -> SharedMessage {
+        Arc::new(
+            async_openai::types::chat::ChatCompletionRequestUserMessage {
+                content: async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                    text.to_string(),
+                ),
+                name: None,
+            }
+            .into(),
+        )
+    }
+
+    fn system_message(text: &str) -> SharedMessage {
+        Arc::new(
+            async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                    text.to_string(),
+                ),
+                name: None,
+            }
+            .into(),
+        )
+    }
+
+    fn stored_user_message(content: &str) -> StoredMessage {
+        StoredMessage {
+            role: MessageRole::User,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            runtime_meta: None,
+            think_ms: None,
+            compacted: false,
+        }
+    }
+
+    /// Web 端「新建对话」只换 session ID 不清内存消息时，LLM 会带上上一会话的上下文。
+    /// create_session 必须清空 Agent 内存中的残留消息并保留 system prompt。
+    #[tokio::test]
+    async fn create_session_clears_stale_agent_context() {
+        let (mut session, work_dir) = make_session().await;
+        // 模拟上一会话结束后残留的内存消息（AgentComplete → sync_messages 的结果，
+        // 生产路径中列表头部始终是 system 消息）
+        session.sync_messages(vec![system_message("sys"), user_message("旧会话消息")]);
+        assert_eq!(session.messages_excluding_system_count(), 1);
+
+        let id = session.create_session("test-model").await.unwrap();
+        assert_eq!(session.current_session_id().as_deref(), Some(id.as_str()));
+        assert_eq!(session.messages_excluding_system_count(), 0);
+        assert_eq!(session.agent().take_system_prompt().as_deref(), Some("sys"));
+
+        std::fs::remove_dir_all(&work_dir).ok();
+    }
+
+    /// 切换到空会话（无历史消息）同样不能残留上一个会话的上下文。
+    #[tokio::test]
+    async fn switch_session_to_empty_clears_stale_agent_context() {
+        let (mut session, work_dir) = make_session().await;
+        let dir = work_dir.display().to_string();
+        let a = session.storage().create_session("m", &dir).await.unwrap();
+        session
+            .storage()
+            .append_message(&a, &stored_user_message("历史消息"))
+            .await
+            .unwrap();
+        let b = session.storage().create_session("m", &dir).await.unwrap();
+
+        session.switch_session(&a).await.unwrap();
+        assert_eq!(session.messages_excluding_system_count(), 1);
+
+        // 旧实现：目标会话为空则跳过重建，A 的消息残留
+        session.switch_session(&b).await.unwrap();
+        assert_eq!(session.messages_excluding_system_count(), 0);
+        assert!(session.agent().take_system_prompt().is_some());
+
+        std::fs::remove_dir_all(&work_dir).ok();
     }
 }

@@ -127,7 +127,7 @@ async fn create_session(
         Ok(s) => s,
         Err(e) => return err500(e),
     };
-    let session = session_arc.lock().await;
+    let mut session = session_arc.lock().await;
     // 最新会话仍是空白新对话（标题为空 = 从未发过消息）时直接复用，避免堆叠空会话
     let reuse = match session
         .storage()
@@ -138,6 +138,8 @@ async fn create_session(
         Err(_) => None,
     };
     if let Some(latest) = reuse {
+        // 仅切换 session ID 不足以清掉 Agent 内存中的上一会话消息，需重置上下文
+        session.reset_context();
         session.set_current_session(Some(latest.id.clone()));
         return Json(SessionInfo {
             id: latest.id,
@@ -192,8 +194,28 @@ async fn delete_session(
     State(state): State<Arc<WebServerState>>,
     Path(id): Path<String>,
 ) -> Response {
+    // 删除前先查归属目录（删除后行已不存在）；只锁该目录的会话实例，
+    // 避免遍历锁定其他目录、被无关目录的活跃流式请求阻塞
+    let owner_dir = state
+        .manager
+        .storage()
+        .get_session_work_dir(&id)
+        .await
+        .ok()
+        .flatten();
     match state.manager.storage().delete_session(&id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            // 删除的是该目录当前会话时，同步清掉内存中残留的消息与 session ID
+            if let Some(dir) = owner_dir
+                && let Some(session_arc) = state.manager.get(std::path::Path::new(&dir))
+            {
+                let mut session = session_arc.lock().await;
+                if session.current_session_id().as_deref() == Some(id.as_str()) {
+                    session.reset_session();
+                }
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err500(e),
     }
 }
