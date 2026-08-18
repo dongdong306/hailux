@@ -20,6 +20,7 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::sync::oneshot;
 
 type ToolFuture<'a> =
@@ -610,6 +611,72 @@ impl Tool for BashTool {
     }
 }
 
+/// 进程退出后的管道排空窗口：尾部数据可能仍留在内核管道缓冲区；
+/// 孙进程持有写端（如常驻 daemon）时 EOF 永不到来，必须限时。
+const PIPE_DRAIN_WINDOW: Duration = Duration::from_millis(500);
+/// 超时杀树后回收在途输出的窗口（等待 taskkill / kill 生效 + 排空）。
+const KILL_DRAIN_WINDOW: Duration = Duration::from_millis(500);
+/// 排空的硬性总上限：空闲窗口会被持续输出的孙进程无限重置，
+/// 必须叠加总 deadline 兜底，否则挂起风险回归。
+const DRAIN_HARD_CAP: Duration = Duration::from_secs(3);
+
+/// 后台读管道任务：持续读取并把字节块送入 channel，
+/// 读到 EOF / 出错 / 接收端被丢弃时结束。
+fn spawn_pipe_reader<R>(mut pipe: R, tx: tokio::sync::mpsc::Sender<Vec<u8>>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(chunk[..n].to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// 限时排空单个 channel 中残留的输出。双重保险：
+/// 空闲超时（每收到一块数据重置窗口，避免传输中的大量数据被截断）
+/// + 硬性总上限（持续低速输出的孙进程可无限重置空闲窗口，必须兜底）。
+async fn drain_channel_with_window(
+    rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    buf: &mut Vec<u8>,
+    window: Duration,
+) {
+    let hard_deadline = tokio::time::Instant::now() + DRAIN_HARD_CAP;
+    while tokio::time::Instant::now() < hard_deadline {
+        match tokio::time::timeout(window, rx.recv()).await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) | Err(_) => break,
+        }
+    }
+}
+
+/// Windows：taskkill 终止 pid 及其整棵进程树。直接子进程退出不代表孙进程退出——
+/// 常驻 daemon / 浏览器既继承管道写端（导致 EOF 永不到来）又驻留内存。
+#[cfg(windows)]
+async fn kill_process_tree(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .await;
+    }
+}
+
+#[cfg(not(windows))]
+async fn kill_process_tree(pid: Option<u32>) {
+    // Unix 无进程树语义，由调用方对直接子进程 kill + kill_on_drop 兜底
+    let _ = pid;
+}
+
 async fn run_shell_command(
     program: &'static str,
     args: Vec<String>,
@@ -622,37 +689,97 @@ async fn run_shell_command(
     if let Some(dir) = &workdir {
         cmd.current_dir(dir);
     }
-    let child = cmd
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| ToolExecuteError {
             message: e.to_string(),
         })?;
-    let output_fut = child.wait_with_output();
-    let output = if let Some(secs) = timeout_secs {
-        match tokio::time::timeout(Duration::from_secs(secs), output_fut).await {
-            Ok(result) => result.map_err(|e| ToolExecuteError {
-                message: e.to_string(),
-            })?,
-            Err(_) => {
-                return Ok(format!(
-                    "[Command timed out ({}s), process terminated]",
-                    secs
-                ));
+    let pid = child.id();
+    let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    let (stderr_tx, mut stderr_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    if let Some(pipe) = child.stdout.take() {
+        spawn_pipe_reader(pipe, stdout_tx);
+    }
+    if let Some(pipe) = child.stderr.take() {
+        spawn_pipe_reader(pipe, stderr_tx);
+    }
+
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf: Vec<u8> = Vec::new();
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut status: Option<std::process::ExitStatus> = None;
+    let mut timed_out = false;
+
+    let timeout_at = timeout_secs.map(|s| tokio::time::Instant::now() + Duration::from_secs(s));
+    let timeout_sleep = async {
+        match timeout_at {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(timeout_sleep);
+
+    // 主循环：等待进程退出（cancel-safe）与读取管道并发推进；
+    // 不再要求「管道 EOF」作为完成条件，避免孙进程持写端导致永久挂起。
+    loop {
+        tokio::select! {
+            res = child.wait() => {
+                status = Some(res.map_err(|e| ToolExecuteError {
+                    message: e.to_string(),
+                })?);
+                break;
+            }
+            chunk = stdout_rx.recv(), if stdout_open => match chunk {
+                Some(c) => stdout_buf.extend_from_slice(&c),
+                None => stdout_open = false,
+            },
+            chunk = stderr_rx.recv(), if stderr_open => match chunk {
+                Some(c) => stderr_buf.extend_from_slice(&c),
+                None => stderr_open = false,
+            },
+            _ = &mut timeout_sleep, if timeout_at.is_some() => {
+                timed_out = true;
+                break;
             }
         }
-    } else {
-        output_fut.await.map_err(|e| ToolExecuteError {
-            message: e.to_string(),
-        })?
-    };
-    const MAX_OUTPUT_CHARS: usize = 10000;
+    }
 
-    let raw = if output.status.success() {
-        decode_output(&output.stdout)
+    if timed_out {
+        // 先杀整棵树（写端全部关闭 → 管道 EOF → 在途数据可排空）
+        kill_process_tree(pid).await;
+        #[cfg(not(windows))]
+        {
+            let _ = child.start_kill();
+        }
+        let _ = tokio::time::timeout(KILL_DRAIN_WINDOW * 2, child.wait()).await;
+        drain_channel_with_window(&mut stdout_rx, &mut stdout_buf, KILL_DRAIN_WINDOW).await;
+        drain_channel_with_window(&mut stderr_rx, &mut stderr_buf, KILL_DRAIN_WINDOW).await;
     } else {
-        combine_output(&output.stdout, &output.stderr)
+        // 进程已退出：限时排空内核缓冲区中的尾部数据（空闲超时，两侧并发）。
+        // 无孙进程时 EOF 即刻到达、零额外延迟；有孙进程持写端时空闲一个窗口后放弃。
+        tokio::join!(
+            drain_channel_with_window(&mut stdout_rx, &mut stdout_buf, PIPE_DRAIN_WINDOW),
+            drain_channel_with_window(&mut stderr_rx, &mut stderr_buf, PIPE_DRAIN_WINDOW),
+        );
+    }
+
+    const MAX_OUTPUT_CHARS: usize = 10000;
+    let raw = if let Some(secs) = timeout_secs.filter(|_| timed_out) {
+        let marker = format!("[Command timed out ({secs}s), process tree terminated]");
+        let body = combine_output(&stdout_buf, &stderr_buf);
+        if body.trim().is_empty() {
+            marker
+        } else {
+            format!("{marker}\n\n{body}")
+        }
+    } else {
+        match &status {
+            Some(st) if st.success() => decode_output(&stdout_buf),
+            _ => combine_output(&stdout_buf, &stderr_buf),
+        }
     };
 
     let char_count = raw.chars().count();
@@ -1907,5 +2034,281 @@ mod tests {
         // PATH 探测不 panic，且返回两个候选之一
         let shell = windows_shell_program();
         assert!(shell == "pwsh.exe" || shell == "powershell.exe");
+    }
+
+    #[cfg(windows)]
+    fn slow_output_command() -> (&'static str, Vec<String>) {
+        (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Write-Output 'partial-hello'; Start-Sleep -Seconds 30".to_string(),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn slow_output_command() -> (&'static str, Vec<String>) {
+        (
+            "bash",
+            vec!["-c".to_string(), "echo partial-hello; sleep 30".to_string()],
+        )
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_returns_partial_output() {
+        // 超时后已产生的输出必须随超时标记一并返回（不再被 wait_with_output 的
+        // 全有或全无语义丢弃），避免模型误判失败后反复重试
+        let (program, args) = slow_output_command();
+        let out = run_shell_command(program, args, None, Some(2))
+            .await
+            .expect("timeout path returns Ok");
+        assert!(out.contains("timed out"), "missing marker: {out}");
+        assert!(
+            out.contains("partial-hello"),
+            "missing partial output: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_normal_exit_returns_stdout() {
+        // 正常完成路径行为不变：无超时标记、输出完整
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Write-Output 'quick-hello'".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "bash",
+            vec!["-c".to_string(), "echo quick-hello".to_string()],
+        );
+        let out = run_shell_command(program, args, None, Some(30))
+            .await
+            .expect("normal exit");
+        assert!(out.contains("quick-hello"), "missing output: {out}");
+        assert!(!out.contains("timed out"), "unexpected marker: {out}");
+    }
+
+    #[tokio::test]
+    async fn bash_grandchild_holding_pipe_returns_on_exit() {
+        // 回归：孙进程继承并持有管道写端（playwright-cli daemon 等常驻进程的场景）。
+        // 旧实现 wait_with_output 死等 EOF → 挂满超时；新实现以进程退出为准 + 限时排空。
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                // cmd 立即退出，ping 继承管道写端并存活 30s
+                "Write-Output 'grand-child-test'; cmd /c \"start /b ping -n 30 127.0.0.1\""
+                    .to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "bash",
+            vec![
+                "-c".to_string(),
+                // shell 立即退出，后台 sleep 持有管道写端
+                "echo grand-child-test; sleep 30 &".to_string(),
+            ],
+        );
+        let started = std::time::Instant::now();
+        let out = run_shell_command(program, args, None, Some(30))
+            .await
+            .expect("returns after process exit");
+        let elapsed = started.elapsed();
+        assert!(out.contains("grand-child-test"), "missing output: {out}");
+        assert!(!out.contains("timed out"), "unexpected marker: {out}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "should return on exit, not wait for EOF: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_channel_stops_at_hard_cap_despite_chatty_writer() {
+        // 回归：持续低速写入会无限重置空闲窗口（chatty daemon 场景），
+        // 必须被硬性总上限截停，否则排空永不结束、命令永不返回。
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let writer = tokio::spawn(async move {
+            // 每 100ms 写一块（< 500ms 空闲窗口），持续 20s 远超 3s 硬性上限
+            for _ in 0..200 {
+                if tx.send(vec![b'x'; 16]).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let mut buf = Vec::new();
+        let started = std::time::Instant::now();
+        drain_channel_with_window(&mut rx, &mut buf, Duration::from_millis(500)).await;
+        let elapsed = started.elapsed();
+        writer.abort();
+        assert!(
+            elapsed < DRAIN_HARD_CAP + Duration::from_millis(1500),
+            "drain exceeded hard cap: {elapsed:?}"
+        );
+        assert!(!buf.is_empty(), "should have drained some chunks");
+    }
+
+    #[tokio::test]
+    async fn bash_nonzero_exit_combines_stdout_and_stderr() {
+        // 失败命令：退出码非 0 → 合并 stdout 与 stderr（combine_output 路径）
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Write-Output 'out-part'; [Console]::Error.Write('err-part'); exit 3".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "bash",
+            vec![
+                "-c".to_string(),
+                "echo out-part; echo err-part >&2; exit 3".to_string(),
+            ],
+        );
+        let out = run_shell_command(program, args, None, Some(30))
+            .await
+            .expect("nonzero exit still returns Ok");
+        assert!(out.contains("out-part"), "missing stdout: {out}");
+        assert!(out.contains("err-part"), "missing stderr: {out}");
+    }
+
+    #[tokio::test]
+    async fn bash_large_output_truncated() {
+        // 超过 10000 字符 → 截断标记 + 保留前 10000 字符
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Write-Output ('x'*12000)".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "bash",
+            vec![
+                "-c".to_string(),
+                "head -c 12000 /dev/zero | tr '\\0' 'x'".to_string(),
+            ],
+        );
+        let out = run_shell_command(program, args, None, Some(60))
+            .await
+            .expect("large output command");
+        assert!(out.contains("Output truncated"), "missing marker: {out}");
+        assert!(
+            out.contains("showing 10000 of"),
+            "missing counts: {}",
+            out.chars().rev().take(200).collect::<String>()
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_workdir_is_respected() {
+        // workdir 参数：命令在指定目录执行
+        let dir = std::env::temp_dir().join("hailux_bash_wd_test");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Get-Location".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = ("bash", vec!["-c".to_string(), "pwd".to_string()]);
+        let out = run_shell_command(program, args, Some(dir.display().to_string()), Some(30))
+            .await
+            .expect("workdir command");
+        assert!(
+            out.contains("hailux_bash_wd_test"),
+            "expected workdir in output: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_with_no_output_returns_marker_only() {
+        // 超时且无任何输出 → 仅返回超时标记，不携带空 body
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 30".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = ("bash", vec!["-c".to_string(), "sleep 30".to_string()]);
+        let out = run_shell_command(program, args, None, Some(2))
+            .await
+            .expect("timeout path returns Ok");
+        assert_eq!(
+            out.trim(),
+            "[Command timed out (2s), process tree terminated]",
+            "unexpected body: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_rejects_invalid_json() {
+        let err = BashTool.execute_async("not json").await.unwrap_err();
+        assert!(
+            err.message.contains("Invalid JSON parameter"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_rejects_missing_command() {
+        let err = BashTool.execute_async("{}").await.unwrap_err();
+        assert!(
+            err.message.contains("Missing 'command_string'"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_end_to_end_json_roundtrip() {
+        // BashTool::execute_async 端到端：JSON 参数解析（含 timeout 字段）→ 执行 → 返回
+        #[cfg(windows)]
+        let arguments = r#"{"command_string":"Write-Output 'tool-e2e'","timeout":30}"#.to_string();
+        #[cfg(not(windows))]
+        let arguments = r#"{"command_string":"echo tool-e2e","timeout":30}"#.to_string();
+        let out = BashTool.execute_async(&arguments).await.expect("e2e run");
+        assert!(out.contains("tool-e2e"), "missing output: {out}");
+        assert!(!out.contains("timed out"), "unexpected marker: {out}");
     }
 }
