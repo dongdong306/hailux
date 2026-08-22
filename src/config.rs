@@ -7,6 +7,11 @@ use std::path::PathBuf;
 const CONFIG_DIR_NAME: &str = ".hailux";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
+/// 模型输出上限（max_completion_tokens）
+pub const DEFAULT_OUTPUT_TOKENS: u32 = 65536;
+/// 模型上下文窗口大小
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 131072;
+
 // ── 预定义 Provider ──────────────────────────────────────────
 
 pub(crate) struct ProviderDef {
@@ -156,7 +161,7 @@ fn default_max_tokens() -> u32 {
 }
 
 fn default_context_window() -> u32 {
-    131072 // 默认 128K 上下文窗口
+    DEFAULT_CONTEXT_WINDOW
 }
 
 // ── 可选模型条目（供 UI 使用）─────────────────────────────────
@@ -169,7 +174,35 @@ pub struct ModelEntry {
     pub model_name: String,
     pub display: String,
     pub needs_setup: bool,
+    /// 可删除（用户自定义添加的模型；预定义 provider 的预定义模型不可删，会被自动合并回来）
+    pub deletable: bool,
 }
+
+/// 删除自定义模型/provider 的失败原因（Web 层据此映射 HTTP 状态码）
+#[derive(Debug)]
+pub enum RemoveError {
+    /// selector 格式错误，应为 provider/model
+    InvalidSelector(String),
+    /// 预定义模型/provider 不可删除
+    Predefined(String),
+    /// 未找到 provider 或模型
+    NotFound(String),
+    /// 删除后没有任何可用模型，拒绝删除
+    NoModelsLeft(String),
+}
+
+impl std::fmt::Display for RemoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoveError::InvalidSelector(msg)
+            | RemoveError::Predefined(msg)
+            | RemoveError::NotFound(msg)
+            | RemoveError::NoModelsLeft(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for RemoveError {}
 
 // ── 核心方法 ─────────────────────────────────────────────────
 
@@ -206,6 +239,10 @@ impl Config {
             // 自定义模型优先
             if let Some(ref custom_models) = entry.models {
                 for mid in custom_models.keys() {
+                    // 与预定义模型同 id 的条目来自 setup 同步，删除后会被预定义合并分支复活 → 不可删
+                    let deletable = find_provider_def(pid)
+                        .and_then(|d| d.models.iter().find(|m| m.id == *mid))
+                        .is_none();
                     result.push(ModelEntry {
                         provider_id: pid.clone(),
                         provider_name: provider_name.clone(),
@@ -213,6 +250,7 @@ impl Config {
                         model_name: mid.clone(),
                         display: format!("{}/{}", pid, mid),
                         needs_setup: false,
+                        deletable,
                     });
                 }
             }
@@ -232,6 +270,7 @@ impl Config {
                             model_name: m.name.to_string(),
                             display: format!("{}/{}", pid, m.id),
                             needs_setup: false,
+                            deletable: false,
                         });
                     }
                 }
@@ -249,6 +288,7 @@ impl Config {
                         model_name: m.name.to_string(),
                         display: format!("{}/{}", def.id, m.id),
                         needs_setup: true,
+                        deletable: false,
                     });
                 }
             }
@@ -376,6 +416,132 @@ impl Config {
         );
 
         format!("{}/{}", provider_id, model_id)
+    }
+
+    /// 删除用户自定义模型（selector = "provider/model"）。
+    ///
+    /// - 预定义 provider 的预定义模型不可删：即使被 setup 同步写入 models 表，
+    ///   删除后也会被 available_models 的预定义合并分支复活
+    /// - models 表删空时清理 provider：自定义 provider 整条移除，预定义 provider 重置为 None（回归合并预定义模式）
+    /// - 若删除的是当前 main_model：迁移到第一个可用模型；无任何可用模型则拒绝（Err）
+    ///
+    /// 返回 Ok(Some(新 main_model)) 表示已迁移；Ok(None) 表示 main_model 未受影响。
+    pub fn remove_custom_model(&mut self, selector: &str) -> Result<Option<String>, RemoveError> {
+        // 在克隆上操作，失败（含拒绝删除场景）时保持 self 不被污染
+        let mut next = self.clone();
+        let migrated = next.remove_custom_model_inner(selector)?;
+        *self = next;
+        Ok(migrated)
+    }
+
+    fn remove_custom_model_inner(&mut self, selector: &str) -> Result<Option<String>, RemoveError> {
+        let (provider_id, model_id) = selector.split_once('/').ok_or_else(|| {
+            RemoveError::InvalidSelector(format!("模型格式错误，应为 provider/model: {}", selector))
+        })?;
+
+        let is_predefined_model = find_provider_def(provider_id)
+            .is_some_and(|d| d.models.iter().any(|m| m.id == model_id));
+        if is_predefined_model {
+            return Err(RemoveError::Predefined(format!(
+                "预定义模型 {}/{} 不可删除",
+                provider_id, model_id
+            )));
+        }
+
+        let entry = self
+            .providers
+            .get_mut(provider_id)
+            .ok_or_else(|| RemoveError::NotFound(format!("未找到 provider: {}", provider_id)))?;
+        let in_models = entry
+            .models
+            .as_ref()
+            .is_some_and(|models| models.contains_key(model_id));
+        if !in_models {
+            return Err(RemoveError::NotFound(format!("未找到模型: {}", selector)));
+        }
+        if let Some(models) = entry.models.as_mut() {
+            models.remove(model_id);
+        }
+
+        // models 删空后的 provider 清理
+        let entry_empty = entry
+            .models
+            .as_ref()
+            .is_some_and(|models| models.is_empty());
+        if entry_empty {
+            if find_provider_def(provider_id).is_some() {
+                // 预定义 provider：models 重置为 None，回归合并预定义模式
+                entry.models = None;
+            } else {
+                // 自定义 provider：整条移除（else 分支不再使用 entry，NLL 借用已结束）
+                self.providers.remove(provider_id);
+            }
+        }
+
+        // main_model 迁移（仅考虑已配置的模型，未配置的预定义条目无法 resolve）
+        if self.main_model == selector {
+            match self.available_models().into_iter().find(|m| !m.needs_setup) {
+                Some(next_model) => {
+                    let display = next_model.display.clone();
+                    self.main_model = display.clone();
+                    Ok(Some(display))
+                }
+                None => Err(RemoveError::NoModelsLeft(format!(
+                    "删除 {} 后没有任何可用模型，请先配置其他模型",
+                    selector
+                ))),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 删除自定义 provider（整条含凭据与全部模型）。预定义 provider 不可删。
+    ///
+    /// main_model 迁移语义同 `remove_custom_model`。
+    pub fn remove_provider(&mut self, provider_id: &str) -> Result<Option<String>, RemoveError> {
+        // 在克隆上操作，失败时保持 self 不被污染
+        let mut next = self.clone();
+        let migrated = next.remove_provider_inner(provider_id)?;
+        *self = next;
+        Ok(migrated)
+    }
+
+    fn remove_provider_inner(&mut self, provider_id: &str) -> Result<Option<String>, RemoveError> {
+        if !self.providers.contains_key(provider_id) {
+            return Err(RemoveError::NotFound(format!(
+                "未找到 provider: {}",
+                provider_id
+            )));
+        }
+        if find_provider_def(provider_id).is_some() {
+            return Err(RemoveError::Predefined(format!(
+                "预定义 provider {} 不可删除",
+                provider_id
+            )));
+        }
+        self.providers.remove(provider_id);
+
+        // main_model 指向该 provider 下的模型 → 迁移（仅考虑已配置的模型）
+        if self
+            .main_model
+            .split_once('/')
+            .is_some_and(|(pid, _)| pid == provider_id)
+        {
+            match self.available_models().into_iter().find(|m| !m.needs_setup) {
+                Some(next_model) => {
+                    let display = next_model.display.clone();
+                    self.main_model = display.clone();
+                    Ok(Some(display))
+                }
+                None => Err(RemoveError::NoModelsLeft(format!(
+                    "删除 provider {} 后没有任何可用模型，请先配置其他模型",
+                    provider_id
+                ))),
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     /// 确保 provider 的 model 列表已写入配置（从预定义同步过来）
@@ -591,4 +757,208 @@ pub fn save_config(config: &Config) -> Result<()> {
         .wrap_err_with(|| format!("无法重命名配置文件: {}", path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造测试配置：deepseek（预定义，含一个自定义模型）+ ollama（自定义 provider，两个模型）
+    fn test_config() -> Config {
+        let mut cfg = Config::default();
+        cfg.add_predefined_provider("deepseek", "sk-test");
+        // deepseek 下挂一个自定义模型
+        cfg.add_custom_model("deepseek", None, None, "custom-model", 65536, 131072);
+        // 自定义 provider
+        cfg.add_custom_model(
+            "ollama",
+            Some("http://localhost:11434/v1"),
+            Some("sk-ollama"),
+            "qwen3",
+            65536,
+            131072,
+        );
+        cfg.add_custom_model("ollama", None, None, "llama3", 65536, 131072);
+        cfg
+    }
+
+    #[test]
+    fn remove_custom_model_deletes_entry() {
+        let mut cfg = test_config();
+        // main_model 指向别的模型 → 不迁移
+        cfg.main_model = "ollama/qwen3".to_string();
+        assert_eq!(cfg.remove_custom_model("ollama/llama3").unwrap(), None);
+        let displays: Vec<String> = cfg
+            .available_models()
+            .into_iter()
+            .map(|m| m.display)
+            .collect();
+        assert!(!displays.contains(&"ollama/llama3".to_string()));
+        assert!(displays.contains(&"ollama/qwen3".to_string()));
+    }
+
+    #[test]
+    fn remove_custom_model_migrates_main_model() {
+        let mut cfg = test_config();
+        cfg.main_model = "ollama/qwen3".to_string();
+        let migrated = cfg.remove_custom_model("ollama/qwen3").unwrap();
+        // deepseek 的自定义模型排序在前（BTreeMap 字母序，自定义模型优先列出）
+        assert_eq!(migrated.as_deref(), Some("deepseek/custom-model"));
+        assert_eq!(cfg.main_model, "deepseek/custom-model");
+        assert!(cfg.resolve_default().is_ok());
+    }
+
+    #[test]
+    fn remove_rejects_predefined_model() {
+        let mut cfg = test_config();
+        cfg.main_model = "ollama/qwen3".to_string();
+        // 未写入 models 表的预定义模型（合并分支）
+        assert!(
+            cfg.remove_custom_model("deepseek/deepseek-v4-flash")
+                .is_err()
+        );
+        // setup 同步写入 models 表的预定义模型同样不可删
+        cfg.ensure_provider_models("deepseek");
+        assert!(
+            cfg.remove_custom_model("deepseek/deepseek-v4-flash")
+                .is_err()
+        );
+        let displays: Vec<String> = cfg
+            .available_models()
+            .into_iter()
+            .map(|m| m.display)
+            .collect();
+        assert!(displays.contains(&"deepseek/deepseek-v4-flash".to_string()));
+    }
+
+    #[test]
+    fn remove_rejects_unknown_model() {
+        let mut cfg = test_config();
+        cfg.main_model = "ollama/qwen3".to_string();
+        assert!(cfg.remove_custom_model("ollama/nonexistent").is_err());
+        assert!(cfg.remove_custom_model("nobody/model").is_err());
+        assert!(cfg.remove_custom_model("bad-format").is_err());
+    }
+
+    #[test]
+    fn remove_last_model_of_custom_provider_removes_provider() {
+        let mut cfg = test_config();
+        cfg.main_model = "deepseek/custom-model".to_string();
+        assert!(cfg.remove_custom_model("ollama/qwen3").is_ok());
+        assert!(cfg.remove_custom_model("ollama/llama3").is_ok());
+        // provider 整条移除
+        assert!(!cfg.providers.contains_key("ollama"));
+    }
+
+    #[test]
+    fn remove_last_custom_model_of_predefined_provider_keeps_provider() {
+        // 手工构造：预定义 provider 的 models 表仅含一个自定义模型（hand-edited 配置场景）
+        let mut cfg = Config::default();
+        let mut models = BTreeMap::new();
+        models.insert(
+            "custom-model".to_string(),
+            CustomModelEntry {
+                max_tokens: 65536,
+                context_window: 131072,
+            },
+        );
+        cfg.providers.insert(
+            "deepseek".to_string(),
+            ProviderEntry {
+                api_key: "sk".to_string(),
+                base_url: None,
+                models: Some(models),
+            },
+        );
+        cfg.main_model = "deepseek/custom-model".to_string();
+        let migrated = cfg.remove_custom_model("deepseek/custom-model").unwrap();
+        // provider 保留，models 重置为 None（回归合并预定义）；main_model 迁移到预定义模型
+        assert_eq!(migrated.as_deref(), Some("deepseek/deepseek-v4-flash"));
+        let entry = cfg.providers.get("deepseek").unwrap();
+        assert!(entry.models.is_none());
+        // 预定义模型仍列出可用
+        let displays: Vec<String> = cfg
+            .available_models()
+            .into_iter()
+            .map(|m| m.display)
+            .collect();
+        assert!(displays.contains(&"deepseek/deepseek-v4-flash".to_string()));
+    }
+
+    #[test]
+    fn remove_last_available_model_rejected() {
+        // 仅剩一个自定义模型时删除 → 拒绝
+        let mut cfg = Config::default();
+        cfg.add_custom_model(
+            "ollama",
+            Some("http://localhost:11434/v1"),
+            Some("sk"),
+            "only-model",
+            65536,
+            131072,
+        );
+        cfg.main_model = "ollama/only-model".to_string();
+        assert!(cfg.remove_custom_model("ollama/only-model").is_err());
+        // 配置未被污染：模型仍在
+        let displays: Vec<String> = cfg
+            .available_models()
+            .into_iter()
+            .map(|m| m.display)
+            .collect();
+        assert!(displays.contains(&"ollama/only-model".to_string()));
+        assert!(cfg.resolve_default().is_ok());
+    }
+
+    #[test]
+    fn remove_provider_removes_all_models() {
+        let mut cfg = test_config();
+        cfg.main_model = "ollama/qwen3".to_string();
+        // 迁移到 deepseek 的第一个可用模型（自定义模型排序在前）
+        let migrated = cfg.remove_provider("ollama").unwrap();
+        assert_eq!(migrated.as_deref(), Some("deepseek/custom-model"));
+        assert!(!cfg.providers.contains_key("ollama"));
+        let displays: Vec<String> = cfg
+            .available_models()
+            .into_iter()
+            .map(|m| m.display)
+            .collect();
+        assert!(!displays.iter().any(|d| d.starts_with("ollama/")));
+        assert!(cfg.resolve_default().is_ok());
+    }
+
+    #[test]
+    fn remove_provider_rejects_predefined_and_unknown() {
+        let mut cfg = test_config();
+        cfg.main_model = "ollama/qwen3".to_string();
+        assert!(cfg.remove_provider("deepseek").is_err());
+        assert!(cfg.remove_provider("nobody").is_err());
+        assert!(cfg.providers.contains_key("deepseek"));
+    }
+
+    #[test]
+    fn available_models_marks_deletable() {
+        let cfg = test_config();
+        let entries = cfg.available_models();
+        // 自定义模型可删
+        assert!(
+            entries
+                .iter()
+                .any(|m| m.display == "ollama/qwen3" && m.deletable)
+        );
+        // setup 同步进 models 表的预定义模型不可删（deletable=false，来自第一分支）
+        let ds = entries
+            .iter()
+            .find(|m| m.display == "deepseek/deepseek-v4-flash")
+            .unwrap();
+        assert!(!ds.deletable);
+        // 深度验证：ensure 后仍在表中但 deletable=false
+        let mut cfg2 = test_config();
+        cfg2.ensure_provider_models("deepseek");
+        let ds2 = cfg2
+            .available_models()
+            .into_iter()
+            .find(|m| m.display == "deepseek/deepseek-v4-flash")
+            .unwrap();
+        assert!(!ds2.deletable);
+    }
 }

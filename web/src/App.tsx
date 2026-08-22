@@ -12,6 +12,7 @@ import {
   PermissionDialog,
   WorkdirPicker,
 } from "./components/dialogs";
+import { AddModelDialog, SettingsView } from "./components/settings-view";
 import { SkillsManager } from "./components/skills-manager";
 import { McpManager } from "./components/mcp-manager";
 import { cn } from "./lib/utils";
@@ -99,11 +100,13 @@ export default function App() {
             </span>
           </div>
 
-          {/* 主区域：聊天 / 技能管理 / MCP 管理（内联切换） */}
+          {/* 主区域：聊天 / 技能管理 / MCP 管理 / 设置（内联切换） */}
           {activeView === "skills" ? (
             <SkillsManager />
           ) : activeView === "mcp" ? (
             <McpManager />
+          ) : activeView === "settings" ? (
+            <SettingsView />
           ) : (
             <>
               <Thread />
@@ -115,6 +118,7 @@ export default function App() {
         <PermissionDialog />
         <AskUserDialog key={askRequestId} />
         <ModelPicker />
+        <AddModelDialog />
         <WorkdirPicker />
       </div>
     </HailuxRuntimeProvider>

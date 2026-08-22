@@ -139,6 +139,38 @@ pub struct SwitchModelRequest {
     pub selector: String,
 }
 
+/// 添加自定义模型（POST /api/models/custom）。对齐 TUI AddModelForm：
+/// 已配置 provider 复用凭据（base_url/api_key 可省），新建 provider 两者必填。
+#[derive(Debug, Deserialize)]
+pub struct CreateModelRequest {
+    /// 目标 provider id；已存在时复用其凭据，不存在时新建（需 base_url + api_key）
+    pub provider_id: String,
+    /// 仅新建 provider 时需要；预定义 provider 可省（用预定义 base_url）
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// 仅新建 provider 时需要
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// 模型 ID（如 qwen3-235b-a22b）
+    pub model_id: String,
+    /// 上下文窗口大小，缺省 131072 (128K)
+    #[serde(default)]
+    pub context_window: Option<u32>,
+}
+
+/// 删除自定义模型（DELETE /api/models/custom）
+#[derive(Debug, Deserialize)]
+pub struct DeleteModelRequest {
+    /// 模型选择器，格式 provider/model
+    pub selector: String,
+}
+
+/// 删除自定义 provider（DELETE /api/providers，整条含凭据与全部模型）
+#[derive(Debug, Deserialize)]
+pub struct DeleteProviderRequest {
+    pub provider_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSkillRequest {
     pub work_dir: Option<String>,
@@ -206,6 +238,24 @@ pub struct ModelInfo {
     /// 上下文窗口大小（解析失败如未配置 provider 时缺省）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// 可删除（用户自定义添加；预定义模型不可删，会被自动合并回来）
+    pub deletable: bool,
+    /// provider 是否为预定义（预定义 provider 不可整条删除）
+    pub provider_predefined: bool,
+    /// provider 未配置 API Key（需 setup 后才可使用）
+    pub needs_setup: bool,
+}
+
+/// 已配置 provider 条目（GET /api/providers；添加模型时选择目标 provider 用）
+#[derive(Debug, Serialize)]
+pub struct ProviderInfoDto {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    /// 预定义 provider（base_url 来自预定义表，新建模型时无需填写）
+    pub predefined: bool,
+    /// 未配置 API Key（选择后仅需填写 api_key 即可启用）
+    pub needs_setup: bool,
 }
 
 /// 斜杠命令条目（GET /api/commands）

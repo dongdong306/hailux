@@ -6,6 +6,7 @@ import {
   MessageSquare,
   Plug,
   Plus,
+  Settings,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -221,6 +222,26 @@ export function Sidebar() {
             )}
           />
           MCP 服务器
+        </button>
+        <button
+          type="button"
+          onClick={() => setView(activeView === "settings" ? "chat" : "settings")}
+          className={cn(
+            "flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors",
+            activeView === "settings"
+              ? "bg-primary/[0.08] font-medium text-foreground"
+              : "text-foreground/70 hover:bg-muted/60 hover:text-foreground",
+          )}
+        >
+          <Settings
+            className={cn(
+              "size-3.5 shrink-0",
+              activeView === "settings"
+                ? "text-primary"
+                : "text-muted-foreground/70",
+            )}
+          />
+          设置
         </button>
       </div>
     </div>
