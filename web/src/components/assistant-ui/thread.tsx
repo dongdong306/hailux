@@ -1,5 +1,5 @@
 // 聊天消息流：assistant-ui 官方 base 样式（GroupedParts + 两层分组 + Reasoning/ToolFallback/ToolGroup）
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionBarPrimitive,
   MessagePrimitive,
@@ -13,6 +13,7 @@ import { MarkdownText } from "./markdown-text";
 import { ReasoningGroup } from "./reasoning";
 import { ToolFallback, ToolGroup } from "./tool-fallback";
 import { toThreadMessages, type SystemRow } from "../../runtime/hailux-runtime";
+import { ThreadNav, USER_MSG_ATTR } from "./thread-nav";
 
 /** 自定义分组：reasoning 连续段 → 思考组；连续普通工具调用 → 工具合并卡；
  *  todo_write（todo 卡片）与 ask_user（问答卡）不分组。
@@ -298,14 +299,21 @@ export function Thread() {
     return null;
   }, [items]);
 
+  // 右缘轮次导航：滚动容器与内容容器引用（测量提问位置 / 监听高度变化）
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
   return (
-    <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <ThreadPrimitive.Viewport className="flex flex-1 flex-col overflow-y-auto scroll-smooth px-4 py-6">
+    <ThreadPrimitive.Root className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <ThreadPrimitive.Viewport
+        ref={viewportRef}
+        className="flex flex-1 flex-col overflow-y-auto scroll-smooth px-4 py-6"
+      >
         <ThreadPrimitive.Empty>
           <Welcome />
         </ThreadPrimitive.Empty>
 
-        <div className="mx-auto w-full max-w-3xl">
+        <div ref={contentRef} className="mx-auto w-full max-w-3xl">
           <div className="space-y-5">
             <ThreadPrimitive.Messages>
               {({ message }) => {
@@ -316,7 +324,11 @@ export function Thread() {
                   return <SystemRowView key={message.id} row={custom.row} />;
                 }
                 if (message.role === "user") {
-                  return <UserMessage key={message.id} />;
+                  return (
+                    <div key={message.id} {...{ [USER_MSG_ATTR]: "" }}>
+                      <UserMessage />
+                    </div>
+                  );
                 }
                 return (
                   <AssistantMessage
@@ -338,6 +350,8 @@ export function Thread() {
           </ThreadPrimitive.ScrollToBottom>
         </div>
       </ThreadPrimitive.Viewport>
+
+      <ThreadNav viewportRef={viewportRef} contentRef={contentRef} />
     </ThreadPrimitive.Root>
   );
 }
