@@ -94,6 +94,33 @@ export interface ModelInfo {
   display: string;
   active: boolean;
   context_window?: number;
+  /** 可删除（用户自定义添加；预定义模型不可删） */
+  deletable: boolean;
+  /** provider 是否为预定义（预定义 provider 不可整条删除） */
+  provider_predefined: boolean;
+  /** provider 未配置 API Key（需 setup 后才可使用） */
+  needs_setup: boolean;
+}
+
+/** 已配置 provider 条目（GET /api/providers） */
+export interface ProviderOption {
+  id: string;
+  name: string;
+  base_url: string;
+  /** 预定义 provider（新建模型时无需填 base_url） */
+  predefined: boolean;
+  /** 未配置 API Key（选择后仅需填写 api_key 即可启用） */
+  needs_setup: boolean;
+}
+
+/** 添加自定义模型入参（POST /api/models/custom）；对齐 TUI AddModelForm */
+export interface CreateModelInput {
+  provider_id: string;
+  base_url?: string;
+  api_key?: string;
+  model_id: string;
+  /** 缺省 131072 (128K) */
+  context_window?: number;
 }
 
 /** 斜杠命令条目（GET /api/commands） */

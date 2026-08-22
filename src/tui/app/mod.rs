@@ -40,8 +40,6 @@ use super::chat_widget::RenderCache;
 pub(super) const BATCH_RENDER_BUDGET: Duration = Duration::from_millis(50);
 /// 单次批量消费的事件上限，防止极端积压下长时间占用
 pub(super) const BATCH_MAX_EVENTS: usize = 128;
-pub(super) const DEFAULT_CONTEXT_WINDOW: u32 = 131072;
-pub(super) const DEFAULT_OUTPUT_TOKENS: u32 = 65536;
 
 /// 文件选择器状态
 #[derive(Default)]

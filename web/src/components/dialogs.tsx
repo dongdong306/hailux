@@ -1,5 +1,6 @@
 // 弹窗：权限确认 / 提问 / 模型选择 / 工作目录选择
-// （技能与 MCP 管理为内联视图，见 skills-manager.tsx / mcp-manager.tsx）
+// （技能与 MCP 管理为内联视图，见 skills-manager.tsx / mcp-manager.tsx；
+//   模型提供商管理见 settings-view.tsx）
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowUp,

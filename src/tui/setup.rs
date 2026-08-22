@@ -3,12 +3,11 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::{self, Config, CustomModelEntry, ProviderEntry};
+use crate::config::{
+    self, Config, CustomModelEntry, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS, ProviderEntry,
+};
 use crate::tui::model_picker::wrap_input;
 use std::collections::BTreeMap;
-
-const DEFAULT_CONTEXT_WINDOW: u32 = 131072;
-const DEFAULT_OUTPUT_TOKENS: u32 = 65536;
 
 /// 首次运行引导的多步骤表单
 #[derive(Debug, Clone)]

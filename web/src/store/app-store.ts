@@ -3,7 +3,9 @@ import { create } from "zustand";
 import type {
   ChatRequest,
   CommandInfo,
+  CreateModelInput,
   ModelInfo,
+  ProviderOption,
   QuestionInfo,
   ServerEvent,
   SessionInfo,
@@ -61,8 +63,8 @@ export interface SkillEntry {
   files: SkillFileEntry[];
 }
 
-/** 主区域视图：聊天 / 技能管理 / MCP 管理 */
-export type ActiveView = "chat" | "skills" | "mcp";
+/** 主区域视图：聊天 / 技能管理 / MCP 管理 / 设置 */
+export type ActiveView = "chat" | "skills" | "mcp" | "settings";
 
 /** JSON Schema 片段（工具参数 schema / 子属性） */
 export interface JsonSchemaNode {
@@ -146,6 +148,11 @@ interface AppState {
   askUser: { requestId: string; questions: QuestionInfo[] } | null;
   // 选择器
   models: ModelInfo[];
+  /** provider 列表（含未配置的预定义 provider；添加模型表单用） */
+  providers: ProviderOption[];
+  /** 添加模型弹窗；打开时可带预设（provider 卡片 / 需配置模型入口） */
+  showAddModel: boolean;
+  addModelPreset: { provider: string; modelId?: string } | null;
   /** 斜杠命令列表（随 workDir 变化刷新） */
   commands: CommandInfo[];
   showWorkdirPicker: boolean;
@@ -168,6 +175,13 @@ interface AppState {
   initWorkDir: () => Promise<void>;
   loadSessions: () => Promise<void>;
   loadModels: () => Promise<void>;
+  loadProviders: () => Promise<void>;
+  /** 添加自定义模型并自动切换到新模型 */
+  addModel: (input: CreateModelInput) => Promise<void>;
+  /** 删除自定义模型（删除当前模型时后端自动迁移） */
+  deleteModel: (selector: string) => Promise<void>;
+  /** 删除自定义 provider（整条含凭据与全部模型） */
+  deleteProvider: (providerId: string) => Promise<void>;
   loadWorkdirs: () => Promise<void>;
   loadCommands: () => Promise<void>;
   /** 切换主区域视图；skills/mcp 进入时刷新列表 */
@@ -202,6 +216,8 @@ interface AppState {
   setPlanMode: (on: boolean) => Promise<void>;
   setYolo: (on: boolean) => Promise<void>;
   switchModel: (selector: string) => Promise<void>;
+  /** show=true 打开添加模型弹窗；preset 为预填项（provider / 模型 id） */
+  setAddModel: (show: boolean, preset?: { provider: string; modelId?: string } | null) => void;
   /** 切换项目目录：中断运行中的请求，重置会话上下文并拉取该项目会话列表 */
   setWorkDir: (dir: string) => Promise<void>;
   setWorkdirPicker: (show: boolean) => void;
@@ -225,6 +241,9 @@ export const useApp = create<AppState>((set, get) => ({
   permission: null,
   askUser: null,
   models: [],
+  providers: [],
+  showAddModel: false,
+  addModelPreset: null,
   commands: [],
   workdirs: [],
   showWorkdirPicker: false,
@@ -271,6 +290,41 @@ export const useApp = create<AppState>((set, get) => ({
     });
   },
 
+  async loadProviders() {
+    const providers = await getJson<ProviderOption[]>("/api/providers");
+    set({ providers });
+  },
+
+  async addModel(input) {
+    const resp = await postJson("/api/models/custom", input);
+    if (!resp.ok) throw new Error(await readError(resp));
+    set({ showAddModel: false });
+    await get().loadModels();
+    get().loadProviders().catch(() => {});
+  },
+
+  async deleteModel(selector) {
+    const resp = await fetch("/api/models/custom", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selector }),
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    await get().loadModels();
+    get().loadProviders().catch(() => {});
+  },
+
+  async deleteProvider(providerId) {
+    const resp = await fetch("/api/providers", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: providerId }),
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    await get().loadModels();
+    get().loadProviders().catch(() => {});
+  },
+
   async loadWorkdirs() {
     const dirs = await getJson<{ path: string }[]>("/api/workdirs");
     set({ workdirs: dirs.map((d) => d.path) });
@@ -287,11 +341,15 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  /** 切换主区域视图；进入 skills/mcp 时刷新对应列表（错误写入 xxxError，不阻止切换） */
+  /** 切换主区域视图；进入 skills/mcp/settings 时刷新对应列表（错误写入 xxxError，不阻止切换） */
   setView(view) {
     set({ activeView: view });
     if (view === "skills") get().reloadSkills().catch(() => {});
     if (view === "mcp") get().reloadMcp().catch(() => {});
+    if (view === "settings") {
+      get().loadModels().catch(() => {});
+      get().loadProviders().catch(() => {});
+    }
   },
 
   async reloadSkills() {
@@ -825,6 +883,14 @@ export const useApp = create<AppState>((set, get) => ({
     await postJson("/api/models", { selector });
     set({ showModelPicker: false });
     await get().loadModels();
+  },
+
+  setAddModel(show, preset) {
+    set({
+      showAddModel: show,
+      addModelPreset: show ? (preset ?? null) : null,
+    });
+    if (show) get().loadProviders().catch(() => {});
   },
 
   async setWorkDir(dir) {

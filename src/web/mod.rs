@@ -113,6 +113,7 @@ pub async fn run_web(host: &str, port: u16, open: bool, work_dir: &Path) -> Resu
         manager,
         registry: Arc::new(TaskRegistry::new()),
         default_work_dir: work_dir.to_path_buf(),
+        config_write_lock: tokio::sync::Mutex::new(()),
     });
 
     let app = Router::new()

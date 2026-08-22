@@ -3,8 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::types::{ModelPickerAction, PickerAction};
 use super::{App, AppState};
-use super::{DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS};
-use crate::config::{self, ModelEntry};
+use crate::config::{self, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS, ModelEntry};
 use crate::mcp::{McpConnection, McpToolBackend};
 use crate::storage::SessionSummary;
 use crate::tui::event::AppEvent;
