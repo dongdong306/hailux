@@ -222,27 +222,45 @@ impl App {
                 name,
                 arguments,
                 subagent_name,
+                subagent_index,
             } => {
                 self.finalize_thinking_ms();
                 if subagent_name.is_some() {
                     self.messages.push(Message::SubagentStep {
-                        summary: crate::tui::history_cell::tool_call_summary(&name, &arguments),
+                        summary: crate::tui::history_cell::subagent_step_summary(&name, &arguments),
                         is_done: false,
+                        agent: subagent_name.clone(),
+                        index: subagent_index,
                     });
                 } else {
                     if name == "task"
                         && let Ok(args_val) = serde_json::from_str::<serde_json::Value>(&arguments)
                     {
-                        let sub_name = args_val["subagent"].as_str().unwrap_or("").to_string();
-                        let desc = args_val["description"].as_str().unwrap_or("").to_string();
-                        if !sub_name.is_empty() {
+                        // tasks 数组：为每个任务项注册一条 TaskRecord
+                        let items: Vec<(String, String)> = args_val["tasks"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .map(|t| {
+                                        (
+                                            t["subagent"].as_str().unwrap_or("").to_string(),
+                                            t["description"].as_str().unwrap_or("").to_string(),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (sub_name, desc) in items {
+                            if sub_name.is_empty() {
+                                continue;
+                            }
                             self.tasks.call_counter += 1;
                             let call_id = self.tasks.call_counter;
-                            self.tasks.active_call_id = Some(call_id);
+                            self.tasks.active_call_ids.push(call_id);
                             self.tasks.records.push(TaskRecord {
                                 call_id,
                                 session_id: String::new(),
-                                subagent_name: sub_name,
+                                subagent_name: sub_name.clone(),
                                 description: desc,
                                 started_at: std::time::Instant::now(),
                                 status: TaskRunStatus::Running,
@@ -263,14 +281,37 @@ impl App {
                 result,
                 display,
                 subagent_name,
+                subagent_index,
             } => {
                 if subagent_name.is_some() {
                     let tool_name = name.as_str();
                     let result_summary =
                         crate::tui::history_cell::tool_result_summary(tool_name, &result);
-                    if let Some(Message::SubagentStep {
-                        is_done, summary, ..
-                    }) = self.messages.last_mut()
+                    // 并发批次中步骤交错：优先按任务下标匹配（同名 subagent 并发
+                    // 时名称无法区分实例），缺下标的历史数据回退按来源 agent 匹配
+                    let target_idx = self
+                        .messages
+                        .iter()
+                        .rev()
+                        .position(
+                            |m| matches!(m, Message::SubagentStep { is_done: false, index: Some(i), .. } if Some(*i) == subagent_index),
+                        )
+                        .or_else(|| {
+                            self.messages.iter().rev().position(
+                                |m| matches!(m, Message::SubagentStep { is_done: false, agent, .. } if agent == &subagent_name),
+                            )
+                        })
+                        .or_else(|| {
+                            // 单任务批次（agent=None）或历史数据：取最后一条未完成步骤
+                            self.messages.iter().rev().position(
+                                |m| matches!(m, Message::SubagentStep { is_done: false, agent: None, .. }),
+                            )
+                        })
+                        .map(|pos| self.messages.len() - 1 - pos);
+                    if let Some(idx) = target_idx
+                        && let Some(Message::SubagentStep {
+                            is_done, summary, ..
+                        }) = self.messages.get_mut(idx)
                     {
                         *is_done = true;
                         if !result_summary.is_empty() {
@@ -279,19 +320,27 @@ impl App {
                     }
                 } else {
                     if name == "task" {
-                        if let Some(sid) = parse_task_id_from_result(&result) {
-                            if let Some(call_id) = self.tasks.active_call_id.take()
-                                && let Some(record) =
-                                    self.tasks.records.iter_mut().find(|r| r.call_id == call_id)
-                            {
-                                record.session_id = sid;
-                                record.status = TaskRunStatus::Completed;
+                        let blocks = parse_task_outcomes(&result);
+                        let call_ids = std::mem::take(&mut self.tasks.active_call_ids);
+                        // join_all 保序：结果块顺序 = tasks 数组顺序 = record 创建
+                        // 顺序，按位置一一对位；同名 subagent 并发（含混合成败）
+                        // 也不会错位
+                        for (i, call_id) in call_ids.iter().enumerate() {
+                            let Some(record) = self
+                                .tasks
+                                .records
+                                .iter_mut()
+                                .find(|r| r.call_id == *call_id)
+                            else {
+                                continue;
+                            };
+                            match blocks.get(i) {
+                                Some(b) if b.ok => {
+                                    record.session_id = b.task_id.clone().unwrap_or_default();
+                                    record.status = TaskRunStatus::Completed;
+                                }
+                                _ => record.status = TaskRunStatus::Error,
                             }
-                        } else if let Some(call_id) = self.tasks.active_call_id.take()
-                            && let Some(record) =
-                                self.tasks.records.iter_mut().find(|r| r.call_id == call_id)
-                        {
-                            record.status = TaskRunStatus::Error;
                         }
                     }
                     self.messages.push(Message::ToolResult {
@@ -559,9 +608,7 @@ impl App {
                     self.subagents.clone(),
                     self.skills.clone(),
                     self.storage.clone(),
-                    self.resolved.config.clone(),
                     self.resolved.display.clone(),
-                    self.resolved.max_tokens,
                     self.work_dir.clone(),
                     self.shared.current_session.clone(),
                     self.shared.mcp_backends.clone(),
@@ -577,9 +624,11 @@ impl App {
                 );
 
                 let args = serde_json::json!({
-                    "subagent": subagent_name,
-                    "description": task_description.clone(),
-                    "prompt": subagent_prompt,
+                    "tasks": [{
+                        "subagent": subagent_name,
+                        "description": task_description.clone(),
+                        "prompt": subagent_prompt,
+                    }]
                 })
                 .to_string();
 
@@ -593,7 +642,7 @@ impl App {
 
                 self.tasks.call_counter += 1;
                 let call_id = self.tasks.call_counter;
-                self.tasks.active_call_id = Some(call_id);
+                self.tasks.active_call_ids = vec![call_id];
                 self.tasks.records.push(TaskRecord {
                     call_id,
                     session_id: String::new(),
@@ -612,7 +661,7 @@ impl App {
                 let result_text = result.unwrap_or_else(|err| err.message);
 
                 let sub_session_id = parse_task_id_from_result(&result_text);
-                self.tasks.active_call_id = None;
+                self.tasks.active_call_ids.clear();
                 if let Some(record) = self.tasks.records.iter_mut().find(|r| r.call_id == call_id) {
                     record.session_id = sub_session_id.unwrap_or_default();
                     record.status = task_status;
@@ -714,16 +763,47 @@ impl App {
 ///
 /// 格式: `<task subagent="..." description="..." task_id="UUID" state="completed">`
 fn parse_task_id_from_result(result: &str) -> Option<String> {
-    let marker = "task_id=\"";
-    let start = result.find(marker)? + marker.len();
-    let rest = &result[start..];
-    let end = rest.find('"')?;
-    let id = &rest[..end];
-    if id.is_empty() {
-        None
-    } else {
-        Some(id.to_string())
+    parse_task_outcomes(result)
+        .into_iter()
+        .find(|b| b.ok)
+        .and_then(|b| b.task_id)
+}
+
+/// task 工具结果中单个 `<task>` 块的解析产出
+struct TaskOutcome {
+    task_id: Option<String>,
+    ok: bool,
+}
+
+/// 逐块解析结果中的 `<task ...>` 块（兼容有无 `<tasks>` 包裹两种格式）。
+/// 失败块保留占位（ok=false、无 task_id），返回顺序与 tasks 数组一致，
+/// 供调用方按位置对位
+fn parse_task_outcomes(result: &str) -> Vec<TaskOutcome> {
+    let mut blocks = Vec::new();
+    for line in result.lines() {
+        let Some(rest) = line.trim().strip_prefix("<task ") else {
+            continue;
+        };
+        let Some(tag) = rest.strip_suffix('>') else {
+            continue;
+        };
+        blocks.push(TaskOutcome {
+            task_id: extract_task_attr(tag, "task_id").filter(|id| !id.is_empty()),
+            ok: extract_task_attr(tag, "state")
+                .map(|s| s != "failed")
+                .unwrap_or(true),
+        });
     }
+    blocks
+}
+
+/// 在 `<task ...>` 属性行内提取 `key="value"`
+fn extract_task_attr(tag: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 #[cfg(test)]
@@ -757,5 +837,40 @@ mod tests {
             completion_tokens: 0,
         };
         assert_eq!(estimate_compact_prompt(10_000, usage), 7_000);
+    }
+
+    #[test]
+    fn parse_task_outcomes_keeps_failed_blocks_in_order() {
+        let result = "<tasks count=\"3\">\n\
+            <task subagent=\"general\" task_id=\"id-1\" state=\"completed\">\n<task_result>\nok\n</task_result>\n</task>\n\
+            <task subagent=\"reviewer\" state=\"failed\">\n<error>\nboom\n</error>\n</task>\n\
+            <task subagent=\"researcher\" task_id=\"id-3\" state=\"completed\">\n<task_result>\nok\n</task_result>\n</task>\n\
+            </tasks>";
+        let blocks = parse_task_outcomes(result);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].task_id.as_deref(), Some("id-1"));
+        assert!(blocks[0].ok);
+        assert_eq!(blocks[1].task_id, None);
+        assert!(!blocks[1].ok);
+        assert_eq!(blocks[2].task_id.as_deref(), Some("id-3"));
+        assert!(blocks[2].ok);
+        // 直连路径取第一个成功块的 id（跳过失败块）
+        assert_eq!(parse_task_id_from_result(result), Some("id-1".to_string()));
+    }
+
+    #[test]
+    fn parse_task_id_skips_leading_failed_block() {
+        let result = "<tasks count=\"2\">\n\
+            <task subagent=\"general\" state=\"failed\">\n<error>\nboom\n</error>\n</task>\n\
+            <task subagent=\"general\" task_id=\"id-2\" state=\"completed\">\n<task_result>\nok\n</task_result>\n</task>\n\
+            </tasks>";
+        assert_eq!(parse_task_id_from_result(result), Some("id-2".to_string()));
+    }
+
+    #[test]
+    fn parse_task_id_from_single_result() {
+        let result = "<task subagent=\"general\" task_id=\"uuid-x\" state=\"completed\">\n<task_result>\ndone\n</task_result>\n</task>";
+        assert_eq!(parse_task_id_from_result(result), Some("uuid-x".into()));
+        assert_eq!(parse_task_id_from_result("no tags here"), None);
     }
 }

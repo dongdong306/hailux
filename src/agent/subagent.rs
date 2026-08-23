@@ -10,11 +10,11 @@ use crate::agent::{
 };
 use crate::mcp::{McpTool, SharedMcpBackends};
 use crate::storage::{ChatStorage, MessageRole};
-use async_openai::config::OpenAIConfig;
 use color_eyre::Result;
+use futures_util::future::join_all;
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -24,6 +24,8 @@ const CONFIG_DIR_NAME: &str = ".hailux";
 const AGENT_DIR_NAME: &str = "agents";
 const AGENT_FILE_NAME: &str = "AGENTS.md";
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
+/// 单次 task 调用允许并发启动的 subagent 数量上限
+const MAX_PARALLEL_TASKS: usize = 8;
 
 /// 已发现的 subagent 配置
 #[derive(Debug, Clone)]
@@ -279,19 +281,109 @@ pub fn builtin_general_subagent(main_model: &str) -> SubagentConfig {
     }
 }
 
-/// Task 工具：启动 subagent 执行委派任务。
+/// Task 工具：并发启动多个 subagent 执行委派任务。
 ///
 /// subagent 在独立 session 中运行，执行过程对主 TUI 不可见。
 /// 仅返回最终结果文本作为工具结果。
 pub type SharedConfig = Arc<Mutex<crate::config::Config>>;
 
-pub struct TaskTool {
-    subagents: Vec<SubagentConfig>,
+/// tasks 数组中单个任务的解析结果
+#[derive(Debug, Clone)]
+struct TaskSpec {
+    subagent: String,
+    description: String,
+    prompt: String,
+    task_id: Option<String>,
+}
+
+/// 解析 tool 参数中的 `tasks` 数组
+fn parse_task_specs(args: &Value) -> Result<Vec<TaskSpec>, String> {
+    let Some(tasks) = args["tasks"].as_array() else {
+        return Err(
+            "missing required parameter \"tasks\": pass an array of task objects, e.g. \
+             {\"tasks\": [{\"subagent\": \"general\", \"description\": \"...\", \"prompt\": \"...\"}]}"
+                .to_string(),
+        );
+    };
+    if tasks.is_empty() {
+        return Err("\"tasks\" must contain at least one task".to_string());
+    }
+    let mut specs = Vec::with_capacity(tasks.len());
+    for (i, task) in tasks.iter().enumerate() {
+        let subagent = task["subagent"]
+            .as_str()
+            .ok_or_else(|| format!("tasks[{i}]: \"subagent\" is required"))?
+            .to_string();
+        let prompt = task["prompt"]
+            .as_str()
+            .ok_or_else(|| format!("tasks[{i}]: \"prompt\" is required"))?
+            .to_string();
+        if prompt.trim().is_empty() {
+            return Err(format!("tasks[{i}]: \"prompt\" must not be empty"));
+        }
+        let description = task["description"].as_str().unwrap_or("").to_string();
+        let task_id = task
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        specs.push(TaskSpec {
+            subagent,
+            description,
+            prompt,
+            task_id,
+        });
+    }
+    Ok(specs)
+}
+
+/// 启动前的预校验：数量上限、subagent 名称存在、task_id 不重复；
+/// 校验通过则返回每个任务对应的 subagent 配置（顺序与 specs 一致）
+fn resolve_task_specs<'a>(
+    specs: &[TaskSpec],
+    subagents: &'a [SubagentConfig],
+) -> Result<Vec<&'a SubagentConfig>, String> {
+    if specs.len() > MAX_PARALLEL_TASKS {
+        return Err(format!(
+            "too many tasks in one call: {} (max {}); split into multiple calls",
+            specs.len(),
+            MAX_PARALLEL_TASKS
+        ));
+    }
+    let mut configs = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let Some(config) = subagents.iter().find(|s| s.name == spec.subagent) else {
+            let available: Vec<&str> = subagents.iter().map(|s| s.name.as_str()).collect();
+            return Err(format!(
+                "Subagent \"{}\" not found. Available subagents: {}",
+                spec.subagent,
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            ));
+        };
+        configs.push(config);
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    for spec in specs {
+        if let Some(id) = spec.task_id.as_deref()
+            && !seen.insert(id)
+        {
+            return Err(format!(
+                "duplicate task_id \"{id}\" in tasks array; each task must reference a distinct session"
+            ));
+        }
+    }
+    Ok(configs)
+}
+
+/// TaskTool 的可克隆依赖集合，供并发运行的多个 subagent 任务共享
+#[derive(Clone)]
+struct SharedTaskCtx {
     skills: Vec<SkillInfo>,
     storage: ChatStorage,
-    openai_config: OpenAIConfig,
     model: String,
-    max_tokens: u32,
     work_dir: String,
     current_session_id: Arc<Mutex<Option<String>>>,
     mcp_backends: SharedMcpBackends,
@@ -302,42 +394,7 @@ pub struct TaskTool {
     permission: crate::permission::PermissionManager,
 }
 
-#[allow(clippy::too_many_arguments)]
-impl TaskTool {
-    pub fn new(
-        subagents: Vec<SubagentConfig>,
-        skills: Vec<SkillInfo>,
-        storage: ChatStorage,
-        openai_config: OpenAIConfig,
-        model: String,
-        max_tokens: u32,
-        work_dir: String,
-        current_session_id: Arc<Mutex<Option<String>>>,
-        mcp_backends: SharedMcpBackends,
-        config: SharedConfig,
-        main_event_hub: crate::agent::event::EventHub,
-        permission: crate::permission::PermissionManager,
-    ) -> Self {
-        Self {
-            subagents,
-            skills,
-            storage,
-            openai_config,
-            model,
-            max_tokens,
-            work_dir,
-            current_session_id,
-            mcp_backends,
-            config,
-            main_event_hub,
-            permission,
-        }
-    }
-
-    fn find(&self, name: &str) -> Option<&SubagentConfig> {
-        self.subagents.iter().find(|s| s.name == name)
-    }
-
+impl SharedTaskCtx {
     /// 构建 subagent 的 Agent 并注册工具
     fn build_subagent(&self, config: &SubagentConfig) -> Result<Agent, ToolExecuteError> {
         let model_selector = config.model.as_ref().ok_or_else(|| ToolExecuteError {
@@ -447,6 +504,42 @@ impl TaskTool {
     }
 }
 
+pub struct TaskTool {
+    subagents: Vec<SubagentConfig>,
+    ctx: SharedTaskCtx,
+}
+
+impl TaskTool {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subagents: Vec<SubagentConfig>,
+        skills: Vec<SkillInfo>,
+        storage: ChatStorage,
+        model: String,
+        work_dir: String,
+        current_session_id: Arc<Mutex<Option<String>>>,
+        mcp_backends: SharedMcpBackends,
+        config: SharedConfig,
+        main_event_hub: crate::agent::event::EventHub,
+        permission: crate::permission::PermissionManager,
+    ) -> Self {
+        Self {
+            subagents,
+            ctx: SharedTaskCtx {
+                skills,
+                storage,
+                model,
+                work_dir,
+                current_session_id,
+                mcp_backends,
+                config,
+                main_event_hub,
+                permission,
+            },
+        }
+    }
+}
+
 impl Tool for TaskTool {
     fn name(&self) -> &str {
         "task"
@@ -461,25 +554,37 @@ impl Tool for TaskTool {
         json!({
             "type": "object",
             "properties": {
-                "subagent": {
-                    "type": "string",
-                    "description": "Name of the subagent to use",
-                    "enum": names
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Short description of the task (3-5 words)"
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Detailed task instructions for the subagent to execute"
-                },
-                "task_id": {
-                    "type": "string",
-                    "description": "Optional. Pass the session ID from a previous subagent invocation to resume the same session context, continuing the previous conversation instead of creating a new session"
+                "tasks": {
+                    "type": "array",
+                    "description": "Tasks to launch; each item starts one subagent and all items run concurrently",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subagent": {
+                                "type": "string",
+                                "description": "Name of the subagent to use",
+                                "enum": names
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Short description of the task (3-5 words)"
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Detailed task instructions for the subagent to execute"
+                            },
+                            "task_id": {
+                                "type": "string",
+                                "description": "Optional. Pass the session ID from a previous subagent invocation to resume the same session context, continuing the previous conversation instead of creating a new session"
+                            }
+                        },
+                        "required": ["subagent", "description", "prompt"]
+                    },
+                    "minItems": 1,
+                    "maxItems": MAX_PARALLEL_TASKS
                 }
             },
-            "required": ["subagent", "description", "prompt"]
+            "required": ["tasks"]
         })
     }
 
@@ -489,302 +594,36 @@ impl Tool for TaskTool {
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         let args: Value = serde_json::from_str(arguments).unwrap_or_default();
 
-        let subagent_name = match args["subagent"].as_str() {
-            Some(n) => n.to_string(),
-            None => {
-                return Box::pin(std::future::ready(Err(ToolExecuteError {
-                    message: "subagent parameter must not be empty".to_string(),
-                })));
+        let specs = match parse_task_specs(&args) {
+            Ok(s) => s,
+            Err(message) => {
+                return Box::pin(std::future::ready(Err(ToolExecuteError { message })));
             }
         };
 
-        let description = args["description"].as_str().unwrap_or("").to_string();
-
-        let prompt = match args["prompt"].as_str() {
-            Some(p) => p.to_string(),
-            None => {
-                return Box::pin(std::future::ready(Err(ToolExecuteError {
-                    message: "prompt parameter must not be empty".to_string(),
-                })));
+        let ctx = self.ctx.clone();
+        let configs: Vec<SubagentConfig> = match resolve_task_specs(&specs, &self.subagents) {
+            Ok(configs) => configs.into_iter().cloned().collect(),
+            Err(message) => {
+                return Box::pin(std::future::ready(Err(ToolExecuteError { message })));
             }
         };
-
-        let task_id = args["task_id"].as_str().map(|s| s.to_string());
-
-        let config = match self.find(&subagent_name) {
-            Some(c) => c.clone(),
-            None => {
-                let available: Vec<&str> = self.subagents.iter().map(|s| s.name.as_str()).collect();
-                return Box::pin(std::future::ready(Err(ToolExecuteError {
-                    message: format!(
-                        "Subagent \"{}\" not found. Available subagents: {}",
-                        subagent_name,
-                        if available.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            available.join(", ")
-                        }
-                    ),
-                })));
-            }
-        };
-
-        let storage = self.storage.clone();
-        let skills = self.skills.clone();
-        let openai_config = self.openai_config.clone();
-        let model = self.model.clone();
-        let max_tokens = self.max_tokens;
-        let work_dir = self.work_dir.clone();
-        let current_session_id = self.current_session_id.clone();
-        let mcp_backends = self.mcp_backends.clone();
-        let app_config = self.config.clone();
-        let main_event_hub = self.main_event_hub.clone();
 
         Box::pin(async move {
-            // 获取 parent session_id
-            let parent_id = {
-                let guard = current_session_id.lock().map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?;
-                guard.clone()
-            };
+            let futures = specs
+                .into_iter()
+                .zip(configs)
+                .enumerate()
+                .map(|(index, (spec, config))| run_subagent_task(ctx.clone(), config, spec, index));
+            let blocks = join_all(futures).await;
 
-            let parent_id = parent_id.ok_or_else(|| ToolExecuteError {
-                message: "No active session; cannot create subagent session".to_string(),
-            })?;
-
-            // 判断是恢复已有会话还是创建新会话
-            let (sub_session_id, agent) = if let Some(existing_id) = task_id {
-                // 恢复已有会话：加载历史消息
-                let stored_messages =
-                    storage
-                        .load_messages(&existing_id)
-                        .await
-                        .map_err(|e| ToolExecuteError {
-                            message: e.to_string(),
-                        })?;
-
-                // 构建 subagent 并加载历史消息
-                let task_tool_for_restore = TaskTool {
-                    subagents: Vec::new(),
-                    skills: skills.clone(),
-                    storage: storage.clone(),
-                    openai_config: openai_config.clone(),
-                    model: model.clone(),
-                    max_tokens,
-                    work_dir: work_dir.clone(),
-                    current_session_id: current_session_id.clone(),
-                    mcp_backends: mcp_backends.clone(),
-                    config: app_config.clone(),
-                    main_event_hub: main_event_hub.clone(),
-                    permission: self.permission.clone(),
-                };
-                let mut restore_agent = task_tool_for_restore.build_subagent(&config)?;
-
-                // 将历史消息加载到 agent 中
-                let mut chat_messages = Vec::new();
-                for msg in &stored_messages {
-                    if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
-                        chat_messages.push(std::sync::Arc::new(chat_msg));
-                    }
-                }
-                if !chat_messages.is_empty() {
-                    // 保留已有的 system prompt（build_subagent 已设置），仅加载非 system 消息
-                    let non_system: Vec<_> = chat_messages
-                        .into_iter()
-                        .filter(|m| {
-                            !matches!(
-                                m.as_ref(),
-                                CompatibleChatCompletionRequestMessage::System(_)
-                            )
-                        })
-                        .collect();
-                    restore_agent.sync_messages(non_system);
-                }
-
-                // 持久化新的 user prompt
-                let user_stored = crate::storage::StoredMessage {
-                    role: MessageRole::User,
-                    content: prompt.clone(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    cached_tokens: None,
-                    runtime_meta: None,
-                    think_ms: None,
-                    compacted: false,
-                };
-                let _ = storage.append_message(&existing_id, &user_stored).await;
-
-                (existing_id, restore_agent)
-            } else {
-                // 创建新会话
-                let sub_model = config.model.clone().unwrap_or_else(|| model.clone());
-
-                let sub_session_id = storage
-                    .create_subsession(&parent_id, &sub_model, &work_dir)
-                    .await
-                    .map_err(|e| ToolExecuteError {
-                        message: e.to_string(),
-                    })?;
-
-                // 将 subagent 名称和任务描述写入 title，格式: "name|description"
-                let title = format!("{}|{}", config.name, description);
-                let _ = storage.update_session_title(&sub_session_id, &title).await;
-
-                // 持久化 user prompt
-                let user_stored = crate::storage::StoredMessage {
-                    role: MessageRole::User,
-                    content: prompt.clone(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    cached_tokens: None,
-                    runtime_meta: None,
-                    think_ms: None,
-                    compacted: false,
-                };
-                let _ = storage.append_message(&sub_session_id, &user_stored).await;
-
-                // 构建 subagent
-                let task_tool = TaskTool {
-                    subagents: Vec::new(),
-                    skills: skills.clone(),
-                    storage: storage.clone(),
-                    openai_config: openai_config.clone(),
-                    model: model.clone(),
-                    max_tokens,
-                    work_dir: work_dir.clone(),
-                    current_session_id: current_session_id.clone(),
-                    mcp_backends: mcp_backends.clone(),
-                    config: app_config.clone(),
-                    main_event_hub: main_event_hub.clone(),
-                    permission: self.permission.clone(),
-                };
-                let agent = task_tool.build_subagent(&config)?;
-
-                (sub_session_id, agent)
-            };
-
-            let mut agent = agent;
-
-            // 创建局部 event channel
-            let (sub_tx, mut sub_rx) = create_core_event_channel();
-
-            // 启动 subagent 流式对话
-            agent
-                .chat_stream(&prompt, sub_tx)
-                .map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?;
-
-            // 消费 subagent 事件，提取最终结果并转发工具调用过程到主 TUI
-            let mut final_text = String::new();
-            while let Some(event) = sub_rx.recv().await {
-                match event {
-                    CoreEvent::AgentChunk(chunk) => {
-                        final_text.push_str(&chunk);
-                    }
-                    CoreEvent::AgentComplete { messages, .. } => {
-                        // 从最终消息中提取最后一条 assistant 消息的文本
-                        for msg in messages.iter().rev() {
-                            if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg.as_ref()
-                                && let Some(ref content) = assistant.base.content
-                                    && let async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(t) = content
-                                        && !t.is_empty() {
-                                            final_text = t.clone();
-                                            break;
-                                        }
-                        }
-                        break;
-                    }
-                    CoreEvent::PersistMessage {
-                        msg,
-                        usage,
-                        display,
-                    } => {
-                        // 持久化到 subagent session
-                        let mut stored = crate::storage::to_stored_message(&msg);
-                        if let Some(u) = usage {
-                            stored.prompt_tokens = Some(u.prompt_tokens as i64);
-                            stored.completion_tokens = Some(u.completion_tokens as i64);
-                            stored.cached_tokens = Some(u.cached_tokens as i64);
-                        }
-                        if let Some(ref d) = display {
-                            stored.runtime_meta = Some(d.clone());
-                        }
-                        let _ = storage.append_message(&sub_session_id, &stored).await;
-                    }
-                    CoreEvent::UsageUpdate {
-                        prompt_tokens,
-                        completion_tokens,
-                        ..
-                    } => {
-                        let _ = storage
-                            .update_session_usage(
-                                &sub_session_id,
-                                prompt_tokens as i64,
-                                completion_tokens as i64,
-                            )
-                            .await;
-                    }
-                    CoreEvent::ToolCallStart {
-                        name, arguments, ..
-                    } => {
-                        let _ = main_event_hub.send(CoreEvent::ToolCallStart {
-                            name,
-                            arguments,
-                            subagent_name: Some(subagent_name.to_string()),
-                        });
-                    }
-                    CoreEvent::ToolResult {
-                        name,
-                        result,
-                        display,
-                        ..
-                    } => {
-                        let truncated = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
-                            let safe: String = result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
-                            format!("{safe}...(truncated)")
-                        } else {
-                            result
-                        };
-                        let _ = main_event_hub.send(CoreEvent::ToolResult {
-                            name,
-                            result: truncated,
-                            display,
-                            subagent_name: Some(subagent_name.to_string()),
-                        });
-                    }
-                    CoreEvent::PermissionRequest {
-                        request,
-                        response_tx,
-                        ..
-                    } => {
-                        let _ = main_event_hub.send(CoreEvent::PermissionRequest {
-                            request,
-                            response_tx,
-                            subagent_name: Some(subagent_name.to_string()),
-                        });
-                    }
-                    // 其他事件全部忽略
-                    _ => {}
-                }
+            if blocks.len() == 1 {
+                return Ok(blocks.into_iter().next().unwrap_or_default());
             }
-
-            if final_text.trim().is_empty() {
-                final_text = "(Subagent returned no text result)".to_string();
-            }
-
-            let esc_desc = xml_escape(&description);
-            let esc_result = xml_escape(&final_text);
             Ok(format!(
-                "<task subagent=\"{}\" description=\"{}\" task_id=\"{}\" state=\"completed\">\n<task_result>\n{}\n</task_result>\n</task>",
-                subagent_name, esc_desc, sub_session_id, esc_result
+                "<tasks count=\"{}\">\n{}\n</tasks>",
+                blocks.len(),
+                blocks.join("\n")
             ))
         })
     }
@@ -796,6 +635,300 @@ impl Tool for TaskTool {
     fn cancellable(&self) -> bool {
         true
     }
+}
+
+/// 运行单个 subagent 任务，始终返回格式化的 `<task>` 结果块；
+/// 内部失败以 `state="failed"` + `<error>` 呈现，不影响其他并发任务
+async fn run_subagent_task(
+    ctx: SharedTaskCtx,
+    config: SubagentConfig,
+    spec: TaskSpec,
+    index: usize,
+) -> String {
+    let esc_name = xml_escape(&config.name);
+    let esc_desc = xml_escape(&spec.description);
+    match run_subagent_task_inner(ctx, config, spec, index).await {
+        Ok((sub_session_id, final_text)) => format!(
+            "<task subagent=\"{}\" description=\"{}\" task_id=\"{}\" state=\"completed\">\n<task_result>\n{}\n</task_result>\n</task>",
+            esc_name,
+            esc_desc,
+            sub_session_id,
+            xml_escape(&final_text)
+        ),
+        Err(e) => format!(
+            "<task subagent=\"{}\" description=\"{}\" state=\"failed\">\n<error>\n{}\n</error>\n</task>",
+            esc_name,
+            esc_desc,
+            xml_escape(&e.message)
+        ),
+    }
+}
+
+async fn run_subagent_task_inner(
+    ctx: SharedTaskCtx,
+    config: SubagentConfig,
+    spec: TaskSpec,
+    index: usize,
+) -> Result<(String, String), ToolExecuteError> {
+    let TaskSpec {
+        description,
+        prompt,
+        task_id,
+        ..
+    } = spec;
+    let subagent_name = config.name.clone();
+
+    // 获取 parent session_id
+    let parent_id = {
+        let guard = ctx
+            .current_session_id
+            .lock()
+            .map_err(|e| ToolExecuteError {
+                message: e.to_string(),
+            })?;
+        guard.clone()
+    };
+
+    let parent_id = parent_id.ok_or_else(|| ToolExecuteError {
+        message: "No active session; cannot create subagent session".to_string(),
+    })?;
+
+    // 判断是恢复已有会话还是创建新会话
+    let (sub_session_id, agent) = if let Some(existing_id) = task_id {
+        // 恢复已有会话：加载历史消息
+        let stored_messages =
+            ctx.storage
+                .load_messages(&existing_id)
+                .await
+                .map_err(|e| ToolExecuteError {
+                    message: e.to_string(),
+                })?;
+
+        // 构建 subagent 并加载历史消息
+        let mut restore_agent = ctx.build_subagent(&config)?;
+
+        // 将历史消息加载到 agent 中
+        let mut chat_messages = Vec::new();
+        for msg in &stored_messages {
+            if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
+                chat_messages.push(std::sync::Arc::new(chat_msg));
+            }
+        }
+        if !chat_messages.is_empty() {
+            // 保留已有的 system prompt（build_subagent 已设置），仅加载非 system 消息
+            let non_system: Vec<_> = chat_messages
+                .into_iter()
+                .filter(|m| {
+                    !matches!(
+                        m.as_ref(),
+                        CompatibleChatCompletionRequestMessage::System(_)
+                    )
+                })
+                .collect();
+            restore_agent.sync_messages(non_system);
+        }
+
+        // 持久化新的 user prompt
+        let user_stored = crate::storage::StoredMessage {
+            role: MessageRole::User,
+            content: prompt.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            runtime_meta: None,
+            think_ms: None,
+            compacted: false,
+        };
+        if let Err(e) = ctx.storage.append_message(&existing_id, &user_stored).await {
+            eprintln!("[warn] Failed to persist subagent user message: {e}");
+        }
+
+        (existing_id, restore_agent)
+    } else {
+        // 创建新会话
+        let sub_model = config.model.clone().unwrap_or_else(|| ctx.model.clone());
+
+        let sub_session_id = ctx
+            .storage
+            .create_subsession(&parent_id, &sub_model, &ctx.work_dir)
+            .await
+            .map_err(|e| ToolExecuteError {
+                message: e.to_string(),
+            })?;
+
+        // 将 subagent 名称和任务描述写入 title，格式: "name|description"
+        let title = format!("{}|{}", config.name, description);
+        if let Err(e) = ctx
+            .storage
+            .update_session_title(&sub_session_id, &title)
+            .await
+        {
+            eprintln!("[warn] Failed to set subagent session title: {e}");
+        }
+
+        // 持久化 user prompt
+        let user_stored = crate::storage::StoredMessage {
+            role: MessageRole::User,
+            content: prompt.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            runtime_meta: None,
+            think_ms: None,
+            compacted: false,
+        };
+        if let Err(e) = ctx
+            .storage
+            .append_message(&sub_session_id, &user_stored)
+            .await
+        {
+            eprintln!("[warn] Failed to persist subagent user message: {e}");
+        }
+
+        // 构建 subagent
+        let agent = ctx.build_subagent(&config)?;
+
+        (sub_session_id, agent)
+    };
+
+    let mut agent = agent;
+
+    // 创建局部 event channel
+    let (sub_tx, mut sub_rx) = create_core_event_channel();
+
+    // 启动 subagent 流式对话
+    agent
+        .chat_stream(&prompt, sub_tx)
+        .map_err(|e| ToolExecuteError {
+            message: e.to_string(),
+        })?;
+
+    // 消费 subagent 事件，提取最终结果并转发工具调用过程到主 TUI
+    let mut final_text = String::new();
+    let mut completed = false;
+    while let Some(event) = sub_rx.recv().await {
+        match event {
+            CoreEvent::AgentChunk(chunk) => {
+                final_text.push_str(&chunk);
+            }
+            CoreEvent::AgentComplete { messages, .. } => {
+                // 从最终消息中提取最后一条 assistant 消息的文本
+                for msg in messages.iter().rev() {
+                    if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg.as_ref()
+                        && let Some(ref content) = assistant.base.content
+                            && let async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(t) = content
+                                && !t.is_empty() {
+                                    final_text = t.clone();
+                                    break;
+                                }
+                }
+                completed = true;
+                break;
+            }
+            CoreEvent::PersistMessage {
+                msg,
+                usage,
+                display,
+            } => {
+                // 持久化到 subagent session
+                let mut stored = crate::storage::to_stored_message(&msg);
+                if let Some(u) = usage {
+                    stored.prompt_tokens = Some(u.prompt_tokens as i64);
+                    stored.completion_tokens = Some(u.completion_tokens as i64);
+                    stored.cached_tokens = Some(u.cached_tokens as i64);
+                }
+                if let Some(ref d) = display {
+                    stored.runtime_meta = Some(d.clone());
+                }
+                if let Err(e) = ctx.storage.append_message(&sub_session_id, &stored).await {
+                    eprintln!("[warn] Failed to persist subagent message: {e}");
+                }
+            }
+            CoreEvent::UsageUpdate {
+                prompt_tokens,
+                completion_tokens,
+                ..
+            } => {
+                if let Err(e) = ctx
+                    .storage
+                    .update_session_usage(
+                        &sub_session_id,
+                        prompt_tokens as i64,
+                        completion_tokens as i64,
+                    )
+                    .await
+                {
+                    eprintln!("[warn] Failed to update subagent session usage: {e}");
+                }
+            }
+            CoreEvent::ToolCallStart {
+                name, arguments, ..
+            } => {
+                let _ = ctx.main_event_hub.send(CoreEvent::ToolCallStart {
+                    name,
+                    arguments,
+                    subagent_name: Some(subagent_name.clone()),
+                    subagent_index: Some(index),
+                });
+            }
+            CoreEvent::ToolResult {
+                name,
+                result,
+                display,
+                ..
+            } => {
+                let truncated = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
+                    let safe: String = result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
+                    format!("{safe}...(truncated)")
+                } else {
+                    result
+                };
+                let _ = ctx.main_event_hub.send(CoreEvent::ToolResult {
+                    name,
+                    result: truncated,
+                    display,
+                    subagent_name: Some(subagent_name.clone()),
+                    subagent_index: Some(index),
+                });
+            }
+            CoreEvent::PermissionRequest {
+                request,
+                response_tx,
+                ..
+            } => {
+                let _ = ctx.main_event_hub.send(CoreEvent::PermissionRequest {
+                    request,
+                    response_tx,
+                    subagent_name: Some(subagent_name.clone()),
+                });
+            }
+            // 其他事件全部忽略
+            _ => {}
+        }
+    }
+
+    // 信道提前关闭（chat_stream 内部任务异常退出）：已收到的只是截断输出，
+    // 不能当作成功结果返回
+    if !completed {
+        return Err(ToolExecuteError {
+            message: format!(
+                "subagent event channel closed before completion; partial output: {}",
+                truncate_chars(&final_text, 200)
+            ),
+        });
+    }
+
+    if final_text.trim().is_empty() {
+        final_text = "(Subagent returned no text result)".to_string();
+    }
+
+    Ok((sub_session_id, final_text))
 }
 
 /// 解析 "@subagent: name work_content" 格式的输入
@@ -816,6 +949,16 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// 按字符数截断，超长时追加省略号
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max_chars).collect();
+        format!("{cut}...")
+    }
 }
 
 #[cfg(test)]
@@ -928,5 +1071,102 @@ mod tests {
         let formatted = format_available_subagents(&configs);
         assert!(formatted.contains("<available_subagents>"));
         assert!(formatted.contains("general"));
+    }
+
+    #[test]
+    fn parse_task_specs_valid_array() {
+        let args = serde_json::json!({
+            "tasks": [
+                {
+                    "subagent": "general",
+                    "description": "search todos",
+                    "prompt": "find all TODO comments"
+                },
+                {
+                    "subagent": "reviewer",
+                    "prompt": "review src/lib.rs",
+                    "task_id": "abc"
+                }
+            ]
+        });
+        let specs = parse_task_specs(&args).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].subagent, "general");
+        assert_eq!(specs[0].description, "search todos");
+        assert_eq!(specs[0].task_id, None);
+        assert_eq!(specs[1].subagent, "reviewer");
+        assert_eq!(specs[1].description, "");
+        assert_eq!(specs[1].task_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn parse_task_specs_missing_array() {
+        let args = serde_json::json!({"subagent": "general", "prompt": "p"});
+        let err = parse_task_specs(&args).unwrap_err();
+        assert!(err.contains("\"tasks\""));
+    }
+
+    #[test]
+    fn parse_task_specs_empty_array() {
+        let args = serde_json::json!({"tasks": []});
+        assert!(parse_task_specs(&args).is_err());
+    }
+
+    #[test]
+    fn parse_task_specs_item_missing_prompt() {
+        let args = serde_json::json!({"tasks": [{"subagent": "general"}]});
+        let err = parse_task_specs(&args).unwrap_err();
+        assert!(err.contains("tasks[0]"));
+    }
+
+    #[test]
+    fn parse_task_specs_blank_prompt() {
+        let args = serde_json::json!({"tasks": [{"subagent": "general", "prompt": "   "}]});
+        assert!(parse_task_specs(&args).is_err());
+    }
+
+    fn spec(subagent: &str, task_id: Option<&str>) -> TaskSpec {
+        TaskSpec {
+            subagent: subagent.to_string(),
+            description: "d".to_string(),
+            prompt: "p".to_string(),
+            task_id: task_id.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn resolve_task_specs_ok() {
+        let subs = vec![builtin_general_subagent("m")];
+        let specs = vec![spec("general", None), spec("general", Some("id1"))];
+        let configs = resolve_task_specs(&specs, &subs).unwrap();
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().all(|c| c.name == "general"));
+    }
+
+    #[test]
+    fn resolve_task_specs_unknown_subagent() {
+        let subs = vec![builtin_general_subagent("m")];
+        let specs = vec![spec("ghost", None)];
+        let err = resolve_task_specs(&specs, &subs).unwrap_err();
+        assert!(err.contains("not found"));
+        assert!(err.contains("general"));
+    }
+
+    #[test]
+    fn resolve_task_specs_duplicate_task_id() {
+        let subs = vec![builtin_general_subagent("m")];
+        let specs = vec![spec("general", Some("same")), spec("general", Some("same"))];
+        let err = resolve_task_specs(&specs, &subs).unwrap_err();
+        assert!(err.contains("duplicate task_id"));
+    }
+
+    #[test]
+    fn resolve_task_specs_too_many() {
+        let subs = vec![builtin_general_subagent("m")];
+        let specs: Vec<TaskSpec> = (0..=MAX_PARALLEL_TASKS)
+            .map(|_| spec("general", None))
+            .collect();
+        let err = resolve_task_specs(&specs, &subs).unwrap_err();
+        assert!(err.contains("too many tasks"));
     }
 }

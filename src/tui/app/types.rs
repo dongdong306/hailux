@@ -41,6 +41,10 @@ pub enum Message {
     SubagentStep {
         summary: String,
         is_done: bool,
+        /// 多 subagent 并发时记录步骤来源名称
+        agent: Option<String>,
+        /// 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例）
+        index: Option<usize>,
     },
     /// 上下文压缩分隔标记（UI 可见，不进入 LLM 上下文）
     CompactMarker {

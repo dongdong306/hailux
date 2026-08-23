@@ -32,6 +32,7 @@ export interface ChatItem {
   result?: string;
   display?: string; // 工具展示数据（如 diff）
   subagent?: string;
+  subagentIndex?: number; // 来源任务在 tasks 数组中的下标（同名并发区分实例）
   status?: string; // done 状态
   totalMs?: number;
   model?: string;
@@ -774,6 +775,7 @@ export const useApp = create<AppState>((set, get) => ({
             name: event.name,
             arguments: event.arguments,
             subagent: event.subagent,
+            subagentIndex: event.subagent_index,
           });
           break;
         case "ToolResult":
@@ -783,6 +785,7 @@ export const useApp = create<AppState>((set, get) => ({
             result: event.result,
             display: event.display,
             subagent: event.subagent,
+            subagentIndex: event.subagent_index,
           });
           break;
         case "UsageUpdate":

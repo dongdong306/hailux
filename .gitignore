@@ -38,6 +38,8 @@ web/node_modules/
 web/dist/
 *.tsbuildinfo
 
+.playwright-cli
+
 # 其他
 *.swp
 *.swo

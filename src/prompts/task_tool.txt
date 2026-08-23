@@ -1,14 +1,17 @@
 
-Start a subagent to handle complex, multi-step tasks.
+Launch subagent(s) to handle complex, multi-step tasks.
 
-When using the task tool, you must specify the `subagent` parameter to select the subagent type. Available subagent types are listed in the system prompt's `<available_subagents>` block.
+The only parameter is `tasks`: an array of task objects. Each item launches one subagent, and all items in the array run concurrently in a single tool call. To run multiple subagents in parallel, put multiple items in the `tasks` array — do not rely on issuing multiple parallel tool calls in one message, as that behavior is not guaranteed.
+
+Available subagent types are listed in the system prompt's `<available_subagents>` block.
 
 ## When NOT to use the task tool
 - If you only need to read or search files (read, glob, grep), use those tools directly
 - If there is no suitable subagent, use other tools directly
 
 ## Usage Notes
-1. Launch multiple subagents in parallel to maximize performance; use multiple tool calls in a single message
-2. The subagent returns a message and task_id when completed. The result is not visible to the user; you need to briefly summarize the result for the user
-3. Each subagent invocation uses a fresh context. Your prompt should contain a detailed task description, clearly specify what information you expect the subagent to return, and whether you expect it to write code or only do research — the subagent does not know the user's intent
+1. Pass multiple items in the `tasks` array to launch concurrent subagents and maximize performance
+2. Each subagent invocation uses a fresh context. Your prompt should contain a detailed task description, clearly specify what information you expect the subagent to return, and whether you expect it to write code or only do research — the subagent does not know the user's intent
+3. Each subagent returns a result and task_id when completed. The result is not visible to the user; you need to briefly summarize the results for the user
 4. If the subagent description mentions it should be used proactively, use it proactively without waiting for explicit user request
+5. To resume a previous subagent's context, pass its `task_id` in the corresponding item; never reuse the same `task_id` in two items of one call

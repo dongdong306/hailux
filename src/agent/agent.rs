@@ -825,6 +825,7 @@ async fn finalize_cancelled(
                 result: result_text,
                 display: None,
                 subagent_name: None,
+                subagent_index: None,
             });
         }
     }
@@ -861,6 +862,7 @@ async fn handle_tool_calls_stream(
                 result: "Tool execution aborted".to_string(),
                 display: None,
                 subagent_name: None,
+                subagent_index: None,
             });
             let pushed_msg: SharedMessage = {
                 let msg: SharedMessage = Arc::new(
@@ -969,6 +971,7 @@ async fn handle_tool_calls_stream(
                 name: name.clone(),
                 arguments: arguments.clone(),
                 subagent_name: None,
+                subagent_index: None,
             });
         }
 
@@ -1007,6 +1010,7 @@ async fn handle_tool_calls_stream(
             result: result.clone(),
             display: display.clone(),
             subagent_name: None,
+            subagent_index: None,
         });
 
         let pushed_msg: SharedMessage = {

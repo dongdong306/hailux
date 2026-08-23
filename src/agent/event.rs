@@ -70,6 +70,9 @@ pub enum CoreEvent {
         arguments: String,
         /// 若来自 subagent 转发，携带 subagent 名称
         subagent_name: Option<String>,
+        /// 若来自 subagent 转发，携带该任务在 tasks 数组中的下标
+        /// （同名 subagent 并发时用于区分实例）
+        subagent_index: Option<usize>,
     },
     ToolResult {
         name: String,
@@ -77,6 +80,8 @@ pub enum CoreEvent {
         display: Option<String>,
         /// 若来自 subagent 转发，携带 subagent 名称
         subagent_name: Option<String>,
+        /// 若来自 subagent 转发，携带该任务在 tasks 数组中的下标
+        subagent_index: Option<usize>,
     },
     AskUser {
         questions: Vec<QuestionInfo>,

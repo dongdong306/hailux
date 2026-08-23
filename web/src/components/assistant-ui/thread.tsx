@@ -12,6 +12,7 @@ import { useApp } from "../../store/app-store";
 import { MarkdownText } from "./markdown-text";
 import { ReasoningGroup } from "./reasoning";
 import { ToolFallback, ToolGroup } from "./tool-fallback";
+import { TaskToolCard } from "./task-card";
 import {
   lastAssistantMessageId,
   type SystemRow,
@@ -19,14 +20,15 @@ import {
 import { ThreadNav, USER_MSG_ATTR } from "./thread-nav";
 
 /** 自定义分组：reasoning 连续段 → 思考组；连续普通工具调用 → 工具合并卡；
- *  todo_write（todo 卡片）与 ask_user（问答卡）不分组。
+ *  todo_write（todo 卡片）、ask_user（问答卡）与 task（subagent 委派卡）不分组。
  *  模块级定义保持函数引用稳定，GroupedParts 树 memo 不失效 */
 const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[] => {
   if (part.type === "reasoning") return ["group-reasoning"];
   if (
     part.type === "tool-call" &&
     part.toolName !== "todo_write" &&
-    part.toolName !== "ask_user"
+    part.toolName !== "ask_user" &&
+    part.toolName !== "task"
   )
     return ["group-tools"];
   return [];
@@ -247,7 +249,9 @@ function AssistantMessage({
                   </div>
                 );
               case "tool-call":
-                return part.toolUI ?? <ToolFallback {...part} />;
+                return part.toolName === "task" ? (
+                  <TaskToolCard {...part} />
+                ) : (part.toolUI ?? <ToolFallback {...part} />);
               case "indicator":
                 // 运行指示统一由消息区底部的 RunningTimer 展示
                 return null;
