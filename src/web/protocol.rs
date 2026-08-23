@@ -240,13 +240,6 @@ pub struct WorkdirInfo {
 }
 
 #[derive(Debug, Serialize)]
-pub struct FsEntry {
-    pub name: String,
-    pub path: String,
-    pub is_dir: bool,
-}
-
-#[derive(Debug, Serialize)]
 pub struct ModelInfo {
     pub provider_id: String,
     pub provider_name: String,

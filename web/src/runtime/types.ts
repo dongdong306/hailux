@@ -83,12 +83,6 @@ export interface WorkdirInfo {
   path: string;
 }
 
-export interface FsEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-}
-
 export interface ModelInfo {
   provider_id: string;
   provider_name: string;

@@ -3,13 +3,13 @@
 // 删除模型 / 删除服务商 / 设为默认模型。后续可扩展更多设置区块。
 import { useEffect, useState } from "react";
 import {
-  ArrowLeft,
   Loader2,
   Plus,
   Settings,
   Trash2,
+  X,
 } from "lucide-react";
-import { useApp } from "../store/app-store";
+import { anyDialogOpen, useApp } from "../store/app-store";
 import { cn } from "../lib/utils";
 import type { ModelInfo, ProviderOption } from "../runtime/types";
 import { Overlay } from "./dialogs";
@@ -68,20 +68,32 @@ export function SettingsView() {
     }
   }
 
+  // Esc 返回聊天
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
+      setView("chat");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setView]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 顶部栏 */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border/40 px-4">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border/40 px-4 py-3">
+        <Settings className="size-4.5 shrink-0 text-primary" />
+        <h2 className="mr-2 text-[15px] font-semibold">设置</h2>
+        <div className="ml-auto" />
         <button
           type="button"
-          onClick={() => setView("chat")}
-          aria-label="返回对话"
+          title="返回对话 (Esc)"
           className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          onClick={() => setView("chat")}
         >
-          <ArrowLeft className="size-4" />
+          <X className="size-4" />
         </button>
-        <Settings className="size-4 text-muted-foreground/70" />
-        <h2 className="text-sm font-semibold text-foreground">设置</h2>
       </div>
 
       {/* 内容区 */}

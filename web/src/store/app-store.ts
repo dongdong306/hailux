@@ -35,6 +35,8 @@ export interface ChatItem {
   status?: string; // done 状态
   totalMs?: number;
   model?: string;
+  ctxPromptTokens?: number; // 本轮上下文占用快照（最后一次请求输入 token；done 行携带）
+  ctxCompletionTokens?: number; // 本轮上下文占用快照（最后一次请求输出 token）
   thinkMs?: number; // 思考耗时（最终）
   thinkStartedAt?: number; // 思考计时起点（进行中，epoch ms）
 }
@@ -555,6 +557,8 @@ export const useApp = create<AppState>((set, get) => ({
     // Tool 消息的 runtime_meta 仅识别新格式 diff 展示数据（format: "diff"）；
     // 旧格式 {old,new} 存量数据显示 result 文本，计时 JSON（无 format 字段）同样排除
     const toolResults = new Map<string, { result: string; display?: string }>();
+    // 本轮最近一次请求的 usage 快照（随 done 行落进消息底部操作栏）
+    let turnCtx: { prompt: number; completion: number } | null = null;
     for (const msg of detail.messages) {
       if (msg.role === "Tool" && msg.tool_call_id) {
         let display: string | undefined;
@@ -574,7 +578,14 @@ export const useApp = create<AppState>((set, get) => ({
     for (const msg of detail.messages) {
       if (msg.role === "User") {
         items.push({ kind: "user", text: msg.content });
+        turnCtx = null;
       } else if (msg.role === "Assistant") {
+        if (msg.prompt_tokens !== null) {
+          turnCtx = {
+            prompt: msg.prompt_tokens,
+            completion: msg.completion_tokens ?? 0,
+          };
+        }
         if (msg.reasoning_content) {
           items.push({
             kind: "reasoning",
@@ -623,6 +634,8 @@ export const useApp = create<AppState>((set, get) => ({
                 status: meta.status ?? "completed",
                 totalMs: meta.total_ms,
                 model: meta.model ?? "",
+                ctxPromptTokens: turnCtx?.prompt,
+                ctxCompletionTokens: turnCtx?.completion,
               });
             }
           } catch {
@@ -700,6 +713,10 @@ export const useApp = create<AppState>((set, get) => ({
       items: [...s.items, { kind: "user", text: message }],
     }));
 
+    // 本轮最近一次 UsageUpdate 快照：AgentComplete 时随 done 行落进消息底部操作栏
+    // （闭包变量随每次请求重建，避免快照到上一轮的旧值）
+    let turnCtx: { prompt: number; completion: number } | null = null;
+
     const handleEvent = (event: ServerEvent) => {
       const items = get().items;
       const push = (item: ChatItem) => set((s) => ({ items: [...s.items, item] }));
@@ -770,6 +787,10 @@ export const useApp = create<AppState>((set, get) => ({
           break;
         case "UsageUpdate":
           // 会话累计（顶栏）+ 记录最后请求（消息底部上下文占用近似）
+          turnCtx = {
+            prompt: event.prompt_tokens,
+            completion: event.completion_tokens,
+          };
           set((s) => ({
             promptTokens: s.promptTokens + event.prompt_tokens,
             completionTokens: s.completionTokens + event.completion_tokens,
@@ -810,6 +831,8 @@ export const useApp = create<AppState>((set, get) => ({
           });
           break;
         case "AgentComplete": {
+          // ctx 依赖事件顺序：后端保证 UsageUpdate 先于 AgentComplete；
+          // 本轮无任何 usage（如首个请求即失败）时 ctx 为 null → 不展示上下文占用
           freezeThinking();
           const last = items[items.length - 1];
           if (last?.kind === "assistant-streaming") {
@@ -820,6 +843,8 @@ export const useApp = create<AppState>((set, get) => ({
             status: event.status,
             totalMs: event.total_ms,
             model: event.model,
+            ctxPromptTokens: turnCtx?.prompt,
+            ctxCompletionTokens: turnCtx?.completion,
           });
           break;
         }
@@ -1030,3 +1055,16 @@ export const useApp = create<AppState>((set, get) => ({
     set({ escHint: on });
   },
 }));
+
+/** 是否有全局弹窗打开（权限确认 / 提问 / 模型选择 / 添加模型 / 项目选择）。
+ *  视图级 Esc 处理需让位于弹窗关闭，避免一次 Esc 同时关弹窗和切换视图 */
+export function anyDialogOpen(): boolean {
+  const s = useApp.getState();
+  return (
+    s.permission !== null ||
+    s.askUser !== null ||
+    s.showAddModel ||
+    s.showModelPicker ||
+    s.showWorkdirPicker
+  );
+}
