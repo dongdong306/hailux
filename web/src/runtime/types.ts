@@ -16,6 +16,8 @@ export type ServerEvent =
       name: string;
       arguments: string;
       subagent?: string;
+      /** 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例） */
+      subagent_index?: number;
     }
   | {
       type: "ToolResult";
@@ -23,6 +25,7 @@ export type ServerEvent =
       result: string;
       display?: string;
       subagent?: string;
+      subagent_index?: number;
     }
   | {
       type: "PermissionRequest";

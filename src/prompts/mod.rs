@@ -67,7 +67,8 @@ pub fn build_system_prompt(
             prompt.push_str("\n\n");
             prompt.push_str(&available);
             prompt.push_str(
-                "\n\nUse the `task` tool to delegate complex, multi-step work to a subagent listed above. \
+                "\n\nUse the `task` tool to delegate complex, multi-step work to the subagents listed above: \
+                  pass a `tasks` array (one item per subagent) — all items run concurrently within a single tool call. \
                   You can also manually invoke one by typing `@subagent: <name> <task>` in the input.",
             );
         }

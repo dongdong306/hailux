@@ -35,6 +35,9 @@ pub enum ServerEvent {
         arguments: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent: Option<String>,
+        /// 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subagent_index: Option<usize>,
     },
     ToolResult {
         name: String,
@@ -43,6 +46,8 @@ pub enum ServerEvent {
         display: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subagent_index: Option<usize>,
     },
     PermissionRequest {
         request_id: String,

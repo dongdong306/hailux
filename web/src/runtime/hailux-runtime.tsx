@@ -7,6 +7,11 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import { useApp, type ChatItem } from "../store/app-store";
+import {
+  subagentStepResultSummary,
+  subagentStepSummary,
+  type TaskStepData,
+} from "./subagent-steps";
 
 /** 系统提示行（通知/错误/压缩标记），挂在 message.metadata.custom.row */
 export interface SystemRow {
@@ -181,6 +186,59 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
   };
 
   for (const item of items) {
+    // subagent 步骤（带 subagent 标记的 tool-call/tool-result）：
+    // 并入最近一个未完成的 task part 作为实时进度（args._steps），不单独成卡
+    if (
+      (item.kind === "tool-call" || item.kind === "tool-result") &&
+      item.subagent
+    ) {
+      const agent = item.subagent;
+      const a = acc as Accum | null;
+      let taskPart: Extract<AssistantPart, { type: "tool-call" }> | undefined;
+      if (a) {
+        for (let j = a.parts.length - 1; j >= 0; j--) {
+          const p = a.parts[j]!;
+          if (
+            p.type === "tool-call" &&
+            p.toolName === "task" &&
+            p.result === undefined
+          ) {
+            taskPart = p;
+            break;
+          }
+        }
+      }
+      if (taskPart) {
+        const steps = (taskPart.args._steps ??= []) as TaskStepData[];
+        // 实例标识：tasks 数组下标（同名 subagent 并发时名称无法区分）；
+        // 无下标的历史/异常数据用 -1 占位，退化为按 agent 名匹配
+        const idx = item.subagentIndex ?? -1;
+        if (item.kind === "tool-call") {
+          steps.push({
+            index: idx,
+            agent,
+            text: subagentStepSummary(item.name ?? "", item.arguments),
+            done: false,
+          });
+        } else {
+          for (let k = steps.length - 1; k >= 0; k--) {
+            const s = steps[k]!;
+            const matched =
+              idx >= 0
+                ? s.index === idx && !s.done
+                : s.agent === agent && !s.done;
+            if (matched) {
+              s.done = true;
+              const rs = subagentStepResultSummary(item.name ?? "", item.result);
+              if (rs) s.text += ` — ${rs}`;
+              break;
+            }
+          }
+        }
+        continue;
+      }
+      // 找不到归属 task part（异常顺序/历史数据）：回退为普通工具卡渲染
+    }
     switch (foldKind(item.kind)) {
       case "part": {
         // 助手文本 / 思考 / 工具调用：建立或复用 acc 并 push part

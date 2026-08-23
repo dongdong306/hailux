@@ -163,18 +163,20 @@ pub async fn chat_handler(
                     think_total_ms = 0;
                     let _ = session.storage().append_message(&session_id, &stored).await;
                 }
-                CoreEvent::ToolCallStart { name, arguments, subagent_name } => {
+                CoreEvent::ToolCallStart { name, arguments, subagent_name, subagent_index } => {
                     finalize_thinking(&mut thinking_started, &mut think_total_ms);
                     yield sse_event(&ServerEvent::ToolCallStart {
                         name, arguments,
                         subagent: subagent_name,
+                        subagent_index,
                     });
                 }
-                CoreEvent::ToolResult { name, result, display, subagent_name } => {
+                CoreEvent::ToolResult { name, result, display, subagent_name, subagent_index } => {
                     let result = truncate_chars(&result, TOOL_RESULT_MAX_CHARS);
                     yield sse_event(&ServerEvent::ToolResult {
                         name, result, display,
                         subagent: subagent_name,
+                        subagent_index,
                     });
                 }
                 CoreEvent::PermissionRequest { request, response_tx, subagent_name } => {

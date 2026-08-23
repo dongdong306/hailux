@@ -77,7 +77,8 @@ pub(super) struct CommandSuggestion {
 pub(super) struct TaskTracker {
     pub(super) records: Vec<TaskRecord>,
     pub(super) call_counter: u64,
-    pub(super) active_call_id: Option<u64>,
+    /// 当前运行中的 task 调用对应记录（并发批次含多个）
+    pub(super) active_call_ids: Vec<u64>,
 }
 
 /// Spinner 动画
