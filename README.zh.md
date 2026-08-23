@@ -1,4 +1,4 @@
-[English](README.md) | 简体中文
+[English](README.md) | 中文
 
 # hailux
 
@@ -60,8 +60,8 @@ cargo build --release
 ├── config.toml    # API 配置
 ├── mcp.toml       # MCP 服务器配置
 ├── db/chat.db     # 对话历史数据库
-├── AGENTS.md      # 全局指令（注入到系统提示词）
-└── skills/        # 自定义技能
+├── AGENTS.md      # 可选的全局指令，需手动创建（注入到系统提示词）
+└── skills/        # 技能目录（自动预装内置 help 技能，可添加自定义技能）
 ```
 
 编辑 `~/.hailux/config.toml` 配置 API Key：
@@ -118,10 +118,14 @@ hailux 会读取当前目录上下文（AGENTS.md、技能等），调用 `grep`
 | `/skills` | 查看已加载的技能 |
 | `/mcp` | 查看 MCP 服务器状态 |
 | `/tasks` | 查看子代理执行情况 |
+| `/stats` | 查看 token 用量统计 |
+| `/yolo` | 切换 YOLO 模式（跳过权限确认） |
 | `/plan` | 切换规划模式（只读） |
 | `/compact` | 压缩对话历史（节省上下文） |
 | `/init` | 为当前目录生成 AGENTS.md 模板 |
 | `/exit` | 退出程序（`quit` / `q` 亦可） |
+
+也可以添加自定义斜杠命令：将带 frontmatter `description` 的 Markdown 文件放入 `~/.hailux/commands/` 或项目内 `.hailux/commands/` 目录。
 
 ### 快捷键
 
@@ -135,6 +139,11 @@ hailux 会读取当前目录上下文（AGENTS.md、技能等），调用 `grep`
 | `↑` / `↓` | 浏览历史输入 / 多行编辑中移动光标 |
 | `PageUp` / `PageDown` | 滚动对话 |
 | `Esc` | 关闭建议 / 清空输入 |
+| `Esc` ×2 | 处理中连按两次中断 AI |
+| `Ctrl+C` / `Ctrl+D` | 退出程序 |
+| `Ctrl+X` | 打开会话选择器 |
+| `Ctrl+N` | 新建会话 |
+| `Ctrl+M` | 切换模型 |
 | `@` | 触发文件提及 |
 
 ### 配置自定义模型
@@ -155,16 +164,16 @@ context_window = 32768
 
 ### MCP 服务器
 
-编辑 `~/.hailux/mcp.toml` 添加 MCP 服务器：
+编辑 `~/.hailux/mcp.toml` 添加 MCP 服务器（注意 `mcp_servers.` 表前缀）：
 
 ```toml
 # stdio 方式（本地进程）
-[my-server]
+[mcp_servers.my-server]
 command = "node"
 args = ["/path/to/server.js"]
 
 # http 方式（远程服务）
-[remote-server]
+[mcp_servers.remote-server]
 url = "https://example.com/mcp"
 ```
 
