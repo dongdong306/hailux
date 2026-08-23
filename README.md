@@ -1,4 +1,4 @@
-English | [简体中文](README.zh-CN.md)
+English | [中文](README.zh.md)
 
 # hailux
 
@@ -60,8 +60,8 @@ After running `hailux` for the first time, config files are generated under `~/.
 ├── config.toml    # API configuration
 ├── mcp.toml       # MCP server configuration
 ├── db/chat.db     # chat history database
-├── AGENTS.md      # global instructions (injected into the system prompt)
-└── skills/        # custom skills
+├── AGENTS.md      # optional global instructions — create it manually (injected into the system prompt)
+└── skills/        # skills (a built-in help skill is preinstalled; add your own here)
 ```
 
 Edit `~/.hailux/config.toml` to set your API key:
@@ -118,10 +118,14 @@ Type `/` in the input box:
 | `/skills` | List loaded skills |
 | `/mcp` | Show MCP server status |
 | `/tasks` | Show subagent task status |
+| `/stats` | Show token usage statistics |
+| `/yolo` | Toggle YOLO mode (skip permission confirmations) |
 | `/plan` | Toggle plan mode (read-only) |
 | `/compact` | Compact conversation history (saves context) |
 | `/init` | Generate an AGENTS.md template for this directory |
 | `/exit` | Quit (`quit` / `q` also work) |
+
+You can also add custom slash commands: Markdown files (frontmatter `description`) placed in `~/.hailux/commands/` or `<project>/.hailux/commands/`.
 
 ### Keyboard Shortcuts
 
@@ -135,6 +139,11 @@ Type `/` in the input box:
 | `↑` / `↓` | Browse input history / move cursor in multi-line editing |
 | `PageUp` / `PageDown` | Scroll conversation |
 | `Esc` | Dismiss suggestion / clear input |
+| `Esc` ×2 | Interrupt the agent while it is processing |
+| `Ctrl+C` / `Ctrl+D` | Quit |
+| `Ctrl+X` | Open session picker |
+| `Ctrl+N` | New session |
+| `Ctrl+M` | Switch model |
 | `@` | Trigger file mention |
 
 ### Custom Models
@@ -155,16 +164,16 @@ context_window = 32768
 
 ### MCP Servers
 
-Edit `~/.hailux/mcp.toml` to add MCP servers:
+Edit `~/.hailux/mcp.toml` to add MCP servers (note the `mcp_servers.` table prefix):
 
 ```toml
 # stdio (local process)
-[my-server]
+[mcp_servers.my-server]
 command = "node"
 args = ["/path/to/server.js"]
 
 # http (remote service)
-[remote-server]
+[mcp_servers.remote-server]
 url = "https://example.com/mcp"
 ```
 

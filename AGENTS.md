@@ -44,8 +44,9 @@ subagent delegation, and custom slash commands.
 ## Architecture (src/)
 
 - `lib.rs` — Library entry: module declarations + startup orchestration (`run_tui`,
-  `run_web`, `run_non_interactive`, `rebuild_database`). `main.rs` is a thin clap CLI;
-  `tests/integration.rs` exercises the library API (permission modes, path resolution), not the binary.
+  `run_non_interactive`, `rebuild_database`; `run_web` lives in `web/mod.rs`). `main.rs` is
+  a thin clap CLI; `tests/integration.rs` exercises the library API (permission modes,
+  path resolution), not the binary.
 - CLI surface: subcommands `run` (non-interactive, `--model`, `--no-tools`) and `web`
   (`--host`/`--port`/`--open`); global flags `-p/--path`, `-r/--resume`, `--yolo`,
   `--rebuild-db`, `--update`, `--web`.
@@ -65,13 +66,15 @@ subagent delegation, and custom slash commands.
   - `agent.rs` — Streaming chat loop, tool-call dispatch, plan-mode, cancellation.
     Context compaction: `apply_compaction()` swaps the message list for a summary message;
     `request_compaction()` drives it from the TUI on a cloned list (not stored directly).
-  - `models.rs` — **DeepSeek-extended message types**. `DeepSeekChatCompletionRequestMessage`
+  - `models.rs` — **DeepSeek-compatible message types**. `CompatibleChatCompletionRequestMessage`
     wraps standard async-openai types and adds `reasoning_content` to Assistant messages.
     Custom `Serialize` injects `thinking` config and `extra` fields into the request JSON.
-    Requests go through `create_stream_byot` (BYOT = bring your own transport).
-    Messages are stored as `SharedMessage = Arc<CompatibleChatCompletionRequestMessage>`:
+    Requests go through async-openai's `create_stream_byot` (BYOT = bring your own
+    transport, called from `agent.rs`). Messages are stored as
+    `SharedMessage = Arc<CompatibleChatCompletionRequestMessage>`:
     cloning a message list is O(n) pointer copies. In plan mode, `AgentStreamState::build_request()`
-    uses `Arc::make_mut` to inject the read-only prompt — deep-copies only the modified message.
+    (in `agent.rs`) uses `Arc::make_mut` to inject the read-only prompt — deep-copies only
+    the modified message.
   - `tools.rs` — `Tool` trait + built-in tools (`bash`, `read`, `edit`, `write`, `grep`,
     `glob`, `web_fetch`, `todo_write`, `ask_user`). `ToolRegistry` converts tools to
     OpenAI function-calling schema. `allowed_in_plan_mode()` gates write tools.
@@ -97,7 +100,7 @@ subagent delegation, and custom slash commands.
     (frontmatter parsing shared by skill / subagent / command_def).
 - `prompts/` — System prompt and tool description templates (all `include_str!`).
   `mod.rs::build_system_prompt()` assembles: base prompt + working directory + skills
-  summary + AGENTS.md instructions + subagents summary. `system.txt` is Chinese.
+  summary + AGENTS.md instructions + subagents summary. `system.txt` is English.
   `tools/bash_windows.txt` vs `bash_unix.txt` selected via `cfg`.
 - `permission/` — Permission engine: rules (`mod.rs::default_rules()`), `bash_arity.rs`
   (command-arity parsing for file-path detection), `bash_readonly.rs` (plan-mode bash gate).
@@ -114,11 +117,13 @@ subagent delegation, and custom slash commands.
   isolation). `messages.compacted` + `sessions.compact_summary` support context compaction;
   active-context queries filter `compacted = 0`. Migration failure aborts startup and
   suggests `--rebuild-db`.
-- `updater.rs` — Self-update from GitHub releases (sha256-verified asset download;
-  Windows swaps via a `.old` file cleaned up on next startup).
+- `updater.rs` — Self-update from GitHub releases (sha256-verified asset download when a
+  `.sha256` asset exists — otherwise verification is skipped with a warning; Windows swaps
+  via a `.old` file cleaned up on next startup).
 - `tui/` — Ratatui UI. `app/` is a directory: `mod.rs` (main event loop / state machine),
   `chat_events.rs` (CoreEvent handling), `chat_input.rs`, `session_ops.rs`, `app_render.rs`,
-  `types.rs` (`AppState`). `ask_user.rs` (question dialog + `ask_escape`), `history_cell.rs`
+  `overlay.rs` (picker/model/setup overlay events), `types.rs` (`AppState`). `ask_user.rs`
+  (question dialog + `ask_escape`), `history_cell.rs`
   (history rendering units, incl. `parse_ask_user_pairs`), `event.rs` (async event channel),
   `input.rs` (paste detection), `command.rs` (slash commands), `terminal.rs` (init/restore +
   panic hook); other files render panels (pickers, viewers, setup, markdown).
@@ -151,9 +156,11 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   `"question"="answer"` pairs, comma-joined, with `\` and `"` escaped
   (`tui/ask_user.rs::ask_escape`); parsed back by `history_cell.rs::parse_ask_user_pairs`;
   Web mirrors both (`web/src/components/dialogs.tsx::formatAskReply` and
-  `tool-fallback.tsx::parseAskUserPairs`). Magic strings: `"[User Cancelled]"` and
-  `"Unanswered"` (checked in `agent/tools.rs`, `web/task_registry.rs`). A single question
-  also routes through the Confirm tab — no auto-submit on selection (TUI and Web aligned).
+  `web/src/components/assistant-ui/tool-fallback.tsx::parseAskUserPairs`). Magic strings:
+  `"[User Cancelled]"` (sent as fallback by `tui/ask_user.rs` and `web/task_registry.rs`,
+  checked in `agent/tools.rs`) and `"Unanswered"` (default in `tui/ask_user.rs`, rendered
+  by `history_cell.rs`). A single question also routes through the Confirm tab — no
+  auto-submit on selection (TUI and Web aligned).
 - **Permission defaults**: In-workdir operations allowed by default via builtin lowest-priority
   rules in `permission/mod.rs::default_rules()`: `* allow`, `external_directory * ask`,
   `read *.env` / `*.env.* ask` (`.env.example allow`), `mcp * ask`. Tools issue
