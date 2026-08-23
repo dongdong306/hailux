@@ -12,6 +12,7 @@ import {
   type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
 import { cn } from "../../lib/utils";
+import { useApp } from "../../store/app-store";
 
 interface ToolOutput {
   output?: string;
@@ -204,6 +205,34 @@ const statusIconMap = {
   "requires-action": AlertCircle,
 } as const;
 
+/** 内置工具集（src/agent/tools.rs）：标题不加"使用工具："前缀 */
+const BUILTIN_TOOLS = new Set([
+  "bash",
+  "read",
+  "edit",
+  "write",
+  "grep",
+  "glob",
+  "web_fetch",
+  "todo_write",
+  "ask_user",
+  "skill",
+  "task",
+]);
+
+/** 文件展示名：工作目录内 → 相对路径；目录外 → 全路径。
+ *  统一 `\`→`/` 后做大小写不敏感前缀比较（Windows），前缀去尾分隔符避免误匹配兄弟目录 */
+function displayPath(filePath: string, workDir: string): string {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const wd = norm(workDir);
+  if (!wd) return filePath;
+  if (norm(filePath).toLowerCase().startsWith(`${wd.toLowerCase()}/`)) {
+    const rel = filePath.slice(wd.length);
+    return rel.replace(/^[\\/]+/, "") || "./";
+  }
+  return filePath;
+}
+
 /** 从 ask_user 结果解析 "question"="answer" 对（对齐 TUI parse_ask_user_pairs：
  *  引号扫描 + `\\`/`\"` 转义还原 + key=value 配对） */
 function parseAskUserPairs(result: string): [string, string][] {
@@ -363,6 +392,8 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
   const inGroup = useContext(ToolGroupContext);
   const [open, setOpen] = useState(false);
   const elapsedMs = useToolCallElapsed();
+  // 订阅式读取（todo_write/ask_user 早退分支之前调用，保证 Hook 顺序稳定）
+  const workDir = useApp((s) => s.workDir);
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
 
@@ -398,25 +429,68 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
 
   const Icon = statusIconMap[statusType as keyof typeof statusIconMap] ?? Check;
 
-  // skill：标题对齐 TUI ToolCategory::Skill，显示 "Load skill {name}"
-  let title: ReactNode = (
+  // 入参解析（流式期间可能不完整，容错为空）
+  let args: Record<string, any> = {};
+  try {
+    args = JSON.parse(argsText ?? "{}") as Record<string, any>;
+  } catch {
+    // 流式期间入参可能不完整
+  }
+
+  // 标题：内置工具不加"使用工具："前缀。结构 = 动词（小号）+ 宾语（主体）。
+  // 文件工具（edit/write/read）展示路径：工作目录内 → 相对路径，目录外 → 全路径；
+  // grep/glob 展示 pattern + 搜索范围（path/include）；
+  // skill 对齐 TUI 显示 "Load skill {name}"；其余内置工具按字段优先级取摘要
+  // （bash.command / web_fetch.url / task.description）；未知工具保留前缀。
+  // 宾语缺失（入参未流到/解析失败）时仅展示动词，避免与动词重复
+  let verb: string;
+  let object: string | null;
+  let suffix: string | null = null;
+  if (toolName === "edit" || toolName === "write" || toolName === "read") {
+    verb = toolName;
+    const filePath = typeof args.file_path === "string" ? args.file_path : "";
+    object = filePath ? displayPath(filePath, workDir) : null;
+  } else if (toolName === "skill") {
+    verb = "Load skill";
+    object = typeof args.name === "string" ? args.name : null;
+  } else if (toolName === "grep" || toolName === "glob") {
+    verb = toolName;
+    object = typeof args.pattern === "string" ? args.pattern : null;
+    // 搜索范围：path（grep/glob）或 include（grep 文件过滤），仅非默认时展示
+    const scope =
+      typeof args.path === "string" && args.path && args.path !== "."
+        ? args.path
+        : typeof args.include === "string" && args.include
+          ? args.include
+          : null;
+    if (scope) suffix = scope;
+  } else if (BUILTIN_TOOLS.has(toolName)) {
+    // 其余内置工具：显式字段优先级取摘要，不依赖 JSON 键序
+    verb = toolName;
+    object =
+      (typeof args.command === "string" && args.command) ||
+      (typeof args.url === "string" && args.url) ||
+      (typeof args.description === "string" && args.description) ||
+      null;
+  } else {
+    verb = "使用工具";
+    object = toolName;
+  }
+  const title: ReactNode = (
     <>
-      使用工具：<b>{toolName}</b>
+      <span className="text-xs leading-none">{verb}</span>
+      {object && (
+        <span className="min-w-0 truncate font-medium leading-none">
+          {object}
+        </span>
+      )}
+      {suffix && (
+        <span className="text-muted-foreground/70 hidden truncate text-xs leading-none sm:inline">
+          {suffix}
+        </span>
+      )}
     </>
   );
-  if (toolName === "skill") {
-    let skillName = "";
-    try {
-      skillName = (JSON.parse(argsText ?? "{}") as { name?: string }).name ?? "";
-    } catch {
-      // 流式期间入参可能不完整
-    }
-    title = (
-      <>
-        Load skill <b>{skillName || toolName}</b>
-      </>
-    );
-  }
 
   return (
     <div
@@ -437,7 +511,9 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
             isRunning && "animate-spin [animation-duration:0.6s]",
           )}
         />
-        <span className="min-w-0 truncate leading-none">{title}</span>
+        <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
+          {title}
+        </span>
         {elapsedMs !== undefined && (
           <span className="text-muted-foreground text-xs tabular-nums">
             {formatDuration(elapsedMs)}
@@ -451,8 +527,9 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
         />
       </button>
 
+      {/* 展开内容高度上限（长输出不撑爆页面），超出内部滚动 */}
       {open && (
-        <div className="flex flex-col gap-2 ps-6 pt-1 pb-2">
+        <div className="flex max-h-[60vh] flex-col gap-2 overflow-y-auto ps-6 pt-1 pb-2">
           {argsText && (
             <pre className="bg-muted/50 text-foreground/90 rounded-md p-2.5 text-xs whitespace-pre-wrap">
               {argsText}

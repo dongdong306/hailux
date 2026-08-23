@@ -2,18 +2,10 @@
 // （技能与 MCP 管理为内联视图，见 skills-manager.tsx / mcp-manager.tsx；
 //   模型提供商管理见 settings-view.tsx）
 import { useEffect, useState, type ReactNode } from "react";
-import {
-  ArrowUp,
-  Check,
-  ChevronRight,
-  Folder,
-  FolderOpen,
-  HardDrive,
-  ShieldAlert,
-} from "lucide-react";
+import { Check, Folder, ShieldAlert } from "lucide-react";
 import { useApp } from "../store/app-store";
-import { cn, shortDir } from "../lib/utils";
-import type { FsEntry, QuestionInfo } from "../runtime/types";
+import { cn } from "../lib/utils";
+import type { QuestionInfo } from "../runtime/types";
 
 export function Overlay({
   children,
@@ -378,37 +370,15 @@ export function WorkdirPicker() {
   const setWorkdirPicker = useApp((s) => s.setWorkdirPicker);
   const [path, setPath] = useState("");
   const [error, setError] = useState("");
-  const [fsPath, setFsPath] = useState("");
-  const [fsEntries, setFsEntries] = useState<FsEntry[] | null>(null);
-  const [fsLoading, setFsLoading] = useState(false);
 
   useEffect(() => {
     if (!show) {
       setPath("");
       setError("");
-      setFsPath("");
-      setFsEntries(null);
     }
   }, [show]);
 
   if (!show) return null;
-
-  const browse = async (p: string) => {
-    setFsLoading(true);
-    setError("");
-    try {
-      const url = `/api/fs?dirs_only=true${p ? `&path=${encodeURIComponent(p)}` : ""}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        setError(await resp.text().catch(() => "无法读取目录"));
-        return;
-      }
-      setFsPath(p);
-      setFsEntries((await resp.json()) as FsEntry[]);
-    } finally {
-      setFsLoading(false);
-    }
-  };
 
   const validate = async () => {
     setError("");
@@ -425,10 +395,6 @@ export function WorkdirPicker() {
     }
   };
 
-  const crumbs = fsPath
-    ? fsPath.replace(/\\+/g, "/").split("/").filter(Boolean)
-    : [];
-
   return (
     <Overlay onClose={() => setWorkdirPicker(false)} wide>
       <h3 className="mb-1 text-[15px] font-semibold">选择项目</h3>
@@ -438,8 +404,13 @@ export function WorkdirPicker() {
 
       {workdirs.length > 0 && (
         <>
-          <p className="mb-1.5 text-xs font-medium text-muted-foreground">最近使用</p>
-          <div className="mb-4 space-y-1">
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">
+            最近使用
+            {workdirs.length > 5 && (
+              <span className="ml-1 text-muted-foreground/50">({workdirs.length})</span>
+            )}
+          </p>
+          <div className="hlx-input-scroll mb-4 max-h-[40vh] space-y-1 overflow-y-auto overscroll-contain py-1 pr-1">
             {workdirs.map((dir) => (
               <DirButton
                 key={dir}
@@ -450,79 +421,6 @@ export function WorkdirPicker() {
             ))}
           </div>
         </>
-      )}
-
-      {/* 文件系统浏览 */}
-      <p className="mb-1.5 text-xs font-medium text-muted-foreground">浏览文件系统</p>
-      {fsEntries === null ? (
-        <button
-          type="button"
-          className="mb-4 flex w-full cursor-pointer items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground"
-          onClick={() => browse("")}
-        >
-          <HardDrive className="size-4" />
-          从根目录开始浏览
-        </button>
-      ) : (
-        <div className="mb-4">
-          {/* 面包屑 */}
-          <div className="mb-1.5 flex flex-wrap items-center gap-0.5 rounded-lg bg-muted/50 px-2 py-1.5 text-xs">
-            <button
-              type="button"
-              className="cursor-pointer rounded px-1 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={() => {
-                setFsPath("");
-                setFsEntries(null);
-              }}
-            >
-              根
-            </button>
-            {crumbs.map((c, i) => (
-              <span key={i} className="flex items-center gap-0.5">
-                <ChevronRight className="size-3 text-muted-foreground/40" />
-                <button
-                  type="button"
-                  className="max-w-40 cursor-pointer truncate rounded px-1 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  title={crumbs.slice(0, i + 1).join("/")}
-                  onClick={() => browse(crumbs.slice(0, i + 1).join("/"))}
-                >
-                  {c}
-                </button>
-              </span>
-            ))}
-          </div>
-          {fsLoading ? (
-            <p className="px-2 py-2 text-xs text-muted-foreground/60">读取中…</p>
-          ) : (
-            <div className="max-h-52 space-y-0.5 overflow-y-auto rounded-lg border border-border/50 p-1">
-              {fsEntries.length === 0 && (
-                <p className="px-2 py-2 text-xs text-muted-foreground/60">无子目录</p>
-              )}
-              {fsEntries.map((e) => (
-                <button
-                  type="button"
-                  key={e.path}
-                  className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-                  title={e.path}
-                  onClick={() => browse(e.path)}
-                >
-                  <Folder className="size-3.5 text-muted-foreground/60" />
-                  <span className="truncate">{e.name}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {fsPath && (
-            <button
-              type="button"
-              className={cn(btnPrimary, "mt-2 flex w-full items-center justify-center gap-1.5 py-2")}
-              onClick={() => setWorkDir(fsPath).catch(() => {})}
-            >
-              <FolderOpen className="size-4" />
-              进入 {shortDir(fsPath)}
-            </button>
-          )}
-        </div>
       )}
 
       {/* 手动输入 */}
@@ -540,18 +438,6 @@ export function WorkdirPicker() {
         </button>
       </div>
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
-
-      {/* 返回上级 */}
-      {fsEntries !== null && fsPath && (
-        <button
-          type="button"
-          className="mt-2 flex cursor-pointer items-center gap-1 text-xs text-muted-foreground/60 transition-colors hover:text-foreground"
-          onClick={() => browse(crumbs.slice(0, -1).join("/"))}
-        >
-          <ArrowUp className="size-3" />
-          返回上级
-        </button>
-      )}
     </Overlay>
   );
 }

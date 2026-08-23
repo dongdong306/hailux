@@ -15,7 +15,7 @@ use crate::permission::PermissionReply;
 use super::protocol::{
     AskReplyBody, CommandInfoDto, CreateMcpServerRequest, CreateModelRequest, CreateSessionRequest,
     CreateSkillRequest, DeleteMcpServerRequest, DeleteModelRequest, DeleteProviderRequest,
-    DeleteSkillRequest, FsEntry, InterruptRequest, McpServerInfo, ModelInfo, PermissionReplyBody,
+    DeleteSkillRequest, InterruptRequest, McpServerInfo, ModelInfo, PermissionReplyBody,
     PlanModeRequest, ProviderInfoDto, SessionInfo, SkillInfoDto, SwitchModelRequest,
     UpdateMcpServerRequest, UpdateSkillRequest, ValidateWorkdirRequest, WorkdirInfo, YoloRequest,
 };
@@ -34,7 +34,6 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         .route("/api/workdirs", get(list_workdirs))
         .route("/api/default-workdir", get(get_default_workdir))
         .route("/api/workdirs/validate", post(validate_workdir))
-        .route("/api/fs", get(list_fs))
         .route("/api/files", get(search_files))
         .route("/api/permission/{request_id}/reply", post(permission_reply))
         .route("/api/ask/{request_id}/reply", post(ask_reply))
@@ -271,43 +270,6 @@ async fn validate_workdir(Json(req): Json<ValidateWorkdirRequest>) -> Response {
     let s = canonical.to_string_lossy().to_string();
     let s = s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s);
     Json(WorkdirInfo { path: s }).into_response()
-}
-
-#[derive(Deserialize)]
-struct FsQuery {
-    path: Option<String>,
-    #[serde(default)]
-    dirs_only: bool,
-}
-
-async fn list_fs(Query(q): Query<FsQuery>) -> Response {
-    let base = q.path.unwrap_or_else(|| ".".to_string());
-    let path = std::path::PathBuf::from(&base)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&base));
-    let entries = match std::fs::read_dir(&path) {
-        Ok(iter) => iter,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    };
-    let mut result = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_dir() {
-            result.push(FsEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
-                path: entry.path().to_string_lossy().to_string(),
-                is_dir: true,
-            });
-        } else if !q.dirs_only {
-            result.push(FsEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
-                path: entry.path().to_string_lossy().to_string(),
-                is_dir: false,
-            });
-        }
-    }
-    result.sort_by_key(|e| e.name.to_lowercase());
-    Json(result).into_response()
 }
 
 // ── 文件提及搜索（@ 补全）────────────────────────────────────

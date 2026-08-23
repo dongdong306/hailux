@@ -24,6 +24,9 @@ export interface AssistantMeta {
   model?: string;
   totalMs?: number;
   status?: string;
+  /** 本轮上下文占用（最后一次请求输入/输出 token） */
+  ctxPromptTokens?: number;
+  ctxCompletionTokens?: number;
 }
 
 /** 单个思考分段计时（按消息内 part 索引关联） */
@@ -58,6 +61,8 @@ interface Accum {
   model?: string;
   totalMs?: number;
   status?: string;
+  ctxPromptTokens?: number;
+  ctxCompletionTokens?: number;
 }
 
 function parseArgs(raw: string | undefined): Record<string, any> {
@@ -69,6 +74,29 @@ function parseArgs(raw: string | undefined): Record<string, any> {
       : { value: v };
   } catch {
     return { _raw: raw };
+  }
+}
+
+/** 折叠分类（toThreadMessages / lastAssistantMessageId 共用的单源规则）：
+ *  part（建立/复用助手 acc，push 新 part）· backfill（回填既有 acc，不新建 part）
+ *  · boundary（结束当前 acc，产出一条非助手消息）。
+ *  switch 穷尽 ChatItem["kind"] —— 新增 kind 未分类会编译报错，强制两侧同步 */
+function foldKind(kind: ChatItem["kind"]): "part" | "backfill" | "boundary" {
+  switch (kind) {
+    case "assistant":
+    case "assistant-streaming":
+    case "reasoning":
+    case "reasoning-streaming":
+    case "tool-call":
+      return "part";
+    case "tool-result":
+    case "done":
+      return "backfill";
+    case "user":
+    case "notice":
+    case "error":
+    case "compact-marker":
+      return "boundary";
   }
 }
 
@@ -99,12 +127,25 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
         return partIndex === undefined ? null : { ...seg, partIndex };
       })
       .filter((s): s is ThinkSegment => s !== null);
-    const { model, totalMs, status, id: _id, parts: _parts, ...rest } = acc;
+    const {
+      model,
+      totalMs,
+      status,
+      ctxPromptTokens,
+      ctxCompletionTokens,
+      id: _id,
+      parts: _parts,
+      ...rest
+    } = acc;
     const custom: Record<string, unknown> = { ...rest };
     if (thinkSegments.length > 0) custom.thinkSegments = thinkSegments;
     if (model !== undefined) custom.model = model;
     if (totalMs !== undefined) custom.totalMs = totalMs;
     if (status !== undefined) custom.status = status;
+    if (ctxPromptTokens !== undefined)
+      custom.ctxPromptTokens = ctxPromptTokens;
+    if (ctxCompletionTokens !== undefined)
+      custom.ctxCompletionTokens = ctxCompletionTokens;
     messages.push({
       role: "assistant",
       id: acc.id,
@@ -140,63 +181,56 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
   };
 
   for (const item of items) {
-    switch (item.kind) {
-      case "user": {
-        flush();
-        messages.push({
-          role: "user",
-          id: `u-${messages.length}`,
-          content: [{ type: "text", text: item.text ?? "" }],
-        });
-        break;
-      }
-      case "assistant":
-      case "assistant-streaming": {
-        const a = ensureAcc(item.kind === "assistant-streaming");
-        const last = a.parts[a.parts.length - 1];
-        if (item.kind === "assistant-streaming" && last?.type === "text") {
-          last.text += item.text ?? "";
-        } else {
-          a.parts.push({ type: "text", text: item.text ?? "" });
-        }
-        break;
-      }
-      case "reasoning":
-      case "reasoning-streaming": {
-        const a = ensureAcc(item.kind === "reasoning-streaming");
-        // 每个思考 item 独立成 part（store 层已把同段文本 patch 进同一 item，
-        // 流式→冻结后新分段是全新 item，不跨 item 合并）
-        a.parts.push({ type: "reasoning", text: item.text ?? "" });
-        const partIndex = a.parts.length - 1;
-        if (item.kind === "reasoning-streaming") {
-          a.thinkSegments.push({
-            partIndex,
-            startedAt: item.thinkStartedAt ?? Date.now(),
+    switch (foldKind(item.kind)) {
+      case "part": {
+        // 助手文本 / 思考 / 工具调用：建立或复用 acc 并 push part
+        if (item.kind === "tool-call") {
+          const a = ensureAcc(false);
+          const args = parseArgs(item.arguments);
+          if (item.subagent) args["_subagent"] = item.subagent;
+          a.parts.push({
+            type: "tool-call",
+            toolCallId: `tc-${toolSeq++}`,
+            toolName: item.name ?? "",
+            args,
+            argsText: item.arguments ?? "",
           });
-        } else if (item.thinkMs !== undefined && item.thinkMs > 0) {
-          // 冻结（store 已算好耗时）或历史恢复（DB think_ms），各记各的
-          a.thinkSegments.push({ partIndex, ms: item.thinkMs });
+        } else if (
+          item.kind === "reasoning" ||
+          item.kind === "reasoning-streaming"
+        ) {
+          const a = ensureAcc(item.kind === "reasoning-streaming");
+          // 每个思考 item 独立成 part（store 层已把同段文本 patch 进同一 item，
+          // 流式→冻结后新分段是全新 item，不跨 item 合并）
+          a.parts.push({ type: "reasoning", text: item.text ?? "" });
+          const partIndex = a.parts.length - 1;
+          if (item.kind === "reasoning-streaming") {
+            a.thinkSegments.push({
+              partIndex,
+              startedAt: item.thinkStartedAt ?? Date.now(),
+            });
+          } else if (item.thinkMs !== undefined && item.thinkMs > 0) {
+            // 冻结（store 已算好耗时）或历史恢复（DB think_ms），各记各的
+            a.thinkSegments.push({ partIndex, ms: item.thinkMs });
+          }
+        } else {
+          const a = ensureAcc(item.kind === "assistant-streaming");
+          const last = a.parts[a.parts.length - 1];
+          if (item.kind === "assistant-streaming" && last?.type === "text") {
+            last.text += item.text ?? "";
+          } else {
+            a.parts.push({ type: "text", text: item.text ?? "" });
+          }
         }
         break;
       }
-      case "tool-call": {
-        const a = ensureAcc(false);
-        const args = parseArgs(item.arguments);
-        if (item.subagent) args["_subagent"] = item.subagent;
-        a.parts.push({
-          type: "tool-call",
-          toolCallId: `tc-${toolSeq++}`,
-          toolName: item.name ?? "",
-          args,
-          argsText: item.arguments ?? "",
-        });
-        break;
-      }
-      case "tool-result": {
-        // 协议不带 tool_call_id：回填到最近的“同名且无 result”的 tool-call
+      case "backfill": {
+        // tool-result / done：回填既有 acc，不新建 part
         // （acc 在闭包内赋值，TS 流分析收窄为 null，这里显式断言）
         const a = acc as Accum | null;
-        if (a) {
+        if (!a) break;
+        if (item.kind === "tool-result") {
+          // 协议不带 tool_call_id：回填到最近的“同名且无 result”的 tool-call
           for (let j = a.parts.length - 1; j >= 0; j--) {
             const p = a.parts[j]!;
             if (
@@ -208,43 +242,78 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
               break;
             }
           }
+        } else {
+          // done：完成信息（模型/耗时/状态/上下文占用）合并进当前助手消息，
+          // 由底部操作栏展示
+          a.running = false;
+          a.model = item.model;
+          a.totalMs = item.totalMs;
+          a.status = item.status;
+          a.ctxPromptTokens = item.ctxPromptTokens;
+          a.ctxCompletionTokens = item.ctxCompletionTokens;
         }
         break;
       }
-      case "notice":
-      case "error":
-      case "done":
-      case "compact-marker": {
-        if (item.kind === "done") {
-          // 完成信息（模型/耗时/状态）合并进当前助手消息，由底部操作栏展示
-          const a = acc as Accum | null;
-          if (a) {
-            a.running = false;
-            a.model = item.model;
-            a.totalMs = item.totalMs;
-            a.status = item.status;
-          }
-          break;
-        }
+      case "boundary": {
+        // user / notice / error / compact-marker：结束当前 acc，各产出一条非助手消息
         flush();
-        const row: SystemRow =
-          item.kind === "error"
-            ? { kind: "error", text: item.text ?? "", tone: "danger" }
-            : item.kind === "notice"
-              ? { kind: "notice", text: item.text ?? "", tone: "info" }
-              : { kind: "compact", text: item.text ?? "", tone: "info" };
-        messages.push({
-          role: "assistant",
-          id: `s-${messages.length}`,
-          content: [{ type: "text", text: "" }],
-          metadata: { custom: { row } },
-        });
+        if (item.kind === "user") {
+          messages.push({
+            role: "user",
+            id: `u-${messages.length}`,
+            content: [{ type: "text", text: item.text ?? "" }],
+          });
+        } else {
+          const row: SystemRow =
+            item.kind === "error"
+              ? { kind: "error", text: item.text ?? "", tone: "danger" }
+              : item.kind === "notice"
+                ? { kind: "notice", text: item.text ?? "", tone: "info" }
+                : { kind: "compact", text: item.text ?? "", tone: "info" };
+          messages.push({
+            role: "assistant",
+            id: `s-${messages.length}`,
+            content: [{ type: "text", text: "" }],
+            metadata: { custom: { row } },
+          });
+        }
         break;
       }
     }
   }
   flush();
   return messages;
+}
+
+/** 轻量计算最后一条助手消息（非系统行）的 id —— 编号规则与 toThreadMessages 一致：
+ *  分类共用 foldKind（单源）；acc 建立到 flush 之间不会产出其他消息，
+ *  故 flush 时的编号等于 acc 创建时的 messages.length。
+ *  避免调用方为取 id 而全量重建消息序列（流式期间 items 每个 chunk 都会变化） */
+export function lastAssistantMessageId(items: ChatItem[]): string | null {
+  let count = 0; // 对齐 toThreadMessages 的 messages.length
+  let accHasParts = false;
+  let lastId: string | null = null;
+
+  // 与 flush() 对应：acc 有 part 才产出一条助手消息
+  const flush = () => {
+    if (!accHasParts) return;
+    lastId = `a-${count}`;
+    count++;
+    accHasParts = false;
+  };
+
+  for (const item of items) {
+    const cls = foldKind(item.kind);
+    if (cls === "part") {
+      accHasParts = true; // part 均会建立/复用 acc
+    } else if (cls === "boundary") {
+      flush();
+      count++; // user 消息 / 系统行（s-*），非助手消息
+    }
+    // backfill（tool-result/done）：回填既有 acc，不影响编号
+  }
+  flush();
+  return lastId;
 }
 
 function HailuxRuntime({ children }: { children: ReactNode }) {

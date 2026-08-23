@@ -6,13 +6,16 @@ import {
   ThreadPrimitive,
   type PartState,
 } from "@assistant-ui/react";
-import { ArrowDown, Check, Copy, Terminal } from "lucide-react";
-import { cn } from "../../lib/utils";
+import { ArrowDown, Check, Copy, Gauge, Terminal } from "lucide-react";
+import { cn, fmtTokens } from "../../lib/utils";
 import { useApp } from "../../store/app-store";
 import { MarkdownText } from "./markdown-text";
 import { ReasoningGroup } from "./reasoning";
 import { ToolFallback, ToolGroup } from "./tool-fallback";
-import { toThreadMessages, type SystemRow } from "../../runtime/hailux-runtime";
+import {
+  lastAssistantMessageId,
+  type SystemRow,
+} from "../../runtime/hailux-runtime";
 import { ThreadNav, USER_MSG_ATTR } from "./thread-nav";
 
 /** 自定义分组：reasoning 连续段 → 思考组；连续普通工具调用 → 工具合并卡；
@@ -73,21 +76,63 @@ function SystemRowView({ row }: { row: SystemRow }) {
 
 /* ── 助手消息：官方 base（无气泡 + GroupedParts 两层分组）────── */
 
-/** 本轮结束元信息（挂在最后一条助手消息上） */
+/** 本轮结束元信息（挂在每轮最后一条助手消息上） */
 interface TurnMeta {
   model?: string;
   totalMs?: number;
   status?: string;
+  ctxPromptTokens?: number;
+  ctxCompletionTokens?: number;
 }
 
-/** 最后一条助手消息底部操作栏：复制 + 模型/耗时 */
-function AssistantActions({ meta }: { meta?: TurnMeta }) {
+/** 上下文占用：仅 session 最后一条助手消息展示（输出进行中隐藏）
+ *  本轮最后请求的输入+输出（≈当前上下文大小）/ 上下文窗口 */
+function ContextUsage({
+  meta,
+  show,
+}: {
+  meta: TurnMeta;
+  show: boolean;
+}) {
+  const contextWindow = useApp((s) => s.contextWindow);
+  const isRunning = useApp((s) => s.isRunning);
+
+  if (!show || isRunning) return null;
+  if (meta.ctxPromptTokens === undefined) return null;
+  const used = meta.ctxPromptTokens + (meta.ctxCompletionTokens ?? 0);
+  if (used === 0) return null;
+  const pct = contextWindow > 0 ? Math.min(used / contextWindow, 1) : null;
+
+  return (
+    <span
+      className={cn(
+        "flex items-center gap-1 rounded-md px-1.5 py-0.5 tabular-nums",
+        pct !== null && pct >= 0.8 && "text-warning",
+      )}
+      title={`上下文占用 ${fmtTokens(used)}${contextWindow > 0 ? ` / ${fmtTokens(contextWindow)} · ${Math.round((pct ?? 0) * 100)}%` : ""}`}
+    >
+      <Gauge className="size-3.5" />
+      {contextWindow > 0
+        ? `${fmtTokens(used)} / ${fmtTokens(contextWindow)}${pct !== null ? ` · ${Math.round(pct * 100)}%` : ""}`
+        : fmtTokens(used)}
+    </span>
+  );
+}
+
+/** 每轮助手消息底部操作栏：复制 + 模型/耗时（+ 最后一条的上下文占用） */
+function AssistantActions({
+  meta,
+  showContext,
+}: {
+  meta: TurnMeta;
+  showContext: boolean;
+}) {
   const segments: string[] = [];
-  if (meta?.model) segments.push(meta.model);
-  if (meta?.totalMs !== undefined)
+  if (meta.model) segments.push(meta.model);
+  if (meta.totalMs !== undefined)
     segments.push(`${(meta.totalMs / 1000).toFixed(1)}s`);
-  if (meta?.status === "interrupted") segments.push("已中断");
-  if (meta?.status === "error") segments.push("出错");
+  if (meta.status === "interrupted") segments.push("已中断");
+  if (meta.status === "error") segments.push("出错");
 
   return (
     <div className="flex items-center gap-0.5 px-2 pt-1 font-sans text-xs text-muted-foreground/60">
@@ -107,14 +152,17 @@ function AssistantActions({ meta }: { meta?: TurnMeta }) {
         <span
           className={cn(
             "flex items-center gap-1 rounded-md px-1.5 py-0.5 tabular-nums",
-            meta?.status === "error" && "text-destructive",
-            meta?.status === "interrupted" && "text-warning",
+            meta.status === "error" && "text-destructive",
+            meta.status === "interrupted" && "text-warning",
           )}
           title="模型 · 本轮耗时"
         >
           {segments.join(" · ")}
         </span>
       )}
+      <div className="ml-auto">
+        <ContextUsage meta={meta} show={showContext} />
+      </div>
     </div>
   );
 }
@@ -153,11 +201,11 @@ function RunningTimer() {
 }
 
 function AssistantMessage({
-  isLast = false,
   meta,
+  isLast = false,
 }: {
-  isLast?: boolean;
   meta?: TurnMeta;
+  isLast?: boolean;
 }) {
   return (
     <MessagePrimitive.Root className="relative">
@@ -209,7 +257,10 @@ function AssistantMessage({
           }}
         </MessagePrimitive.GroupedParts>
       </div>
-      {isLast && <AssistantActions meta={meta} />}
+      {/* 每轮结束（done 元信息到达）才展示操作栏；流式进行中不展示 */}
+      {meta && (meta.model || meta.totalMs !== undefined) && (
+        <AssistantActions meta={meta} showContext={isLast} />
+      )}
     </MessagePrimitive.Root>
   );
 }
@@ -245,22 +296,9 @@ function Welcome() {
 
 /* ── Thread 主体 ────────────────────────────────────────────── */
 export function Thread() {
-  // 最后一条助手消息（非系统行）的 id 及其元信息 —— 底部操作栏只挂在该消息上
+  // 最后一条助手消息（非系统行）的 id —— 上下文占用只挂在该消息上
   const items = useApp((s) => s.items);
-  const last = useMemo(() => {
-    const msgs = toThreadMessages(items);
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i]!;
-      const custom = m.metadata?.custom as
-        | ({ row?: SystemRow } & TurnMeta)
-        | undefined;
-      if (m.role === "assistant" && !custom?.row) {
-        const { row: _row, ...meta } = custom ?? {};
-        return { id: m.id, meta };
-      }
-    }
-    return null;
-  }, [items]);
+  const lastId = useMemo(() => lastAssistantMessageId(items), [items]);
 
   // 右缘轮次导航：滚动容器与内容容器引用（测量提问位置 / 监听高度变化）
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -280,8 +318,9 @@ export function Thread() {
           <div className="space-y-5">
             <ThreadPrimitive.Messages>
               {({ message }) => {
+                // 系统行（row）/ 本轮元信息（model/耗时/状态/上下文占用）都挂在 custom
                 const custom = message.metadata?.custom as
-                  | { row?: SystemRow; running?: boolean }
+                  | ({ row?: SystemRow } & TurnMeta)
                   | undefined;
                 if (custom?.row) {
                   return <SystemRowView key={message.id} row={custom.row} />;
@@ -293,11 +332,12 @@ export function Thread() {
                     </div>
                   );
                 }
+                const { row: _metaRow, ...turnMeta } = custom ?? {};
                 return (
                   <AssistantMessage
                     key={message.id}
-                    isLast={message.id === last?.id}
-                    meta={last?.meta}
+                    meta={turnMeta}
+                    isLast={message.id === lastId}
                   />
                 );
               }}

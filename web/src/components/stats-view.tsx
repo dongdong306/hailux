@@ -12,7 +12,7 @@ import {
   Repeat,
   X,
 } from "lucide-react";
-import { useApp } from "../store/app-store";
+import { anyDialogOpen, useApp } from "../store/app-store";
 import { cn, fmtTokens, shortDir } from "../lib/utils";
 
 function fmt(n: number): string {
@@ -190,7 +190,9 @@ export function StatsView() {
   // Esc 返回聊天
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      if (e.key !== "Escape") return;
+      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
+      close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

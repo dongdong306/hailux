@@ -14,7 +14,7 @@ import {
   Terminal,
   Zap,
 } from "lucide-react";
-import { useApp } from "../store/app-store";
+import { anyDialogOpen, useApp } from "../store/app-store";
 import type { CommandInfo } from "../runtime/types";
 import { cn, fmtTokens } from "../lib/utils";
 
@@ -352,6 +352,8 @@ export function ChatInput() {
 
     // 中断（处理中双击 Esc，5 秒窗口）
     if (e.key === "Escape") {
+      // 全局弹窗打开时 Esc 只关弹窗，不进入中断计时
+      if (anyDialogOpen()) return;
       if (isRunning) {
         const now = Date.now();
         if (now - lastEscAt < 5000) {
@@ -603,14 +605,13 @@ export function ChatInput() {
             {/* 右侧：上下文环 + 发送/停止（紧挨） */}
             <div className="flex shrink-0 items-center gap-1.5">
               {/* 上下文占用环形指示（常驻）：最后请求的输入+输出（≈当前上下文大小）/ 窗口。
-                  处理中数值是上一轮的，仍保持展示不闪烁 */}
-              {/* 上下文占用环形指示（常驻）：数值收进 tooltip */}
+                  处理中数值是上一轮的，仍保持展示不闪烁；数值收进 tooltip */}
               <span
                 className={cn(
                   "flex h-8 cursor-default items-center rounded-lg px-1.5",
                   isRunning && "opacity-60",
                 )}
-                title={`上下文占用 ${fmtTokens(contextUsed)}${contextWindow > 0 ? ` / ${fmtTokens(contextWindow)}（${Math.round((contextPct ?? 0) * 100)}%）` : ""}`}
+                title={`上下文占用 ${fmtTokens(contextUsed)}${contextWindow > 0 ? ` / ${fmtTokens(contextWindow)} · ${Math.round((contextPct ?? 0) * 100)}%` : ""}`}
               >
                 <ContextRing pct={contextPct} />
               </span>
@@ -621,7 +622,7 @@ export function ChatInput() {
                   type="button"
                   title="停止（双击 Esc）"
                   onClick={() => interrupt()}
-                  className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-destructive text-white shadow-sm transition-all duration-200 hover:bg-destructive/90 active:scale-95"
+                  className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95"
                 >
                   {escHint ? (
                     <Loader2 className="size-3.5 animate-spin" />

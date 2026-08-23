@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  anyDialogOpen,
   useApp,
   type SkillEntry,
   type SkillFileEntry,
@@ -564,6 +565,7 @@ export function SkillsManager() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
       if (deleting) return; // 删除确认弹窗自行处理
       if (editor) setEditor(null);
       else close();
