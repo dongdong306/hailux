@@ -237,6 +237,51 @@ impl CompatibleCreateChatCompletionRequestArgs {
     }
 }
 
+/// DeepSeek 兼容的 usage 统计：标准 OpenAI 字段 + flatten 捕获
+/// `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 等扩展字段。
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct CompatibleCompletionUsage {
+    #[serde(default)]
+    pub prompt_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens: u32,
+    #[serde(default)]
+    pub total_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<async_openai::types::chat::PromptTokensDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<async_openai::types::chat::CompletionTokensDetails>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl CompatibleCompletionUsage {
+    /// 缓存命中的输入 token 数。
+    /// 优先 OpenAI 风格 `prompt_tokens_details.cached_tokens`，
+    /// 回退 DeepSeek 风格 `prompt_cache_hit_tokens`。
+    pub fn cached_tokens(&self) -> u32 {
+        if let Some(details) = &self.prompt_tokens_details
+            && let Some(cached) = details.cached_tokens
+        {
+            return cached;
+        }
+        self.extra
+            .get("prompt_cache_hit_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    }
+
+    /// 缓存未命中的输入 token 数（DeepSeek `prompt_cache_miss_tokens`，可推导）。
+    pub fn cache_miss_tokens(&self) -> u32 {
+        self.extra
+            .get("prompt_cache_miss_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CompatibleCreateChatCompletionStreamResponse {
     #[serde(default)]
@@ -254,7 +299,7 @@ pub struct CompatibleCreateChatCompletionStreamResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<async_openai::types::chat::CompletionUsage>,
+    pub usage: Option<CompatibleCompletionUsage>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -267,6 +312,56 @@ pub struct CompatibleChatChoiceStream {
     pub finish_reason: Option<FinishReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChatChoiceLogprobs>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_deepseek_cache_fields() {
+        let usage: CompatibleCompletionUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,
+                "prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.cached_tokens(), 80);
+        assert_eq!(usage.cache_miss_tokens(), 20);
+    }
+
+    #[test]
+    fn usage_openai_style_details() {
+        let usage: CompatibleCompletionUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,
+                "prompt_tokens_details":{"cached_tokens":64}}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.cached_tokens(), 64);
+        assert_eq!(usage.cache_miss_tokens(), 0);
+    }
+
+    #[test]
+    fn usage_missing_cache_fields_defaults_zero() {
+        let usage: CompatibleCompletionUsage =
+            serde_json::from_str(r#"{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}"#)
+                .unwrap();
+        assert_eq!(usage.cached_tokens(), 0);
+        assert_eq!(usage.cache_miss_tokens(), 0);
+    }
+
+    #[test]
+    fn stream_response_usage_parsed() {
+        let chunk: CompatibleCreateChatCompletionStreamResponse = serde_json::from_str(
+            r#"{"id":"1","choices":[],"created":0,"model":"m","object":"chat.completion.chunk",
+                "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,
+                "prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2}}"#,
+        )
+        .unwrap();
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.cached_tokens(), 8);
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

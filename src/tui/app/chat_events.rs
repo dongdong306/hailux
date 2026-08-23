@@ -169,6 +169,7 @@ impl App {
             CoreEvent::UsageUpdate {
                 prompt_tokens,
                 completion_tokens,
+                ..
             } => {
                 self.set_session_usage(prompt_tokens, completion_tokens);
             }
@@ -179,9 +180,10 @@ impl App {
             } => {
                 if let Some(session_id) = &self.current_session_id {
                     let mut stored = crate::storage::to_stored_message(&msg);
-                    if let Some((pt, ct)) = usage {
-                        stored.prompt_tokens = Some(pt as i64);
-                        stored.completion_tokens = Some(ct as i64);
+                    if let Some(u) = usage {
+                        stored.prompt_tokens = Some(u.prompt_tokens as i64);
+                        stored.completion_tokens = Some(u.completion_tokens as i64);
+                        stored.cached_tokens = Some(u.cached_tokens as i64);
                     }
                     if let Some(ref d) = display {
                         stored.runtime_meta = Some(d.clone());
@@ -423,6 +425,9 @@ impl App {
                     command::Command::Tasks => {
                         self.open_tasks_viewer().await?;
                     }
+                    command::Command::Stats => {
+                        self.open_stats_viewer().await?;
+                    }
                     command::Command::Plan => {
                         self.toggle_plan_mode();
                     }
@@ -524,6 +529,7 @@ impl App {
             reasoning_content: None,
             prompt_tokens: None,
             completion_tokens: None,
+            cached_tokens: None,
             runtime_meta: if self.plan_mode {
                 Some(r#"{"plan_mode":true}"#.to_string())
             } else {
@@ -627,6 +633,7 @@ impl App {
                     reasoning_content: None,
                     prompt_tokens: None,
                     completion_tokens: None,
+                    cached_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,

@@ -6,7 +6,7 @@ import {
   ThreadPrimitive,
   type PartState,
 } from "@assistant-ui/react";
-import { ArrowDown, Check, Copy, Gauge, Terminal } from "lucide-react";
+import { ArrowDown, Check, Copy, Terminal } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { useApp } from "../../store/app-store";
 import { MarkdownText } from "./markdown-text";
@@ -80,41 +80,7 @@ interface TurnMeta {
   status?: string;
 }
 
-/** token 数量格式化：1.2M / 12.3k / 128 */
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
-
-/** 上下文使用情况：当前上下文 token / 模型上下文窗口 */
-function ContextUsage() {
-  const promptTokens = useApp((s) => s.promptTokens);
-  const completionTokens = useApp((s) => s.completionTokens);
-  const contextWindow = useApp((s) => s.contextWindow);
-
-  const used = promptTokens + completionTokens;
-  if (used === 0) return null;
-  const pct =
-    contextWindow > 0 ? Math.min(used / contextWindow, 1) : null;
-
-  return (
-    <span
-      className={cn(
-        "flex items-center gap-1 rounded-md px-1.5 py-0.5 tabular-nums",
-        pct !== null && pct >= 0.8 && "text-warning",
-      )}
-      title="上下文使用情况（最近一轮输入 + 输出 / 上下文窗口）"
-    >
-      <Gauge className="size-3.5" />
-      {contextWindow > 0
-        ? `${fmtTokens(used)} / ${fmtTokens(contextWindow)}${pct !== null ? ` · ${Math.round(pct * 100)}%` : ""}`
-        : fmtTokens(used)}
-    </span>
-  );
-}
-
-/** 最后一条助手消息底部操作栏：复制 + 模型/耗时 + 上下文用量 */
+/** 最后一条助手消息底部操作栏：复制 + 模型/耗时 */
 function AssistantActions({ meta }: { meta?: TurnMeta }) {
   const segments: string[] = [];
   if (meta?.model) segments.push(meta.model);
@@ -149,9 +115,6 @@ function AssistantActions({ meta }: { meta?: TurnMeta }) {
           {segments.join(" · ")}
         </span>
       )}
-      <div className="ml-auto">
-        <ContextUsage />
-      </div>
     </div>
   );
 }

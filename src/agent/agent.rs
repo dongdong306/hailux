@@ -429,7 +429,7 @@ impl AgentStreamState {
 fn emit_persist_message(
     event_tx: &CoreEventTx,
     msg: &SharedMessage,
-    usage: Option<(u32, u32)>,
+    usage: Option<MessageUsage>,
     display: Option<String>,
 ) {
     let _ = event_tx.try_send(CoreEvent::PersistMessage {
@@ -522,7 +522,7 @@ async fn run_stream_loop(
         let mut tool_calls_map: BTreeMap<u32, PartialToolCall> = BTreeMap::new();
         let mut is_tool_call = false;
         let mut stream_cancelled = false;
-        let mut last_usage: Option<(u32, u32)> = None;
+        let mut last_usage: Option<MessageUsage> = None;
 
         loop {
             tokio::select! {
@@ -531,7 +531,11 @@ async fn run_stream_loop(
                         None => break,
                         Some(Ok(chunk)) => {
                             if let Some(usage) = &chunk.usage {
-                                last_usage = Some((usage.prompt_tokens, usage.completion_tokens));
+                                last_usage = Some(MessageUsage {
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                    cached_tokens: usage.cached_tokens(),
+                                });
                             }
                             for choice in chunk.choices {
                                 if let Some(content) = choice.delta.base.content {
@@ -626,14 +630,12 @@ async fn run_stream_loop(
                     .into(),
                 );
                 state.messages.push(Arc::clone(&msg));
-                if let Some((pt, ct)) = last_usage {
-                    all_usages.push(MessageUsage {
-                        prompt_tokens: pt,
-                        completion_tokens: ct,
-                    });
+                if let Some(u) = last_usage {
+                    all_usages.push(u);
                     let _ = event_tx.try_send(CoreEvent::UsageUpdate {
-                        prompt_tokens: pt,
-                        completion_tokens: ct,
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        cached_tokens: u.cached_tokens,
                     });
                 }
                 msg
@@ -666,14 +668,12 @@ async fn run_stream_loop(
                     .into(),
                 );
                 state.messages.push(Arc::clone(&msg));
-                if let Some((pt, ct)) = last_usage {
-                    all_usages.push(MessageUsage {
-                        prompt_tokens: pt,
-                        completion_tokens: ct,
-                    });
+                if let Some(u) = last_usage {
+                    all_usages.push(u);
                     let _ = event_tx.try_send(CoreEvent::UsageUpdate {
-                        prompt_tokens: pt,
-                        completion_tokens: ct,
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        cached_tokens: u.cached_tokens,
                     });
                 }
                 msg

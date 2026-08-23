@@ -622,6 +622,7 @@ impl Tool for TaskTool {
                     reasoning_content: None,
                     prompt_tokens: None,
                     completion_tokens: None,
+                    cached_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,
@@ -653,6 +654,7 @@ impl Tool for TaskTool {
                     reasoning_content: None,
                     prompt_tokens: None,
                     completion_tokens: None,
+                    cached_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,
@@ -719,9 +721,10 @@ impl Tool for TaskTool {
                     } => {
                         // 持久化到 subagent session
                         let mut stored = crate::storage::to_stored_message(&msg);
-                        if let Some((pt, ct)) = usage {
-                            stored.prompt_tokens = Some(pt as i64);
-                            stored.completion_tokens = Some(ct as i64);
+                        if let Some(u) = usage {
+                            stored.prompt_tokens = Some(u.prompt_tokens as i64);
+                            stored.completion_tokens = Some(u.completion_tokens as i64);
+                            stored.cached_tokens = Some(u.cached_tokens as i64);
                         }
                         if let Some(ref d) = display {
                             stored.runtime_meta = Some(d.clone());
@@ -731,6 +734,7 @@ impl Tool for TaskTool {
                     CoreEvent::UsageUpdate {
                         prompt_tokens,
                         completion_tokens,
+                        ..
                     } => {
                         let _ = storage
                             .update_session_usage(

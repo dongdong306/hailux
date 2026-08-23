@@ -78,6 +78,66 @@ pub struct SubsessionSummary {
     pub completion_tokens: i64,
 }
 
+/// 用量汇总（基于 messages 表中带 usage 的 assistant 行 = 一次 LLM 请求）
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageSummary {
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub cached_tokens: i64,
+    pub completion_tokens: i64,
+}
+
+/// 按日聚合的用量
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DailyUsage {
+    /// 日期（YYYY-MM-DD，本地时区）
+    pub date: String,
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub cached_tokens: i64,
+    pub completion_tokens: i64,
+}
+
+/// 按模型聚合的用量
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub cached_tokens: i64,
+    pub completion_tokens: i64,
+}
+
+/// 按项目聚合的用量
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectUsage {
+    pub work_dir: String,
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub cached_tokens: i64,
+    pub completion_tokens: i64,
+}
+
+/// 已知项目（sessions 表 distinct work_dir，最近活跃降序）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkDirInfo {
+    pub work_dir: String,
+    pub sessions: i64,
+    /// 最近活跃时间（该目录下会话的最大 updated_at，ISO 本地时间）
+    pub last_active: String,
+}
+
+/// 最近一次请求的用量明细
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageRecord {
+    pub created_at: String,
+    pub model: String,
+    pub work_dir: String,
+    pub prompt_tokens: i64,
+    pub cached_tokens: i64,
+    pub completion_tokens: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StoredMessage {
     pub role: MessageRole,
@@ -87,6 +147,7 @@ pub struct StoredMessage {
     pub reasoning_content: Option<String>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
     pub runtime_meta: Option<String>,
     pub think_ms: Option<i64>,
     pub compacted: bool,
@@ -381,7 +442,7 @@ impl ChatStorage {
         )
         .bind(&id)
         .bind(model)
-        .bind(work_dir)
+        .bind(ensure_verbatim(work_dir).as_ref())
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -402,7 +463,7 @@ impl ChatStorage {
         )
         .bind(&id)
         .bind(model)
-        .bind(work_dir)
+        .bind(ensure_verbatim(work_dir).as_ref())
         .bind(&now)
         .bind(&now)
         .bind(parent_id)
@@ -414,7 +475,7 @@ impl ChatStorage {
     pub async fn append_message(&self, session_id: &str, msg: &StoredMessage) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query(
-            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(msg.role.as_str())
@@ -424,6 +485,7 @@ impl ChatStorage {
         .bind(&msg.reasoning_content)
         .bind(msg.prompt_tokens)
         .bind(msg.completion_tokens)
+        .bind(msg.cached_tokens)
         .bind(&msg.runtime_meta)
         .bind(msg.think_ms)
         .bind(if msg.compacted { 1 } else { 0 })
@@ -436,7 +498,7 @@ impl ChatStorage {
     /// 执行给定 SQL 查询并将结果映射为 `StoredMessage` 列表。
     /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
     /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
-    ///  prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted`
+    ///  prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted`
     async fn query_messages(
         &self,
         sql: &'static str,
@@ -449,6 +511,7 @@ impl ChatStorage {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<i64>,
             Option<i64>,
             Option<i64>,
             Option<String>,
@@ -471,6 +534,7 @@ impl ChatStorage {
                     reasoning_content,
                     prompt_tokens,
                     completion_tokens,
+                    cached_tokens,
                     runtime_meta,
                     think_ms,
                     compacted,
@@ -486,6 +550,7 @@ impl ChatStorage {
                         reasoning_content,
                         prompt_tokens,
                         completion_tokens,
+                        cached_tokens,
                         runtime_meta,
                         think_ms,
                         compacted: compacted != 0,
@@ -497,7 +562,7 @@ impl ChatStorage {
 
     pub async fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? ORDER BY id ASC",
             session_id,
         )
         .await
@@ -506,7 +571,7 @@ impl ChatStorage {
     /// 加载活跃上下文消息（仅 compacted=0），按 id 升序。
     pub async fn load_active_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
             session_id,
         )
         .await
@@ -645,14 +710,24 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 列出历史会话中出现过的全部工作目录（DISTINCT，按最近使用倒序）
-    pub async fn list_work_dirs(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT work_dir FROM (SELECT work_dir, MAX(updated_at) AS latest FROM sessions GROUP BY work_dir) ORDER BY latest DESC",
+    /// 列出历史会话中出现过的全部工作目录（DISTINCT，按最近使用倒序），
+    /// 附带会话数与最近活跃时间（供项目选择器展示）。
+    pub async fn list_work_dirs(&self) -> Result<Vec<WorkDirInfo>> {
+        let rows = sqlx::query_as::<_, (String, i64, String)>(
+            "SELECT work_dir, COUNT(*), COALESCE(MAX(updated_at), '') \
+             FROM sessions WHERE work_dir != '' \
+             GROUP BY work_dir ORDER BY MAX(updated_at) DESC",
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(d,)| d).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(work_dir, sessions, last_active)| WorkDirInfo {
+                work_dir,
+                sessions,
+                last_active,
+            })
+            .collect())
     }
 
     /// 查询会话归属的工作目录
@@ -721,6 +796,189 @@ impl ChatStorage {
                         created_at,
                         updated_at,
                         prompt_tokens,
+                        completion_tokens,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    // ── 用量统计（基于 messages 表的 assistant usage 行）────────
+
+    /// 统计的时间下限（ISO 本地时间）；days = 0 表示不限。
+    fn usage_cutoff_iso(days: u32) -> String {
+        if days == 0 {
+            String::new()
+        } else {
+            (Local::now() - chrono::Duration::days(days as i64))
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string()
+        }
+    }
+
+    /// 用量统计的公共条件绑定参数（条件片段已内联在各查询的静态 SQL 中，
+    /// 共 5 个占位符：NULL 检查 1 + IN 2 + 空串检查 1 + 日期下限 1）。
+    /// work_dir = None 时首三参绑 NULL（`? IS NULL` 恒真，跳过目录过滤）；
+    /// days = 0 时日期下限绑空串（`? = ''` 恒真，跳过时间过滤）。
+    fn usage_filter_binds(work_dir: Option<&str>, days: u32) -> [Option<String>; 5] {
+        let variants = work_dir.map(work_dir_variants);
+        let cutoff = Self::usage_cutoff_iso(days);
+        [
+            variants.as_ref().map(|v| v[0].clone()),
+            variants.as_ref().map(|v| v[0].clone()),
+            variants.as_ref().map(|v| v[1].clone()),
+            Some(cutoff.clone()),
+            Some(cutoff),
+        ]
+    }
+
+    /// 汇总：请求数 / 输入 / 缓存命中 / 输出 token 累计。
+    pub async fn usage_summary(&self, work_dir: Option<&str>, days: u32) -> Result<UsageSummary> {
+        let binds = Self::usage_filter_binds(work_dir, days);
+        let mut q = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT COUNT(*), COALESCE(SUM(m.prompt_tokens),0), COALESCE(SUM(m.cached_tokens),0), COALESCE(SUM(m.completion_tokens),0) \
+             FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
+             AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?)",
+        );
+        for b in binds {
+            q = q.bind(b);
+        }
+        let (requests, prompt_tokens, cached_tokens, completion_tokens) =
+            q.fetch_one(&self.pool).await?;
+        Ok(UsageSummary {
+            requests,
+            prompt_tokens,
+            cached_tokens,
+            completion_tokens,
+        })
+    }
+
+    /// 按日聚合（本地时区日期），date 升序。
+    pub async fn usage_daily(&self, work_dir: Option<&str>, days: u32) -> Result<Vec<DailyUsage>> {
+        let binds = Self::usage_filter_binds(work_dir, days);
+        let mut q = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            "SELECT substr(m.created_at, 1, 10) AS day, COUNT(*), COALESCE(SUM(m.prompt_tokens),0), COALESCE(SUM(m.cached_tokens),0), COALESCE(SUM(m.completion_tokens),0) \
+             FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
+             AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?) \
+             GROUP BY day ORDER BY day ASC",
+        );
+        for b in binds {
+            q = q.bind(b);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(date, requests, prompt_tokens, cached_tokens, completion_tokens)| DailyUsage {
+                    date,
+                    requests,
+                    prompt_tokens,
+                    cached_tokens,
+                    completion_tokens,
+                },
+            )
+            .collect())
+    }
+
+    /// 按模型聚合（sessions.model），token 降序。
+    pub async fn usage_by_model(
+        &self,
+        work_dir: Option<&str>,
+        days: u32,
+    ) -> Result<Vec<ModelUsage>> {
+        let binds = Self::usage_filter_binds(work_dir, days);
+        let mut q = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            "SELECT s.model, COUNT(*), COALESCE(SUM(m.prompt_tokens),0), COALESCE(SUM(m.cached_tokens),0), COALESCE(SUM(m.completion_tokens),0) \
+             FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
+             AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?) \
+             GROUP BY s.model ORDER BY SUM(m.prompt_tokens) + SUM(m.completion_tokens) DESC",
+        );
+        for b in binds {
+            q = q.bind(b);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(model, requests, prompt_tokens, cached_tokens, completion_tokens)| ModelUsage {
+                    model,
+                    requests,
+                    prompt_tokens,
+                    cached_tokens,
+                    completion_tokens,
+                },
+            )
+            .collect())
+    }
+
+    /// 按项目聚合（sessions.work_dir），token 降序，最多 limit 条。
+    pub async fn usage_by_project(
+        &self,
+        work_dir: Option<&str>,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<ProjectUsage>> {
+        let binds = Self::usage_filter_binds(work_dir, days);
+        let mut q = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            "SELECT s.work_dir, COUNT(*), COALESCE(SUM(m.prompt_tokens),0), COALESCE(SUM(m.cached_tokens),0), COALESCE(SUM(m.completion_tokens),0) \
+             FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
+             AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?) \
+             GROUP BY s.work_dir ORDER BY SUM(m.prompt_tokens) + SUM(m.completion_tokens) DESC \
+             LIMIT ?",
+        );
+        for b in binds {
+            q = q.bind(b);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(work_dir, requests, prompt_tokens, cached_tokens, completion_tokens)| {
+                    ProjectUsage {
+                        work_dir,
+                        requests,
+                        prompt_tokens,
+                        cached_tokens,
+                        completion_tokens,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// 最近请求明细（id 降序，limit 条）。
+    pub async fn list_recent_usage(
+        &self,
+        work_dir: Option<&str>,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<UsageRecord>> {
+        let binds = Self::usage_filter_binds(work_dir, days);
+        let mut q = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
+            "SELECT m.created_at, s.model, s.work_dir, m.prompt_tokens, COALESCE(m.cached_tokens,0), m.completion_tokens \
+             FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
+             AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?) \
+             ORDER BY m.id DESC LIMIT ?",
+        );
+        for b in binds {
+            q = q.bind(b);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(created_at, model, work_dir, prompt_tokens, cached_tokens, completion_tokens)| {
+                    UsageRecord {
+                        created_at,
+                        model,
+                        work_dir,
+                        prompt_tokens,
+                        cached_tokens,
                         completion_tokens,
                     }
                 },
@@ -822,6 +1080,7 @@ impl ChatStorage {
                     reasoning_content: None,
                     prompt_tokens: None,
                     completion_tokens: None,
+                    cached_tokens: None,
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,
@@ -834,8 +1093,24 @@ impl ChatStorage {
     }
 }
 
+/// work_dir 的统一存储形式：Windows 盘符绝对路径补 `\\?\` verbatim 前缀。
+/// 常规链路（session 层 canonicalize、TUI current_work_dir）已产出 verbatim，
+/// 此处兜底归一绕过 canonicalize 的调用点，避免同一目录在
+/// GROUP BY work_dir 的聚合/项目列表中拆成两行。
+/// Unix 路径、UNC（`\\server\...`）、盘符相对路径（`C:foo`）与已带前缀的原样返回。
+fn ensure_verbatim(dir: &str) -> std::borrow::Cow<'_, str> {
+    let b = dir.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        std::borrow::Cow::Owned(format!(r"\\?\{dir}"))
+    } else {
+        std::borrow::Cow::Borrowed(dir)
+    }
+}
+
 /// work_dir 的 DB 匹配变体：原样 + Windows verbatim 前缀形式（去重后至多两个）。
 /// 兼容历史数据中 TUI（带 `\\?\` 前缀）与 Web（剥离前缀）两种写入写法。
+/// 仅 Windows 存在两种写法（见 `ensure_verbatim`）；其他平台原样重复占位。
+#[cfg(windows)]
 fn work_dir_variants(dir: &str) -> [String; 2] {
     let verbatim = if dir.starts_with(r"\\?\") {
         dir.strip_prefix(r"\\?\").unwrap_or(dir).to_string()
@@ -843,6 +1118,11 @@ fn work_dir_variants(dir: &str) -> [String; 2] {
         format!(r"\\?\{}", dir)
     };
     [dir.to_string(), verbatim]
+}
+
+#[cfg(not(windows))]
+fn work_dir_variants(dir: &str) -> [String; 2] {
+    [dir.to_string(), dir.to_string()]
 }
 
 fn extract_user_content(content: &ChatCompletionRequestUserMessageContent) -> String {
@@ -981,6 +1261,7 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
         reasoning_content: compatible_reasoning_content(msg),
         prompt_tokens: None,
         completion_tokens: None,
+        cached_tokens: None,
         runtime_meta: None,
         think_ms: None,
         compacted: false,
@@ -1068,6 +1349,7 @@ mod tests {
             reasoning_content: None,
             prompt_tokens: None,
             completion_tokens: None,
+            cached_tokens: None,
             runtime_meta: None,
             think_ms: None,
             compacted: false,
@@ -1327,6 +1609,132 @@ mod tests {
         let loaded = storage.load_messages(&sid).await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].compacted);
+    }
+
+    #[tokio::test]
+    async fn usage_stats_roundtrip() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let a = storage
+            .create_session("deepseek/chat", "/tmp/proj")
+            .await
+            .unwrap();
+        let b = storage
+            .create_session("glm-4.7", "/tmp/other")
+            .await
+            .unwrap();
+
+        let mut assistant_with_usage = make_message(MessageRole::Assistant, "a1");
+        assistant_with_usage.prompt_tokens = Some(100);
+        assistant_with_usage.completion_tokens = Some(50);
+        assistant_with_usage.cached_tokens = Some(80);
+        storage
+            .append_message(&a, &assistant_with_usage)
+            .await
+            .unwrap();
+
+        let mut assistant2 = make_message(MessageRole::Assistant, "a2");
+        assistant2.prompt_tokens = Some(200);
+        assistant2.completion_tokens = Some(10);
+        assistant2.cached_tokens = Some(0);
+        storage.append_message(&b, &assistant2).await.unwrap();
+
+        // 不带 usage 的消息不计入
+        storage
+            .append_message(&a, &make_message(MessageRole::User, "u"))
+            .await
+            .unwrap();
+
+        // 全局汇总
+        let summary = storage.usage_summary(None, 0).await.unwrap();
+        assert_eq!(summary.requests, 2);
+        assert_eq!(summary.prompt_tokens, 300);
+        assert_eq!(summary.cached_tokens, 80);
+        assert_eq!(summary.completion_tokens, 60);
+
+        // 按项目过滤
+        let proj = storage.usage_summary(Some("/tmp/proj"), 0).await.unwrap();
+        assert_eq!(proj.requests, 1);
+        assert_eq!(proj.prompt_tokens, 100);
+
+        // 按日聚合
+        let daily = storage.usage_daily(None, 0).await.unwrap();
+        assert_eq!(daily.len(), 1);
+        assert_eq!(daily[0].requests, 2);
+
+        // 按模型聚合
+        let by_model = storage.usage_by_model(None, 0).await.unwrap();
+        assert_eq!(by_model.len(), 2);
+        // 210 > 150，glm 在前
+        assert_eq!(by_model[0].model, "glm-4.7");
+        assert_eq!(by_model[0].prompt_tokens, 200);
+
+        // 按项目聚合
+        let by_project = storage.usage_by_project(None, 0, 10).await.unwrap();
+        assert_eq!(by_project.len(), 2);
+        // 210 > 150，/tmp/other 在前
+        assert_eq!(by_project[0].work_dir, "/tmp/other");
+        assert_eq!(by_project[0].prompt_tokens, 200);
+        assert_eq!(by_project[1].work_dir, "/tmp/proj");
+
+        // 最近明细
+        let recent = storage.list_recent_usage(None, 0, 10).await.unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].model, "glm-4.7"); // id 降序
+        assert_eq!(recent[0].work_dir, "/tmp/other");
+
+        // 已知项目列表
+        let dirs = storage.list_work_dirs().await.unwrap();
+        assert_eq!(dirs.len(), 2);
+        let names: Vec<&str> = dirs.iter().map(|d| d.work_dir.as_str()).collect();
+        assert!(names.contains(&"/tmp/proj"));
+        assert!(names.contains(&"/tmp/other"));
+        assert!(dirs.iter().all(|d| d.sessions == 1));
+
+        // verbatim 前缀变体匹配
+        let proj_verbatim = storage
+            .usage_summary(Some(r"\\?\C:\tmp\proj"), 0)
+            .await
+            .unwrap();
+        assert_eq!(proj_verbatim.requests, 0); // 变体不同，不匹配 /tmp/proj
+    }
+
+    #[tokio::test]
+    async fn usage_stats_respects_days_filter() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        let mut assistant = make_message(MessageRole::Assistant, "a");
+        assistant.prompt_tokens = Some(10);
+        assistant.completion_tokens = Some(5);
+        storage.append_message(&sid, &assistant).await.unwrap();
+
+        // days=0 全量可见
+        let all = storage.usage_summary(None, 0).await.unwrap();
+        assert_eq!(all.requests, 1);
+
+        // 旧库中 created_at 已是现在，30 天窗口内可见
+        let recent = storage.usage_summary(None, 30).await.unwrap();
+        assert_eq!(recent.requests, 1);
+    }
+
+    #[test]
+    fn ensure_verbatim_forms() {
+        assert_eq!(ensure_verbatim(r"D:\proj").as_ref(), r"\\?\D:\proj");
+        assert_eq!(ensure_verbatim(r"\\?\D:\proj").as_ref(), r"\\?\D:\proj");
+        assert_eq!(ensure_verbatim("/tmp/proj").as_ref(), "/tmp/proj");
+        assert_eq!(
+            ensure_verbatim(r"\\server\share").as_ref(),
+            r"\\server\share"
+        );
+        assert_eq!(ensure_verbatim("C:relative").as_ref(), "C:relative");
+        assert_eq!(ensure_verbatim("").as_ref(), "");
+    }
+
+    #[tokio::test]
+    async fn create_session_normalizes_work_dir_to_verbatim() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", r"D:\proj").await.unwrap();
+        let dir = storage.get_session_work_dir(&sid).await.unwrap().unwrap();
+        assert_eq!(dir, r"\\?\D:\proj");
     }
 
     #[tokio::test]

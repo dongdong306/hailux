@@ -28,3 +28,10 @@ export function shortDir(dir: string): string {
   const parts = norm.split("/");
   return parts[parts.length - 1] || norm;
 }
+
+/** 紧凑 token 单位：1.2M / 34.5k / 823 */
+export function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}

@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { useApp } from "../store/app-store";
 import type { CommandInfo } from "../runtime/types";
-import { cn } from "../lib/utils";
+import { cn, fmtTokens } from "../lib/utils";
 
 /** 解析光标前输入中的 `@query` 片段；无有效触发时返回 null（query 可为空串） */
 function fileMentionQuery(beforeCursor: string): string | null {
@@ -48,6 +48,49 @@ interface SlashState {
   query: string;
   items: CommandInfo[];
   selected: number;
+}
+
+/** 上下文占用环形指示（16px）：底环 muted + 进度环 accent，中心不留字（数值在旁边） */
+function ContextRing({ pct }: { pct: number | null }) {
+  const r = 6;
+  const c = 2 * Math.PI * r;
+  const ratio = pct === null ? 0 : Math.min(pct, 1);
+  const color =
+    pct === null
+      ? "text-muted-foreground/40"
+      : ratio >= 0.9
+        ? "text-destructive"
+        : ratio >= 0.8
+          ? "text-warning"
+          : "text-meter-cache";
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={cn("size-4 shrink-0 -rotate-90", color)}
+      aria-hidden="true"
+    >
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        strokeWidth="2.5"
+        className="stroke-muted-foreground/20"
+      />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        stroke="currentColor"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - ratio)}
+        style={{ transition: "stroke-dashoffset 0.6s ease" }}
+      />
+    </svg>
+  );
 }
 
 export function ChatInput() {
@@ -83,6 +126,13 @@ export function ChatInput() {
   const yolo = useApp((s) => s.yolo);
   const setYolo = useApp((s) => s.setYolo);
   const commands = useApp((s) => s.commands);
+  // 上下文占用（最后请求的输入+输出 ≈ 当前上下文大小）
+  const contextPromptTokens = useApp((s) => s.contextPromptTokens);
+  const contextCompletionTokens = useApp((s) => s.contextCompletionTokens);
+  const contextWindow = useApp((s) => s.contextWindow);
+  const contextUsed = contextPromptTokens + contextCompletionTokens;
+  const contextPct =
+    contextWindow > 0 ? Math.min(contextUsed / contextWindow, 1) : null;
 
   useEffect(() => {
     if (!escHint) return;
@@ -550,31 +600,47 @@ export function ChatInput() {
               </button>
             </div>
 
-            {/* 发送 / 停止 */}
-            {isRunning ? (
-              <button
-                type="button"
-                title="停止（双击 Esc）"
-                onClick={() => interrupt()}
-                className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-destructive text-white shadow-sm transition-all duration-200 hover:bg-destructive/90 active:scale-95"
-              >
-                {escHint ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <Square className="size-3.5 fill-current" />
+            {/* 右侧：上下文环 + 发送/停止（紧挨） */}
+            <div className="flex shrink-0 items-center gap-1.5">
+              {/* 上下文占用环形指示（常驻）：最后请求的输入+输出（≈当前上下文大小）/ 窗口。
+                  处理中数值是上一轮的，仍保持展示不闪烁 */}
+              {/* 上下文占用环形指示（常驻）：数值收进 tooltip */}
+              <span
+                className={cn(
+                  "flex h-8 cursor-default items-center rounded-lg px-1.5",
+                  isRunning && "opacity-60",
                 )}
-              </button>
-            ) : (
-              <button
-                type="button"
-                title="发送（Enter）"
-                disabled={!text.trim()}
-                onClick={submit}
-                className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95 disabled:cursor-default disabled:opacity-30"
+                title={`上下文占用 ${fmtTokens(contextUsed)}${contextWindow > 0 ? ` / ${fmtTokens(contextWindow)}（${Math.round((contextPct ?? 0) * 100)}%）` : ""}`}
               >
-                <ArrowUp className="size-4" />
-              </button>
-            )}
+                <ContextRing pct={contextPct} />
+              </span>
+
+              {/* 发送 / 停止 */}
+              {isRunning ? (
+                <button
+                  type="button"
+                  title="停止（双击 Esc）"
+                  onClick={() => interrupt()}
+                  className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-destructive text-white shadow-sm transition-all duration-200 hover:bg-destructive/90 active:scale-95"
+                >
+                  {escHint ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Square className="size-3.5 fill-current" />
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  title="发送（Enter）"
+                  disabled={!text.trim()}
+                  onClick={submit}
+                  className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95 disabled:cursor-default disabled:opacity-30"
+                >
+                  <ArrowUp className="size-4" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

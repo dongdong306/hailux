@@ -1,6 +1,7 @@
 // 侧边栏：项目选择（顶部）+ 对话列表（先选项目，再选对话）+ 底部技能/MCP 导航
 import { useState } from "react";
 import {
+  BarChart3,
   ChevronsUpDown,
   Folder,
   MessageSquare,
@@ -222,6 +223,26 @@ export function Sidebar() {
             )}
           />
           MCP 服务器
+        </button>
+        <button
+          type="button"
+          onClick={() => setView(activeView === "stats" ? "chat" : "stats")}
+          className={cn(
+            "flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors",
+            activeView === "stats"
+              ? "bg-primary/[0.08] font-medium text-foreground"
+              : "text-foreground/70 hover:bg-muted/60 hover:text-foreground",
+          )}
+        >
+          <BarChart3
+            className={cn(
+              "size-3.5 shrink-0",
+              activeView === "stats"
+                ? "text-primary"
+                : "text-muted-foreground/70",
+            )}
+          />
+          用量统计
         </button>
         <button
           type="button"

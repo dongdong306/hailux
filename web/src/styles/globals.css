@@ -37,6 +37,11 @@
   --color-card: var(--card);
   /* hailux 语义补充：警示（Plan 模式徽标等） */
   --color-warning: var(--warning);
+  /* token 计量三色（输入 / 缓存命中 / 输出）——统计页与顶栏共用，
+     冷绿进 · 电青省 · 琥珀出，其余界面保持灰阶 */
+  --color-meter-in: var(--meter-in);
+  --color-meter-cache: var(--meter-cache);
+  --color-meter-out: var(--meter-out);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -61,6 +66,9 @@
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --warning: oklch(0.666 0.179 58.44);
+  --meter-in: oklch(0.5 0.11 168);
+  --meter-cache: oklch(0.52 0.1 220);
+  --meter-out: oklch(0.62 0.12 70);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -92,6 +100,9 @@
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --warning: oklch(0.795 0.184 86.047);
+  --meter-in: oklch(0.78 0.12 168);
+  --meter-cache: oklch(0.78 0.11 220);
+  --meter-out: oklch(0.8 0.11 80);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
@@ -168,6 +179,26 @@ body,
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ── token 计量色配套：软 tint 底与“未命中”斜纹纹理 ────────── */
+.hlx-tint-in {
+  background-color: color-mix(in oklab, var(--meter-in) 10%, transparent);
+}
+.hlx-tint-cache {
+  background-color: color-mix(in oklab, var(--meter-cache) 10%, transparent);
+}
+.hlx-tint-out {
+  background-color: color-mix(in oklab, var(--meter-out) 10%, transparent);
+}
+/* 未命中 = 付了全价的输入：输入绿的斜纹，压低存在感但不失归属 */
+.hlx-meter-miss {
+  background-color: color-mix(in oklab, var(--meter-in) 14%, transparent);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--meter-in) 48%, transparent) 0 3px,
+    transparent 3px 6px
+  );
 }
 
 /* diff 行染色（edit 工具 display） */

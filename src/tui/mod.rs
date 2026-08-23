@@ -12,6 +12,7 @@ mod permission_dialog;
 pub mod session_picker;
 mod setup;
 pub mod skills_viewer;
+pub mod stats_viewer;
 pub mod tasks_viewer;
 pub mod terminal;
 

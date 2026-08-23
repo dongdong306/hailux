@@ -399,6 +399,7 @@ mod tests {
             reasoning_content: None,
             prompt_tokens: None,
             completion_tokens: None,
+            cached_tokens: None,
             runtime_meta: None,
             think_ms: None,
             compacted: false,

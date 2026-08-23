@@ -128,7 +128,7 @@ pub async fn chat_handler(
                     thinking_started.get_or_insert_with(Instant::now);
                     yield sse_event(&ServerEvent::AgentReasoningChunk { text });
                 }
-                CoreEvent::UsageUpdate { prompt_tokens, completion_tokens } => {
+                CoreEvent::UsageUpdate { prompt_tokens, completion_tokens, cached_tokens } => {
                     last_prompt = prompt_tokens;
                     last_completion = completion_tokens;
                     let _ = session.storage()
@@ -137,15 +137,17 @@ pub async fn chat_handler(
                     yield sse_event(&ServerEvent::UsageUpdate {
                         prompt_tokens,
                         completion_tokens,
+                        cached_tokens,
                         context_window: resolved.context_window,
                     });
                 }
                 CoreEvent::PersistMessage { msg, usage, display } => {
                     // 持久化（对齐 TUI PersistMessage 处理；不推送给前端）
                     let mut stored = crate::storage::to_stored_message(&msg);
-                    if let Some((pt, ct)) = usage {
-                        stored.prompt_tokens = Some(pt as i64);
-                        stored.completion_tokens = Some(ct as i64);
+                    if let Some(u) = usage {
+                        stored.prompt_tokens = Some(u.prompt_tokens as i64);
+                        stored.completion_tokens = Some(u.completion_tokens as i64);
+                        stored.cached_tokens = Some(u.cached_tokens as i64);
                     }
                     if let Some(d) = display {
                         stored.runtime_meta = Some(d);
@@ -449,6 +451,7 @@ async fn persist_user_message(
         reasoning_content: None,
         prompt_tokens: None,
         completion_tokens: None,
+        cached_tokens: None,
         runtime_meta: None,
         think_ms: None,
         compacted: false,

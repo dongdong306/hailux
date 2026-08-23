@@ -615,6 +615,9 @@ impl App {
             AppState::Tasks { .. } => {
                 self.handle_tasks_event(event).await?;
             }
+            AppState::Stats { .. } => {
+                self.handle_stats_event(event).await?;
+            }
             AppState::TaskDetail { .. } => {
                 self.handle_task_detail_event(event).await?;
             }

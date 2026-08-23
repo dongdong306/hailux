@@ -66,6 +66,7 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         .route("/api/plan-mode", post(set_plan_mode))
         .route("/api/yolo", post(set_yolo))
         .route("/api/commands", get(list_commands))
+        .route("/api/stats", get(get_stats))
 }
 
 // ── 会话管理 ─────────────────────────────────────────────────
@@ -236,8 +237,8 @@ async fn list_workdirs(State(state): State<Arc<WebServerState>>) -> Response {
     match state.manager.list_work_dirs().await {
         Ok(dirs) => Json(
             dirs.into_iter()
-                .map(|path| WorkdirInfo {
-                    path: strip_verbatim(&path),
+                .map(|d| WorkdirInfo {
+                    path: strip_verbatim(&d.work_dir),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1407,6 +1408,69 @@ async fn list_commands(
             }),
     );
     Json(commands).into_response()
+}
+
+// ── 用量统计 ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct StatsQuery {
+    /// 可选项目筛选（空/缺省 = 全局统计）
+    work_dir: Option<String>,
+    /// 统计窗口天数（默认 30；0 = 全部）
+    #[serde(default)]
+    days: Option<u32>,
+    /// 最近请求明细条数（默认 50）
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// token 用量统计（全局或按项目筛选，基于 messages 表的请求级 usage 行）
+async fn get_stats(
+    State(state): State<Arc<WebServerState>>,
+    Query(q): Query<StatsQuery>,
+) -> Response {
+    // work_dir 语义区分：显式传空串/缺省 = 全局；传值 = 该项目
+    let filter = q
+        .work_dir
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    // work_dir=all 保持全局（前端项目筛选器的“全部项目”选项不发该参数）
+    let filter = if filter.as_deref() == Some("all") {
+        None
+    } else {
+        filter
+    };
+    let days = q.days.unwrap_or(30).min(365);
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+
+    let result = async {
+        let storage = state.manager.storage();
+        let summary = storage.usage_summary(filter.as_deref(), days).await?;
+        let total = storage.usage_summary(filter.as_deref(), 0).await?;
+        let daily = storage.usage_daily(filter.as_deref(), days).await?;
+        let by_model = storage.usage_by_model(filter.as_deref(), days).await?;
+        let mut recent = storage
+            .list_recent_usage(filter.as_deref(), days, limit)
+            .await?;
+        // 对齐 /api/workdirs 契约：剥离 DB 中的 verbatim 前缀后再下发
+        for r in &mut recent {
+            r.work_dir = strip_verbatim(&r.work_dir);
+        }
+        Ok::<_, color_eyre::eyre::Report>(super::protocol::StatsResponse {
+            days,
+            summary,
+            total,
+            daily,
+            by_model,
+            recent,
+        })
+    }
+    .await;
+
+    match result {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => err500(e),
+    }
 }
 
 // ── 辅助 ─────────────────────────────────────────────────────
