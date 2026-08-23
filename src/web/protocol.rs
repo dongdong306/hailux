@@ -26,6 +26,7 @@ pub enum ServerEvent {
     UsageUpdate {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cached_tokens: u32,
         /// 模型上下文窗口大小（供前端展示上下文占用比例）
         context_window: u32,
     },
@@ -76,6 +77,23 @@ pub fn status_str(status: &TaskStatus) -> &'static str {
         TaskStatus::Interrupted => "interrupted",
         TaskStatus::Error => "error",
     }
+}
+
+// ── 用量统计（GET /api/stats）────────────────────────────────
+
+/// 用量统计响应：窗口内汇总 + 全量汇总 + 分维度聚合。
+/// 复用 storage 层的 Serialize 结构（UsageSummary/DailyUsage/ModelUsage/UsageRecord）。
+#[derive(Debug, Serialize)]
+pub struct StatsResponse {
+    /// 统计窗口（天；0 = 全部）
+    pub days: u32,
+    /// 窗口内汇总
+    pub summary: crate::storage::UsageSummary,
+    /// 全量汇总（不受 days 限制）
+    pub total: crate::storage::UsageSummary,
+    pub daily: Vec<crate::storage::DailyUsage>,
+    pub by_model: Vec<crate::storage::ModelUsage>,
+    pub recent: Vec<crate::storage::UsageRecord>,
 }
 
 // ── 请求体（前端 → 后端）─────────────────────────────────────

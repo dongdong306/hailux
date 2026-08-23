@@ -43,6 +43,32 @@ impl App {
             return;
         }
 
+        // 用量统计是全屏二级页面，接管整个屏幕（不渲染底下的聊天）
+        if let AppState::Stats {
+            data,
+            selected_index,
+            work_dir,
+            projects,
+            picker_index,
+        } = &self.state
+        {
+            let viewer = crate::tui::stats_viewer::StatsViewer {
+                data,
+                selected_index: *selected_index,
+                work_dir: work_dir.as_deref(),
+                projects,
+                picker_index: *picker_index,
+            };
+            viewer.render(area, frame.buffer_mut());
+            // JediTerm 下 ratatui 的增量 diff 会导致渲染错位，强制全量重绘
+            if self.is_jediterm {
+                for cell in frame.buffer_mut().content.iter_mut() {
+                    cell.diff_option = CellDiffOption::AlwaysUpdate;
+                }
+            }
+            return;
+        }
+
         let input_text = self.input.text().to_string();
         self.input.update_area_width(area.width.saturating_sub(2));
         let (total_visual_rows, cursor_visual_row, cursor_visual_col) =
@@ -130,6 +156,7 @@ impl App {
             | AppState::McpItemDetail { .. }
             | AppState::Tasks { .. }
             | AppState::TaskDetail { .. }
+            | AppState::Stats { .. }
             | AppState::Setup(_) => false,
             AppState::Permission { .. } => false,
             AppState::AskUser { editing_custom, .. } => *editing_custom,

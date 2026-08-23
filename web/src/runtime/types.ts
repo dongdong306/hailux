@@ -8,6 +8,7 @@ export type ServerEvent =
       type: "UsageUpdate";
       prompt_tokens: number;
       completion_tokens: number;
+      cached_tokens: number;
       context_window: number;
     }
   | {
@@ -67,6 +68,7 @@ export interface StoredMessage {
   reasoning_content: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  cached_tokens: number | null;
   runtime_meta: string | null;
   think_ms: number | null;
   compacted: boolean;
@@ -146,4 +148,52 @@ export interface ChatRequest {
   message: string;
   session_id?: string;
   work_dir?: string;
+}
+
+// ── 用量统计（GET /api/stats）────────────────────────────────
+
+/** 用量汇总（基于 messages 表中带 usage 的 assistant 行 = 一次 LLM 请求） */
+export interface UsageSummary {
+  requests: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  completion_tokens: number;
+}
+
+/** 按日聚合的用量 */
+export interface DailyUsage {
+  /** YYYY-MM-DD（本地时区） */
+  date: string;
+  requests: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  completion_tokens: number;
+}
+
+/** 按模型聚合的用量 */
+export interface ModelUsage {
+  model: string;
+  requests: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  completion_tokens: number;
+}
+
+/** 最近一次请求的用量明细 */
+export interface UsageRecord {
+  created_at: string;
+  model: string;
+  work_dir: string;
+  prompt_tokens: number;
+  cached_tokens: number;
+  completion_tokens: number;
+}
+
+export interface StatsResponse {
+  days: number;
+  summary: UsageSummary;
+  total: UsageSummary;
+  daily: DailyUsage[];
+  by_model: ModelUsage[];
+  recent: UsageRecord[];
 }

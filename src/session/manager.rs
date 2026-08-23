@@ -157,8 +157,8 @@ impl SessionManager {
         }
     }
 
-    /// 列出历史会话中出现过的全部工作目录（sessions 表 DISTINCT）
-    pub async fn list_work_dirs(&self) -> Result<Vec<String>> {
+    /// 列出历史会话中出现过的全部工作目录（sessions 表 DISTINCT，含会话数/最近活跃）
+    pub async fn list_work_dirs(&self) -> Result<Vec<crate::storage::WorkDirInfo>> {
         self.storage.list_work_dirs().await
     }
 

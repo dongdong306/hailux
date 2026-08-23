@@ -12,10 +12,11 @@ use crate::agent::models::SharedMessage;
 use crate::permission::{PermissionReply, PermissionRequest};
 use tokio::sync::{mpsc, oneshot};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct MessageUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    pub cached_tokens: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -57,10 +58,11 @@ pub enum CoreEvent {
     UsageUpdate {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cached_tokens: u32,
     },
     PersistMessage {
         msg: SharedMessage,
-        usage: Option<(u32, u32)>,
+        usage: Option<MessageUsage>,
         display: Option<String>,
     },
     ToolCallStart {

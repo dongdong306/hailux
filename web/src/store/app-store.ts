@@ -9,6 +9,7 @@ import type {
   QuestionInfo,
   ServerEvent,
   SessionInfo,
+  StatsResponse,
 } from "../runtime/types";
 import { getJson, postJson, postSse, type SseSession } from "../runtime/sse-client";
 
@@ -63,8 +64,8 @@ export interface SkillEntry {
   files: SkillFileEntry[];
 }
 
-/** 主区域视图：聊天 / 技能管理 / MCP 管理 / 设置 */
-export type ActiveView = "chat" | "skills" | "mcp" | "settings";
+/** 主区域视图：聊天 / 技能管理 / MCP 管理 / 用量统计 / 设置 */
+export type ActiveView = "chat" | "skills" | "mcp" | "stats" | "settings";
 
 /** JSON Schema 片段（工具参数 schema / 子属性） */
 export interface JsonSchemaNode {
@@ -129,8 +130,16 @@ interface AppState {
   isRunning: boolean;
   /** 本轮请求计时起点（epoch ms），完成后由 done 行展示后端耗时 */
   runStartedAt: number | null;
+  /** 本会话累计输入 token（当前 session 全部 LLM 请求之和；顶栏展示） */
   promptTokens: number;
+  /** 本会话累计输出 token */
   completionTokens: number;
+  /** 本会话累计缓存命中 token（顶栏展示） */
+  cachedTokens: number;
+  /** 最后一次请求的输入 token（≈ 当前上下文大小；消息底部上下文计量用） */
+  contextPromptTokens: number;
+  /** 最后一次请求的输出 token */
+  contextCompletionTokens: number;
   /** 模型上下文窗口大小（token）；0 = 未知 */
   contextWindow: number;
   // 模式
@@ -165,6 +174,14 @@ interface AppState {
   mcpServers: McpServerEntry[];
   /** MCP 列表加载失败信息（面板内展示 + 重试） */
   mcpError: string | null;
+  // 用量统计
+  stats: StatsResponse | null;
+  /** 统计的项目筛选（"" = 全部项目） */
+  statsFilter: string;
+  /** 统计窗口天数 */
+  statsDays: number;
+  statsLoading: boolean;
+  statsError: string | null;
   // 中断提示（双击 Esc 语义）
   escHint: boolean;
 
@@ -204,6 +221,10 @@ interface AppState {
   createMcpServer: (input: McpServerInput) => Promise<void>;
   updateMcpServer: (name: string, input: McpServerInput) => Promise<void>;
   deleteMcpServer: (name: string) => Promise<void>;
+  /** 拉取用量统计（statsFilter/statsDays 为当前筛选） */
+  loadStats: () => Promise<void>;
+  setStatsFilter: (dir: string) => void;
+  setStatsDays: (days: number) => void;
   newSession: (workDir?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
@@ -234,6 +255,9 @@ export const useApp = create<AppState>((set, get) => ({
   runStartedAt: null,
   promptTokens: 0,
   completionTokens: 0,
+  cachedTokens: 0,
+  contextPromptTokens: 0,
+  contextCompletionTokens: 0,
   contextWindow: 0,
   planMode: false,
   yolo: false,
@@ -253,6 +277,11 @@ export const useApp = create<AppState>((set, get) => ({
   skillsError: null,
   mcpServers: [],
   mcpError: null,
+  stats: null,
+  statsFilter: "",
+  statsDays: 30,
+  statsLoading: false,
+  statsError: null,
   escHint: false,
   sse: null,
 
@@ -341,11 +370,15 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  /** 切换主区域视图；进入 skills/mcp/settings 时刷新对应列表（错误写入 xxxError，不阻止切换） */
+  /** 切换主区域视图；进入 skills/mcp/stats/settings 时刷新对应列表（错误写入 xxxError，不阻止切换） */
   setView(view) {
     set({ activeView: view });
     if (view === "skills") get().reloadSkills().catch(() => {});
     if (view === "mcp") get().reloadMcp().catch(() => {});
+    if (view === "stats") {
+      get().loadWorkdirs().catch(() => {});
+      get().loadStats().catch(() => {});
+    }
     if (view === "settings") {
       get().loadModels().catch(() => {});
       get().loadProviders().catch(() => {});
@@ -456,6 +489,38 @@ export const useApp = create<AppState>((set, get) => ({
     await get().reloadMcp();
   },
 
+  async loadStats() {
+    const { statsFilter, statsDays } = get();
+    set({ statsLoading: true, statsError: null });
+    try {
+      const params = new URLSearchParams();
+      if (statsFilter) params.set("work_dir", statsFilter);
+      // 无条件发送：days=0（全部时间）是 falsy，条件发送会被后端默认 30 天覆盖
+      params.set("days", String(statsDays));
+      const qs = params.toString();
+      const stats = await getJson<StatsResponse>(
+        `/api/stats${qs ? `?${qs}` : ""}`,
+      );
+      set({ stats, statsLoading: false });
+    } catch (e) {
+      set({
+        stats: null,
+        statsLoading: false,
+        statsError: e instanceof Error ? e.message : String(e),
+      });
+    }
+  },
+
+  setStatsFilter(dir) {
+    set({ statsFilter: dir });
+    get().loadStats().catch(() => {});
+  },
+
+  setStatsDays(days) {
+    set({ statsDays: days });
+    get().loadStats().catch(() => {});
+  },
+
   async newSession(workDir) {
     const dir = workDir ?? get().workDir;
     const resp = await postJson("/api/sessions", { work_dir: dir || undefined });
@@ -468,6 +533,9 @@ export const useApp = create<AppState>((set, get) => ({
         runStartedAt: null,
         promptTokens: 0,
         completionTokens: 0,
+        cachedTokens: 0,
+        contextPromptTokens: 0,
+        contextCompletionTokens: 0,
         workDir: session.work_dir,
         showWorkdirPicker: false,
       });
@@ -565,15 +633,20 @@ export const useApp = create<AppState>((set, get) => ({
     }
     // 会话携带其所属工作目录 —— 切换会话即切换目录上下文
     const target = get().sessions.find((s) => s.id === id);
-    // 从历史 usage 恢复上下文用量（最后一条带 usage 的消息）
+    // 恢复“本会话累计”口径：全部带 usage 的 assistant 行求和（顶栏展示）
+    // 同时记录最后一条带 usage 的行，作为上下文占用的近似（最后请求的输入+输出）
     let promptTokens = 0;
     let completionTokens = 0;
-    for (let i = detail.messages.length - 1; i >= 0; i--) {
-      const m = detail.messages[i]!;
+    let cachedTokens = 0;
+    let contextPromptTokens = 0;
+    let contextCompletionTokens = 0;
+    for (const m of detail.messages) {
       if (m.prompt_tokens !== null) {
-        promptTokens = m.prompt_tokens;
-        completionTokens = m.completion_tokens ?? 0;
-        break;
+        promptTokens += m.prompt_tokens;
+        completionTokens += m.completion_tokens ?? 0;
+        cachedTokens += m.cached_tokens ?? 0;
+        contextPromptTokens = m.prompt_tokens;
+        contextCompletionTokens = m.completion_tokens ?? 0;
       }
     }
     set({
@@ -584,6 +657,9 @@ export const useApp = create<AppState>((set, get) => ({
       workDir: target?.work_dir ?? get().workDir,
       promptTokens,
       completionTokens,
+      cachedTokens,
+      contextPromptTokens,
+      contextCompletionTokens,
     });
   },
 
@@ -598,6 +674,9 @@ export const useApp = create<AppState>((set, get) => ({
         runStartedAt: null,
         promptTokens: 0,
         completionTokens: 0,
+        cachedTokens: 0,
+        contextPromptTokens: 0,
+        contextCompletionTokens: 0,
       });
     }
     await get().loadSessions();
@@ -613,6 +692,7 @@ export const useApp = create<AppState>((set, get) => ({
 
     // 本地立刻显示用户消息 + 记录输入历史 + 启动本地请求计时
     // （完成后由 done 行展示后端返回的 total_ms）
+    // 顶栏计量 = 本会话累计：跨对话轮持续累加；context 字段保留旧值直到首个 UsageUpdate
     set((s) => ({
       isRunning: true,
       runStartedAt: Date.now(),
@@ -689,11 +769,15 @@ export const useApp = create<AppState>((set, get) => ({
           });
           break;
         case "UsageUpdate":
-          set({
-            promptTokens: event.prompt_tokens,
-            completionTokens: event.completion_tokens,
-            contextWindow: event.context_window || get().contextWindow,
-          });
+          // 会话累计（顶栏）+ 记录最后请求（消息底部上下文占用近似）
+          set((s) => ({
+            promptTokens: s.promptTokens + event.prompt_tokens,
+            completionTokens: s.completionTokens + event.completion_tokens,
+            cachedTokens: s.cachedTokens + event.cached_tokens,
+            contextPromptTokens: event.prompt_tokens,
+            contextCompletionTokens: event.completion_tokens,
+            contextWindow: event.context_window || s.contextWindow,
+          }));
           break;
         case "PermissionRequest":
           set({
@@ -918,6 +1002,9 @@ export const useApp = create<AppState>((set, get) => ({
       sse: null,
       promptTokens: 0,
       completionTokens: 0,
+      cachedTokens: 0,
+      contextPromptTokens: 0,
+      contextCompletionTokens: 0,
       showWorkdirPicker: false,
     });
     try {

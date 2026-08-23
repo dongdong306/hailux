@@ -1,6 +1,12 @@
 // 根组件：wendao ChatPage 同构布局 —— 可折叠侧边栏 + 顶部工具栏 + 对话区
 import { useEffect, useState } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, PanelLeft, PanelLeftClose } from "lucide-react";
+import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Database,
+  PanelLeft,
+  PanelLeftClose,
+} from "lucide-react";
 import { useApp } from "./store/app-store";
 import { HailuxRuntimeProvider } from "./runtime/hailux-runtime";
 import { Sidebar } from "./components/sidebar";
@@ -15,7 +21,8 @@ import {
 import { AddModelDialog, SettingsView } from "./components/settings-view";
 import { SkillsManager } from "./components/skills-manager";
 import { McpManager } from "./components/mcp-manager";
-import { cn } from "./lib/utils";
+import { StatsView } from "./components/stats-view";
+import { cn, fmtTokens } from "./lib/utils";
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -24,8 +31,12 @@ export default function App() {
   const activeView = useApp((s) => s.activeView);
   const promptTokens = useApp((s) => s.promptTokens);
   const completionTokens = useApp((s) => s.completionTokens);
+  const cachedTokens = useApp((s) => s.cachedTokens);
   // 提问 requestId 变化时通过 key 强制重挂载 AskUserDialog，内部状态零残留
   const askRequestId = useApp((s) => s.askUser?.requestId);
+  // 本次对话累计的缓存命中率
+  const hitRate =
+    promptTokens > 0 ? (cachedTokens / promptTokens) * 100 : 0;
 
   useEffect(() => {
     // 启动：初始化项目目录（上次访问 > 服务器默认目录）并拉取该项目会话
@@ -87,24 +98,42 @@ export default function App() {
               hailux
             </span>
 
-            {/* token 用量（右上角） */}
+            {/* token 用量（右上角）——本会话累计；图标用计量三色，数值保持灰阶 */}
             <span className="ml-auto flex items-center gap-2.5 pr-1 text-xs tabular-nums text-muted-foreground/60">
-              <span className="flex items-center gap-0.5" title="输入 token">
-                <ArrowUpFromLine className="size-3" />
-                {promptTokens.toLocaleString()}
+              <span
+                className="flex items-center gap-0.5"
+                title={`本会话累计输入 ${promptTokens.toLocaleString()} token`}
+              >
+                <ArrowUpFromLine className="size-3 text-meter-in/80" />
+                {fmtTokens(promptTokens)}
               </span>
-              <span className="flex items-center gap-0.5" title="输出 token">
-                <ArrowDownToLine className="size-3" />
-                {completionTokens.toLocaleString()}
+              <span
+                className="flex items-center gap-0.5"
+                title={`本会话累计缓存命中 ${cachedTokens.toLocaleString()} token · 输入 ${promptTokens.toLocaleString()} · 命中率 ${hitRate.toFixed(1)}%`}
+              >
+                <Database className="size-3 text-meter-cache/80" />
+                {fmtTokens(cachedTokens)}
+                {promptTokens > 0 && (
+                  <span className="text-meter-cache/90">({hitRate.toFixed(1)}%)</span>
+                )}
+              </span>
+              <span
+                className="flex items-center gap-0.5"
+                title={`本会话累计输出 ${completionTokens.toLocaleString()} token`}
+              >
+                <ArrowDownToLine className="size-3 text-meter-out/80" />
+                {fmtTokens(completionTokens)}
               </span>
             </span>
           </div>
 
-          {/* 主区域：聊天 / 技能管理 / MCP 管理 / 设置（内联切换） */}
+          {/* 主区域：聊天 / 技能管理 / MCP 管理 / 用量统计 / 设置（内联切换） */}
           {activeView === "skills" ? (
             <SkillsManager />
           ) : activeView === "mcp" ? (
             <McpManager />
+          ) : activeView === "stats" ? (
+            <StatsView />
           ) : activeView === "settings" ? (
             <SettingsView />
           ) : (

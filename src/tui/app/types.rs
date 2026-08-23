@@ -100,6 +100,16 @@ pub(crate) enum AppState {
         selected_index: usize,
         entries: Vec<TaskEntry>,
     },
+    Stats {
+        data: crate::tui::stats_viewer::StatsData,
+        selected_index: usize,
+        /// 项目筛选；None = 全部项目
+        work_dir: Option<String>,
+        /// 已知项目列表（供项目选择器）
+        projects: Vec<crate::storage::WorkDirInfo>,
+        /// 项目选择器打开时的选中项（0 = 全部项目，i = projects[i-1]）
+        picker_index: Option<usize>,
+    },
     TaskDetail {
         task_index: usize,
         scroll_offset: usize,
