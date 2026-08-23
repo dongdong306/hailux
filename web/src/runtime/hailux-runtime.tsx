@@ -19,6 +19,8 @@ export interface SystemRow {
   text: string;
   tone?: "info" | "warn" | "danger" | "success";
   detail?: string;
+  /** 压缩进行中（spinner 状态行，完成后替换为完成标记） */
+  spinning?: boolean;
 }
 
 /** 助手消息自定义元数据（思考分段计时 / 本轮结束信息） */
@@ -101,6 +103,7 @@ function foldKind(kind: ChatItem["kind"]): "part" | "backfill" | "boundary" {
     case "notice":
     case "error":
     case "compact-marker":
+    case "compacting":
       return "boundary";
   }
 }
@@ -313,7 +316,7 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
         break;
       }
       case "boundary": {
-        // user / notice / error / compact-marker：结束当前 acc，各产出一条非助手消息
+        // user / notice / error / compact-marker / compacting：结束当前 acc，各产出一条非助手消息
         flush();
         if (item.kind === "user") {
           messages.push({
@@ -327,7 +330,14 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
               ? { kind: "error", text: item.text ?? "", tone: "danger" }
               : item.kind === "notice"
                 ? { kind: "notice", text: item.text ?? "", tone: "info" }
-                : { kind: "compact", text: item.text ?? "", tone: "info" };
+                : item.kind === "compacting"
+                  ? {
+                      kind: "compact",
+                      text: item.text ?? "",
+                      tone: "info",
+                      spinning: true,
+                    }
+                  : { kind: "compact", text: item.text ?? "", tone: "info" };
           messages.push({
             role: "assistant",
             id: `s-${messages.length}`,

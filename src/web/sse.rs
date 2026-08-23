@@ -117,6 +117,8 @@ pub async fn chat_handler(
 
         let mut last_prompt: u32 = 0;
         let mut last_completion: u32 = 0;
+        // 自动压缩起始时间（CompactComplete 时计算耗时）
+        let mut compact_started = Instant::now();
 
         while let Some(event) = core_rx.recv().await {
             match event {
@@ -218,7 +220,8 @@ pub async fn chat_handler(
                         &mut session, &core_tx, &session_id,
                         last_prompt + last_completion, resolved.context_window, compact_threshold,
                     ).await {
-                        yield sse_event(&ServerEvent::Notice {
+                        compact_started = Instant::now();
+                        yield sse_event(&ServerEvent::CompactStart {
                             text: format!(
                                 "上下文 token 已达 {}%，自动压缩",
                                 (compact_threshold * 100.0) as u32
@@ -228,28 +231,32 @@ pub async fn chat_handler(
                         break;
                     }
                 }
-                CoreEvent::CompactChunk(text) => {
-                    yield sse_event(&ServerEvent::CompactChunk { text });
+                CoreEvent::CompactChunk(_) => {
+                    // 对齐 TUI：摘要流仅用于驱动状态动画，不展示内容
                 }
                 CoreEvent::CompactComplete { summary, session_id: compact_sid, usage } => {
                     let compacted_count = session.storage()
                         .count_active_messages(&compact_sid).await.unwrap_or(0) as usize;
                     let _ = session.storage().mark_messages_compacted(&compact_sid).await;
                     let _ = session.storage().set_compact_summary(&compact_sid, &summary).await;
+                    // 压缩后上下文估算（对齐 TUI：context_prompt - compact_prompt + compact_completion）
+                    let mut context_tokens: Option<u32> = None;
                     if compact_sid == session_id {
                         session.apply_compaction_result(&summary);
                         if let Some(u) = usage {
                             let estimated = last_prompt
                                 .saturating_sub(u.prompt_tokens)
                                 .saturating_add(u.completion_tokens);
+                            context_tokens = Some(estimated);
                             let _ = session.storage()
                                 .update_session_usage(&session_id, estimated as i64, 0)
                                 .await;
                         }
                     }
                     yield sse_event(&ServerEvent::CompactComplete {
-                        summary_chars: summary.chars().count(),
                         compacted_count,
+                        total_ms: compact_started.elapsed().as_millis() as u64,
+                        context_tokens,
                     });
                     break;
                 }
@@ -302,7 +309,10 @@ pub async fn compact_handler(
             return;
         }
 
-        yield sse_event(&ServerEvent::Notice { text: "正在压缩上下文...".to_string() });
+        // 对齐 TUI compact_conversation：先落一条压缩状态行（CompactStreaming），
+        // 摘要流不展示，完成后整条替换为完成标记
+        let compact_started = Instant::now();
+        yield sse_event(&ServerEvent::CompactStart { text: "正在压缩上下文...".to_string() });
         if let Err(e) = session.request_compaction(core_tx.clone(), requested_session_id.clone()) {
             yield sse_event(&ServerEvent::Error { message: e.to_string() });
             return;
@@ -310,14 +320,16 @@ pub async fn compact_handler(
 
         while let Some(event) = core_rx.recv().await {
             match event {
-                CoreEvent::CompactChunk(text) => {
-                    yield sse_event(&ServerEvent::CompactChunk { text });
+                CoreEvent::CompactChunk(_) => {
+                    // 对齐 TUI：摘要流仅用于驱动状态动画，不展示内容
                 }
                 CoreEvent::CompactComplete { summary, session_id: sid, usage } => {
                     let compacted_count = session.storage()
                         .count_active_messages(&sid).await.unwrap_or(0) as usize;
                     let _ = session.storage().mark_messages_compacted(&sid).await;
                     let _ = session.storage().set_compact_summary(&sid, &summary).await;
+                    // 压缩后上下文估算（对齐 TUI：session_prompt - compact_prompt + compact_completion）
+                    let mut context_tokens: Option<u32> = None;
                     if sid == requested_session_id {
                         session.apply_compaction_result(&summary);
                         // 依据压缩请求自身的 usage 修正会话用量估算
@@ -328,6 +340,7 @@ pub async fn compact_handler(
                             let estimated = (pt as u32)
                                 .saturating_sub(u.prompt_tokens)
                                 .saturating_add(u.completion_tokens);
+                            context_tokens = Some(estimated);
                             let _ = session
                                 .storage()
                                 .update_session_usage(&sid, estimated as i64, 0)
@@ -335,8 +348,9 @@ pub async fn compact_handler(
                         }
                     }
                     yield sse_event(&ServerEvent::CompactComplete {
-                        summary_chars: summary.chars().count(),
                         compacted_count,
+                        total_ms: compact_started.elapsed().as_millis() as u64,
+                        context_tokens,
                     });
                     break;
                 }

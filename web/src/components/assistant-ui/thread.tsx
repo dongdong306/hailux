@@ -6,7 +6,7 @@ import {
   ThreadPrimitive,
   type PartState,
 } from "@assistant-ui/react";
-import { ArrowDown, Check, Copy, Gauge, Terminal } from "lucide-react";
+import { ArrowDown, Check, Copy, Gauge, Loader2, Terminal } from "lucide-react";
 import { cn, fmtTokens } from "../../lib/utils";
 import { useApp } from "../../store/app-store";
 import { MarkdownText } from "./markdown-text";
@@ -64,6 +64,7 @@ function SystemRowView({ row }: { row: SystemRow }) {
     return (
       <div className="my-4 flex items-center gap-3 text-xs text-muted-foreground/50">
         <span className="h-px flex-1 bg-border" />
+        {row.spinning && <Loader2 className="size-3 animate-spin" />}
         <span className="whitespace-nowrap">{row.text}</span>
         <span className="h-px flex-1 bg-border" />
       </div>

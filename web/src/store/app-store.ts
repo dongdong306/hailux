@@ -1,5 +1,5 @@
 // 应用状态：会话/消息/权限请求/模式（Zustand）
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import type {
   ChatRequest,
   CommandInfo,
@@ -24,6 +24,7 @@ export interface ChatItem {
     | "tool-result"
     | "notice"
     | "compact-marker"
+    | "compacting"
     | "done"
     | "error";
   text?: string;
@@ -119,6 +120,77 @@ export interface McpServerInput {
 async function readError(resp: Response): Promise<string> {
   const text = await resp.text().catch(() => "");
   return text || `HTTP ${resp.status}`;
+}
+
+/** 压缩完成标记文本（对齐 TUI CompactMarker：条数 + 耗时；历史恢复无耗时仅条数） */
+function compactMarkerText(count: number, totalMs?: number): string {
+  const secs =
+    totalMs !== undefined && totalMs > 0
+      ? ` · ${Math.max(1, Math.round(totalMs / 1000))}s`
+      : "";
+  return `已压缩 ${count} 条消息${secs}`;
+}
+
+/** 共享 items 操作：push 追加 / patchLast 原地替换末条 */
+function itemOps(
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"],
+) {
+  const items = get().items;
+  const push = (item: ChatItem) => set((s) => ({ items: [...s.items, item] }));
+  const patchLast = (patch: (item: ChatItem) => ChatItem) => {
+    if (items.length === 0) return;
+    set((s) => ({
+      items: [...s.items.slice(0, -1), patch(s.items[s.items.length - 1]!)],
+    }));
+  };
+  return { items, push, patchLast };
+}
+
+type ItemOps = ReturnType<typeof itemOps>;
+
+/** chat / compact 流共享事件分支（Notice / 压缩三事件）；返回 true 表示已消费 */
+function handleSharedEvent(
+  event: ServerEvent,
+  ops: ItemOps,
+  set: StoreApi<AppState>["setState"],
+): boolean {
+  switch (event.type) {
+    case "Notice":
+      ops.push({ kind: "notice", text: event.text });
+      return true;
+    case "CompactStart":
+      // 对齐 TUI：压缩中只保留一条状态行，摘要流不展示
+      ops.push({ kind: "compacting", text: event.text });
+      return true;
+    case "CompactComplete":
+      // 对齐 TUI：状态行整条替换为完成标记（条数 + 耗时）
+      ops.patchLast(() => ({
+        kind: "compact-marker",
+        text: compactMarkerText(event.compacted_count, event.total_ms),
+      }));
+      // 对齐 TUI set_session_usage(estimated, 0)：立即刷新上下文计量
+      // （仅上下文字段；顶栏累计口径不受压缩影响）
+      if (event.context_tokens != null) {
+        set({
+          contextPromptTokens: event.context_tokens,
+          contextCompletionTokens: 0,
+        });
+      }
+      return true;
+    case "Error": {
+      // 压缩中状态行原地替换为错误（对齐 TUI CompactError 替换语义），其余场景照常追加
+      const errItem: ChatItem = { kind: "error", text: event.message };
+      if (ops.items[ops.items.length - 1]?.kind === "compacting") {
+        ops.patchLast(() => errItem);
+      } else {
+        ops.push(errItem);
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
 }
 
 interface AppState {
@@ -552,9 +624,10 @@ export const useApp = create<AppState>((set, get) => ({
       compact_summary?: string;
     }>(`/api/sessions/${id}`);
     const items: ChatItem[] = [];
-    if (detail.compact_summary) {
-      items.push({ kind: "compact-marker", text: detail.compact_summary });
-    }
+    // 对齐 TUI load_session_messages：压缩摘要不展示，仅在 compacted/未 compacted
+    // 边界插入一条完成分隔线（全部已压缩时补在末尾）
+    const hasSummary = Boolean(detail.compact_summary);
+    let compactMarkerInserted = false;
     // Tool 消息的 runtime_meta 仅识别新格式 diff 展示数据（format: "diff"）；
     // 旧格式 {old,new} 存量数据显示 result 文本，计时 JSON（无 format 字段）同样排除
     const toolResults = new Map<string, { result: string; display?: string }>();
@@ -576,7 +649,18 @@ export const useApp = create<AppState>((set, get) => ({
         toolResults.set(msg.tool_call_id, { result: msg.content, display });
       }
     }
-    for (const msg of detail.messages) {
+    for (let idx = 0; idx < detail.messages.length; idx++) {
+      const msg = detail.messages[idx]!;
+      if (
+        !compactMarkerInserted &&
+        hasSummary &&
+        idx > 0 &&
+        detail.messages[idx - 1]!.compacted &&
+        !msg.compacted
+      ) {
+        items.push({ kind: "compact-marker", text: compactMarkerText(idx) });
+        compactMarkerInserted = true;
+      }
       if (msg.role === "User") {
         items.push({ kind: "user", text: msg.content });
         turnCtx = null;
@@ -644,6 +728,18 @@ export const useApp = create<AppState>((set, get) => ({
           }
         }
       }
+    }
+    // 全部消息已压缩（压缩后未再对话）：对齐 TUI，末尾补插分隔线
+    if (
+      !compactMarkerInserted &&
+      hasSummary &&
+      detail.messages.length > 0 &&
+      detail.messages.every((m) => m.compacted)
+    ) {
+      items.push({
+        kind: "compact-marker",
+        text: compactMarkerText(detail.messages.length),
+      });
     }
     // 会话携带其所属工作目录 —— 切换会话即切换目录上下文
     const target = get().sessions.find((s) => s.id === id);
@@ -719,17 +815,9 @@ export const useApp = create<AppState>((set, get) => ({
     let turnCtx: { prompt: number; completion: number } | null = null;
 
     const handleEvent = (event: ServerEvent) => {
-      const items = get().items;
-      const push = (item: ChatItem) => set((s) => ({ items: [...s.items, item] }));
-      const patchLast = (patch: (item: ChatItem) => ChatItem) => {
-        if (items.length === 0) return;
-        set((s) => ({
-          items: [
-            ...s.items.slice(0, -1),
-            patch(s.items[s.items.length - 1]!),
-          ],
-        }));
-      };
+      const ops = itemOps(get, set);
+      const { items, push, patchLast } = ops;
+      if (handleSharedEvent(event, ops, set)) return;
       // 思考→输出/工具调用切换：冻结思考计时（对齐 TUI finalize_thinking_ms）
       const freezeThinking = () => {
         const last = items[items.length - 1];
@@ -821,18 +909,6 @@ export const useApp = create<AppState>((set, get) => ({
             },
           });
           break;
-        case "Notice":
-          push({ kind: "notice", text: event.text });
-          break;
-        case "CompactChunk":
-          push({ kind: "notice", text: event.text });
-          break;
-        case "CompactComplete":
-          push({
-            kind: "compact-marker",
-            text: `已压缩 ${event.compacted_count} 条消息`,
-          });
-          break;
         case "AgentComplete": {
           // ctx 依赖事件顺序：后端保证 UsageUpdate 先于 AgentComplete；
           // 本轮无任何 usage（如首个请求即失败）时 ctx 为 null → 不展示上下文占用
@@ -851,9 +927,6 @@ export const useApp = create<AppState>((set, get) => ({
           });
           break;
         }
-        case "Error":
-          push({ kind: "error", text: event.message });
-          break;
       }
     };
 
@@ -898,21 +971,9 @@ export const useApp = create<AppState>((set, get) => ({
     set({ isRunning: true, runStartedAt: Date.now() });
 
     const handleEvent = (event: ServerEvent) => {
+      const ops = itemOps(get, set);
+      if (handleSharedEvent(event, ops, set)) return;
       switch (event.type) {
-        case "Notice":
-        case "CompactChunk":
-          set((s) => ({
-            items: [...s.items, { kind: "notice", text: event.text }],
-          }));
-          break;
-        case "CompactComplete":
-          set((s) => ({
-            items: [
-              ...s.items,
-              { kind: "compact-marker", text: `已压缩 ${event.compacted_count} 条消息` },
-            ],
-          }));
-          break;
         case "PermissionRequest":
           set({
             permission: {
@@ -927,11 +988,6 @@ export const useApp = create<AppState>((set, get) => ({
           set({
             askUser: { requestId: event.request_id, questions: event.questions },
           });
-          break;
-        case "Error":
-          set((s) => ({
-            items: [...s.items, { kind: "error", text: event.message }],
-          }));
           break;
       }
     };
