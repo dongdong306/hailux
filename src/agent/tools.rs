@@ -475,6 +475,51 @@ fn windows_shell_program() -> &'static str {
     })
 }
 
+/// 探测当前 Windows shell 的版本描述（如 "PowerShell 7.4.6 (pwsh.exe)"），
+/// 注入 bash 工具提示词的 {SHELL_DESC} 占位符。进程内缓存、只探测一次；
+/// 启动进程失败时按 shell 程序名回退到主版本静态描述。
+#[cfg(windows)]
+fn windows_shell_description() -> String {
+    let shell = windows_shell_program();
+    let (prefix, note) = if shell == "pwsh.exe" {
+        ("PowerShell", "")
+    } else {
+        (
+            "Windows PowerShell",
+            "; note: && / || pipeline chains, ternary ?: and the ?? operator are not available in 5.1",
+        )
+    };
+    let version = std::process::Command::new(shell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$PSVersionTable.PSVersion.ToString()",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| decode_output(&o.stdout).trim().to_string())
+        .filter(|v| !v.is_empty());
+    match version {
+        Some(v) => format!("{prefix} {v} ({shell}{note})"),
+        None => {
+            let fallback = if shell == "pwsh.exe" { "7+" } else { "5.1" };
+            format!("{prefix} {fallback} ({shell}{note})")
+        }
+    }
+}
+
+/// 后台预热 shell 版本描述缓存，避免首次构建工具 schema 时
+/// 同步等待 shell 探测进程（约数百毫秒）。
+#[cfg(windows)]
+pub fn prewarm_shell_description() {
+    std::thread::spawn(|| {
+        let _ = BashTool.description();
+    });
+}
+
 pub struct BashTool;
 
 impl Tool for BashTool {
@@ -516,6 +561,15 @@ impl Tool for BashTool {
         })
     }
 
+    #[cfg(windows)]
+    fn description(&self) -> &str {
+        static DESC: OnceLock<String> = OnceLock::new();
+        DESC.get_or_init(|| {
+            crate::prompts::tools::BASH.replace("{SHELL_DESC}", &windows_shell_description())
+        })
+    }
+
+    #[cfg(not(windows))]
     fn description(&self) -> &str {
         crate::prompts::tools::BASH
     }
@@ -2034,6 +2088,16 @@ mod tests {
         // PATH 探测不 panic，且返回两个候选之一
         let shell = windows_shell_program();
         assert!(shell == "pwsh.exe" || shell == "powershell.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bash_description_injects_shell_description() {
+        let desc = BashTool.description();
+        // 占位符已被替换为带版本号的 shell 描述
+        assert!(!desc.contains("{SHELL_DESC}"));
+        assert!(desc.contains("PowerShell"));
+        assert!(desc.contains("(pwsh.exe") || desc.contains("(powershell.exe"));
     }
 
     #[cfg(windows)]

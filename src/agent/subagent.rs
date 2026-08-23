@@ -295,7 +295,6 @@ pub struct TaskTool {
     work_dir: String,
     current_session_id: Arc<Mutex<Option<String>>>,
     mcp_backends: SharedMcpBackends,
-    description_cache: String,
     config: SharedConfig,
     /// 主会话的事件通道句柄，用于将 subagent 的工具调用过程实时转发到聊天区
     main_event_hub: crate::agent::event::EventHub,
@@ -319,14 +318,6 @@ impl TaskTool {
         main_event_hub: crate::agent::event::EventHub,
         permission: crate::permission::PermissionManager,
     ) -> Self {
-        let names: Vec<&str> = subagents.iter().map(|s| s.name.as_str()).collect();
-        let agents_list = if names.is_empty() {
-            "(none)".to_string()
-        } else {
-            names.join(", ")
-        };
-        let description_cache =
-            crate::prompts::TASK_TOOL_TEMPLATE.replace("{agents_list}", &agents_list);
         Self {
             subagents,
             skills,
@@ -337,7 +328,6 @@ impl TaskTool {
             work_dir,
             current_session_id,
             mcp_backends,
-            description_cache,
             config,
             main_event_hub,
             permission,
@@ -463,7 +453,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        &self.description_cache
+        crate::prompts::TASK_TOOL_TEMPLATE
     }
 
     fn parameters(&self) -> Value {
@@ -585,7 +575,6 @@ impl Tool for TaskTool {
                     work_dir: work_dir.clone(),
                     current_session_id: current_session_id.clone(),
                     mcp_backends: mcp_backends.clone(),
-                    description_cache: String::new(),
                     config: app_config.clone(),
                     main_event_hub: main_event_hub.clone(),
                     permission: self.permission.clone(),
@@ -672,7 +661,6 @@ impl Tool for TaskTool {
                     work_dir: work_dir.clone(),
                     current_session_id: current_session_id.clone(),
                     mcp_backends: mcp_backends.clone(),
-                    description_cache: String::new(),
                     config: app_config.clone(),
                     main_event_hub: main_event_hub.clone(),
                     permission: self.permission.clone(),

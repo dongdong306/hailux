@@ -18,6 +18,8 @@ pub use event::{CoreEvent, CoreEventRx, CoreEventTx, create_core_event_channel};
 pub use skill::SkillTool;
 #[allow(unused_imports)]
 pub use subagent::{SubagentConfig, TaskTool};
+#[cfg(windows)]
+pub use tools::prewarm_shell_description;
 pub use tools::{
     AskTool, BashTool, EditTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, Tool,
     ToolExecuteError, WebFetchTool, WriteTool,
