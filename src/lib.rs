@@ -90,6 +90,8 @@ pub fn build_agent_base(
         pm,
         &work_dir.display().to_string(),
     );
+    #[cfg(windows)]
+    crate::agent::prewarm_shell_description();
     agent.register_tool(Box::new(BashTool));
     agent.register_tool(Box::new(ReadTool));
     agent.register_tool(Box::new(EditTool));

@@ -47,9 +47,8 @@ pub fn build_system_prompt(
             prompt.push_str("\n\n");
             prompt.push_str(&available);
             prompt.push_str(
-                "\n\nLoad a specialized skill when the task at hand matches one of the skills listed above. \
-                 Use the `skill` tool (passing the skill `name`) to load its full instructions and base directory, \
-                 then use `read`/`glob` to load any referenced scripts or files.",
+                "\n\nLoad a specialized skill when the task matches one listed above: call the `skill` tool (passing the skill `name`) to load its full instructions, \
+                  then use `read`/`glob` for any referenced scripts or files.",
             );
         }
     }
@@ -69,9 +68,7 @@ pub fn build_system_prompt(
             prompt.push_str(&available);
             prompt.push_str(
                 "\n\nUse the `task` tool to delegate complex, multi-step work to a subagent listed above. \
-                 Pass the subagent `name`, a short `description`, and a detailed `prompt` with all necessary context. \
-                 The subagent runs autonomously in its own session and returns only the final result. \
-                 You can also manually invoke a subagent by typing `@subagent: <name> <task>` in the input.",
+                  You can also manually invoke one by typing `@subagent: <name> <task>` in the input.",
             );
         }
     }
