@@ -40,8 +40,15 @@ export type ServerEvent =
       questions: QuestionInfo[];
     }
   | { type: "Notice"; text: string }
-  | { type: "CompactChunk"; text: string }
-  | { type: "CompactComplete"; summary_chars: number; compacted_count: number }
+  | { type: "CompactStart"; text: string }
+  | {
+      type: "CompactComplete";
+      compacted_count: number;
+      /** 压缩耗时（ms） */
+      total_ms: number;
+      /** 压缩后上下文 token 估算（无 usage 数据时缺省，前端跳过上下文计量更新） */
+      context_tokens?: number;
+    }
   | { type: "Error"; message: string };
 
 export interface QuestionOption {

@@ -60,16 +60,22 @@ pub enum ServerEvent {
         request_id: String,
         questions: Vec<QuestionInfo>,
     },
-    /// 会话内信息性提示（如压缩开始）
+    /// 会话内信息性提示
     Notice {
         text: String,
     },
-    CompactChunk {
+    /// 压缩开始（对应 TUI 的 CompactStreaming 状态行）
+    CompactStart {
         text: String,
     },
     CompactComplete {
-        summary_chars: usize,
         compacted_count: usize,
+        /// 压缩耗时（ms）
+        total_ms: u64,
+        /// 压缩后上下文 token 估算（对齐 TUI set_session_usage(estimated, 0)；
+        /// 无 usage 数据时为 None，前端跳过上下文计量更新）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_tokens: Option<u32>,
     },
     Error {
         message: String,
