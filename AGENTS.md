@@ -147,9 +147,11 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
 
 ## Key Quirks
 
-- **Platform**: Primarily developed on Windows. `BashTool` runs `powershell.exe` on Windows
-  and `bash -c` on Unix; the `workdir` parameter only exists on non-Windows. Windows adds a
-  `crossterm_winapi` dependency and different paste-detection timing constants.
+- **Platform**: Primarily developed on Windows. `BashTool` prefers `pwsh.exe` (PowerShell 7+)
+  on Windows, falling back to `powershell.exe` (5.1); and `bash -c` on Unix; the `workdir`
+  parameter only exists on non-Windows. Windows commands are wrapped with a UTF-8 prologue
+  (`WINDOWS_UTF8_PROLOGUE` in `agent/tools.rs`) to force UTF-8 on both pipe directions.
+  Windows adds a `crossterm_winapi` dependency and different paste-detection timing constants.
 - **Web is loopback-only by default** (`127.0.0.1`). Work-dir selection means the server can
   read any local directory — exposing `0.0.0.0` is an explicit trust decision (documented in `web/mod.rs`).
 - **ask_user reply contract** (4 implementations must stay in lockstep): TUI submits
