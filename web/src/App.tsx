@@ -58,6 +58,22 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [initWorkDir, loadModels]);
 
+  useEffect(() => {
+    // 页面重新可见时对账全局模式（防止标签页挂起期间其他入口改过 YOLO/Plan）。
+    // 只处理「隐藏 → 可见」转换：初始可见事件与 initWorkDir 的对账重叠，跳过
+    let wasHidden = document.visibilityState === "hidden";
+    const onVisible = () => {
+      const visible = document.visibilityState === "visible";
+      if (visible && wasHidden) {
+        useApp.getState().syncMode();
+      }
+      wasHidden = document.visibilityState === "hidden";
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () =>
+      document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+
   return (
     <HailuxRuntimeProvider>
       <div className="flex h-dvh overflow-hidden bg-background">

@@ -50,6 +50,12 @@ pub async fn chat_handler(
         let mut session = session_arc.lock().await;
         session.bind_event_channel(core_tx.clone());
 
+        // 模式对账：YOLO/Plan 为服务器级全局状态，广播时持锁中的会话会被
+        // 跳过（见 SessionManager::set_global_plan），每次请求入口同步兜底，
+        // 同时覆盖 invalidate 重建、历史漂移等场景。
+        session.set_yolo(state.manager.global_yolo());
+        session.set_plan_mode(state.manager.global_plan());
+
         // ── prompt 型斜杠命令展开（/init、自定义命令）────────
         // UI 型命令（/compact 等）由前端拦截，不经过此接口。
         // 对齐 TUI：展开后的完整提示词用于持久化与发送。

@@ -299,6 +299,22 @@ impl ChatSession {
         self.agent.permission().toggle_yolo()
     }
 
+    /// 绝对设置 YOLO 模式（Web 全局模式广播用，非 toggle 语义）
+    pub fn set_yolo(&self, on: bool) {
+        let mode = if on {
+            crate::permission::PermissionMode::Yolo
+        } else {
+            crate::permission::PermissionMode::Normal
+        };
+        self.agent.permission().set_mode(mode);
+    }
+
+    /// 权限管理器共享句柄（SessionManager 注册广播通道用；
+    /// TaskTool 等内部已共享同一实例，广播对 subagent 同步生效）
+    pub fn permission_manager(&self) -> crate::permission::PermissionManager {
+        self.agent.permission().clone()
+    }
+
     pub fn switch_model(&mut self, resolved: &config::ResolvedModel) {
         self.agent.switch_model(
             resolved.config.clone(),

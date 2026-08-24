@@ -15,9 +15,10 @@ use crate::permission::PermissionReply;
 use super::protocol::{
     AskReplyBody, CommandInfoDto, CreateMcpServerRequest, CreateModelRequest, CreateSessionRequest,
     CreateSkillRequest, DeleteMcpServerRequest, DeleteModelRequest, DeleteProviderRequest,
-    DeleteSkillRequest, InterruptRequest, McpServerInfo, ModelInfo, PermissionReplyBody,
-    PlanModeRequest, ProviderInfoDto, SessionInfo, SkillInfoDto, SwitchModelRequest,
-    UpdateMcpServerRequest, UpdateSkillRequest, ValidateWorkdirRequest, WorkdirInfo, YoloRequest,
+    DeleteSkillRequest, InterruptRequest, McpServerInfo, ModeStatus, ModelInfo,
+    PermissionReplyBody, PlanModeRequest, ProviderInfoDto, SessionInfo, SkillInfoDto,
+    SwitchModelRequest, UpdateMcpServerRequest, UpdateSkillRequest, ValidateWorkdirRequest,
+    WorkdirInfo, YoloRequest,
 };
 use super::sse;
 use super::state::WebServerState;
@@ -64,6 +65,7 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         )
         .route("/api/plan-mode", post(set_plan_mode))
         .route("/api/yolo", post(set_yolo))
+        .route("/api/mode", get(get_mode))
         .route("/api/commands", get(list_commands))
         .route("/api/stats", get(get_stats))
 }
@@ -1302,36 +1304,37 @@ async fn delete_mcp_server(
 
 // ── 模式 ─────────────────────────────────────────────────────
 
+fn mode_status(state: &WebServerState) -> ModeStatus {
+    ModeStatus {
+        yolo: state.manager.global_yolo(),
+        plan_mode: state.manager.global_plan(),
+    }
+}
+
+/// 当前全局模式（对账用）。仅读原子标志，不触碰会话锁，
+/// SSE 流长时间持锁时也能即时返回。
+async fn get_mode(State(state): State<Arc<WebServerState>>) -> Response {
+    Json(mode_status(&state)).into_response()
+}
+
+/// YOLO / Plan 为服务器级全局模式（跨 work_dir、跨会话保持）：
+/// 广播即时生效（YOLO 绕过会话锁）。旧客户端携带的 `work_dir` 字段
+/// 会被 serde 忽略（未知字段默认跳过）。返回设置后的最终状态，
+/// 前端以其为准（不做本地猜测）。
 async fn set_plan_mode(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<PlanModeRequest>,
 ) -> Response {
-    let dir = resolve_dir(&state, req.work_dir.as_deref());
-    let session_arc = match state.manager.get_or_create(&dir).await {
-        Ok(s) => s,
-        Err(e) => return err500(e),
-    };
-    let mut session = session_arc.lock().await;
-    session.set_plan_mode(req.enabled);
-    StatusCode::OK.into_response()
+    state.manager.set_global_plan(req.enabled);
+    Json(mode_status(&state)).into_response()
 }
 
 async fn set_yolo(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<YoloRequest>,
 ) -> Response {
-    let dir = resolve_dir(&state, req.work_dir.as_deref());
-    let session_arc = match state.manager.get_or_create(&dir).await {
-        Ok(s) => s,
-        Err(e) => return err500(e),
-    };
-    let session = session_arc.lock().await;
-    let mode = session.toggle_yolo();
-    // toggle 语义：请求 enabled=false 且当前已是非 YOLO → 再切一次回到 Normal
-    if (mode == crate::permission::PermissionMode::Yolo) != req.enabled {
-        session.toggle_yolo();
-    }
-    StatusCode::OK.into_response()
+    state.manager.set_global_yolo(req.enabled);
+    Json(mode_status(&state)).into_response()
 }
 
 // ── 斜杠命令 ─────────────────────────────────────────────────

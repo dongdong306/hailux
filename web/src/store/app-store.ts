@@ -46,6 +46,13 @@ export interface ChatItem {
 /** localStorage：上次访问的项目目录 key */
 const LAST_WORKDIR_KEY = "hailux.lastWorkDir";
 
+/** 全局模式状态（GET /api/mode 及 yolo/plan-mode 设置响应体）。
+ *  后端契约：src/web/protocol.rs 的 `ModeStatus` */
+export interface ModeStatus {
+  yolo: boolean;
+  plan_mode: boolean;
+}
+
 /** 技能目录内文件条目 */
 export interface SkillFileEntry {
   /** 相对技能目录的路径（`/` 分隔） */
@@ -311,6 +318,8 @@ interface AppState {
   replyAsk: (answer: string) => Promise<void>;
   setPlanMode: (on: boolean) => Promise<void>;
   setYolo: (on: boolean) => Promise<void>;
+  /** 从服务器对账全局模式（yolo / planMode），失败静默（下次时机重试） */
+  syncMode: () => Promise<void>;
   switchModel: (selector: string) => Promise<void>;
   /** show=true 打开添加模型弹窗；preset 为预填项（provider / 模型 id） */
   setAddModel: (show: boolean, preset?: { provider: string; modelId?: string } | null) => void;
@@ -375,6 +384,8 @@ export const useApp = create<AppState>((set, get) => ({
     set({ workDir: dir });
     await get().loadSessions();
     get().loadCommands().catch(() => {});
+    // 页面加载/刷新后从服务器恢复真实模式（全局模式与 work_dir 无关）
+    await get().syncMode();
   },
 
   async loadSessions() {
@@ -947,6 +958,8 @@ export const useApp = create<AppState>((set, get) => ({
       if (get().sse === sse) {
         set({ isRunning: false, sse: null, runStartedAt: null });
         get().loadSessions().catch(() => {});
+        // 每轮对话结束后低成本对账（兜底运行期间的任何模式漂移）
+        get().syncMode();
       }
     }
   },
@@ -1033,18 +1046,39 @@ export const useApp = create<AppState>((set, get) => ({
 
   async setPlanMode(on) {
     set({ planMode: on });
-    await postJson("/api/plan-mode", {
-      enabled: on,
-      work_dir: get().workDir || undefined,
-    });
+    try {
+      const resp = await postJson("/api/plan-mode", { enabled: on });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      // 以后端返回的最终状态为准（不依赖本地猜测）
+      const mode = (await resp.json()) as ModeStatus;
+      set({ yolo: mode.yolo, planMode: mode.plan_mode });
+    } catch {
+      // 回滚乐观值；请求可能已到达服务器，syncMode 对账真实状态
+      set({ planMode: !on });
+      get().syncMode();
+    }
   },
 
   async setYolo(on) {
     set({ yolo: on });
-    await postJson("/api/yolo", {
-      enabled: on,
-      work_dir: get().workDir || undefined,
-    });
+    try {
+      const resp = await postJson("/api/yolo", { enabled: on });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const mode = (await resp.json()) as ModeStatus;
+      set({ yolo: mode.yolo, planMode: mode.plan_mode });
+    } catch {
+      set({ yolo: !on });
+      get().syncMode();
+    }
+  },
+
+  async syncMode() {
+    try {
+      const mode = await getJson<ModeStatus>("/api/mode");
+      set({ yolo: mode.yolo, planMode: mode.plan_mode });
+    } catch {
+      // 静默失败：下次对账时机（对话结束 / 页面可见 / 切项目）重试
+    }
   },
 
   async switchModel(selector) {
@@ -1098,6 +1132,8 @@ export const useApp = create<AppState>((set, get) => ({
     }
     await get().loadSessions();
     get().loadCommands().catch(() => {});
+    // 切项目后对账全局模式（模式跨项目保持，由服务器保证一致）
+    get().syncMode();
   },
 
   setWorkdirPicker(show) {
