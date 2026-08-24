@@ -451,8 +451,10 @@ pub(crate) fn plan_mode_bash_denial(arguments: &str) -> Option<String> {
     }
 }
 
-/// Windows shell 程序选择：优先 PowerShell 7+（pwsh.exe，管道输出默认 UTF-8），
-/// 未安装时回退 powershell.exe（GBK 输出由 decode_output 兜底还原）。
+/// Windows shell 程序选择：优先 PowerShell 7+（pwsh.exe），未安装时回退
+/// powershell.exe。注意：pwsh 7 仅修复 PS→原生命令方向（$OutputEncoding 默认
+/// UTF-8）；native→PS 解码仍按 [Console]::OutputEncoding（默认系统 GBK），
+/// 因此两个版本都需要 WINDOWS_UTF8_PROLOGUE 强制双向 UTF-8。
 /// 探测结果进程内缓存，只查 PATH 中文件是否存在、不额外起进程。
 #[cfg(windows)]
 fn windows_shell_program() -> &'static str {
@@ -490,13 +492,9 @@ fn windows_shell_description() -> String {
         )
     };
     let version = std::process::Command::new(shell)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
+        .args(windows_shell_command_args(
             "$PSVersionTable.PSVersion.ToString()",
-        ])
+        ))
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -509,6 +507,36 @@ fn windows_shell_description() -> String {
             format!("{prefix} {fallback} ({shell}{note})")
         }
     }
+}
+
+/// Windows 命令的 UTF-8 编码 prologue。powershell.exe 在中文 Windows 上按 GBK
+/// 解码原生命令的管道输出，再把自身管道输出重编码为 GBK —— 双重转码不可逆地
+/// 破坏非 GBK 字符（node/cargo 的 UTF-8 中文、✓ 等），事后任何解码启发式都无法还原。
+/// 从源头强制双向 UTF-8：
+/// - `[Console]::OutputEncoding`：PS 读取原生命令输出与自身输出均改按 UTF-8；
+/// - `$OutputEncoding`：修复反方向（PS 字符串传给原生命令，5.1 默认 ASCII 会把中文变 `?`）；
+/// - UTF8Encoding($false)：BOM-less，避免重定向输出头部多出 BOM 字节；
+/// - try/catch：个别宿主环境禁止修改控制台编码，失败不阻塞后续命令。
+///
+/// 注入发生在执行层：权限 / plan-mode / 展示仍基于原始命令，不受前缀污染。
+#[cfg(windows)]
+const WINDOWS_UTF8_PROLOGUE: &str = "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding } catch { }; ";
+
+#[cfg(windows)]
+fn wrap_windows_command(command: &str) -> String {
+    format!("{WINDOWS_UTF8_PROLOGUE}{command}")
+}
+
+/// 组装 Windows shell 调用参数（含 UTF-8 prologue），执行与测试共用同一路径。
+#[cfg(windows)]
+fn windows_shell_command_args(command: &str) -> Vec<String> {
+    vec![
+        "-NoLogo".to_string(),
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-Command".to_string(),
+        wrap_windows_command(command),
+    ]
 }
 
 /// 后台预热 shell 版本描述缓存，避免首次构建工具 schema 时
@@ -618,13 +646,7 @@ impl Tool for BashTool {
         };
         let workdir = args["workdir"].as_str().map(|s| s.to_string());
         let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
-        let cmd_args = vec![
-            "-NoLogo".to_string(),
-            "-NoProfile".to_string(),
-            "-NonInteractive".to_string(),
-            "-Command".to_string(),
-            command,
-        ];
+        let cmd_args = windows_shell_command_args(&command);
         Box::pin(run_shell_command(
             windows_shell_program(),
             cmd_args,
@@ -2092,6 +2114,38 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn wrap_windows_command_injects_prologue() {
+        let raw = "npm run build 2>&1 | Select-Object -Last 15";
+        let wrapped = wrap_windows_command(raw);
+        assert!(wrapped.starts_with("try {"), "missing try guard: {wrapped}");
+        assert!(wrapped.contains("[Console]::OutputEncoding"), "{wrapped}");
+        assert!(wrapped.contains("$OutputEncoding"), "{wrapped}");
+        assert!(
+            wrapped.ends_with(raw),
+            "user command must come last: {wrapped}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bash_utf8_prologue_preserves_unicode_output() {
+        // 回归：中文 Windows 上 PS 5.1 以 GBK 双重转码原生命令输出，
+        // 非 GBK 字符（✓）在 PS 层即被替换为 '?'，GBK 启发式解码无法还原。
+        // prologue 强制 UTF-8 后中文与特殊符号必须原样保留。
+        let out = run_shell_command(
+            windows_shell_program(),
+            windows_shell_command_args("Write-Output '中文✓'"),
+            None,
+            Some(30),
+        )
+        .await
+        .expect("shell run");
+        assert!(out.contains("中文"), "missing CJK text: {out}");
+        assert!(out.contains('✓'), "mojibake regression: {out}");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bash_description_injects_shell_description() {
         let desc = BashTool.description();
         // 占位符已被替换为带版本号的 shell 描述
@@ -2103,14 +2157,8 @@ mod tests {
     #[cfg(windows)]
     fn slow_output_command() -> (&'static str, Vec<String>) {
         (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "Write-Output 'partial-hello'; Start-Sleep -Seconds 30".to_string(),
-            ],
+            windows_shell_program(),
+            windows_shell_command_args("Write-Output 'partial-hello'; Start-Sleep -Seconds 30"),
         )
     }
 
@@ -2142,14 +2190,8 @@ mod tests {
         // 正常完成路径行为不变：无超时标记、输出完整
         #[cfg(windows)]
         let (program, args) = (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "Write-Output 'quick-hello'".to_string(),
-            ],
+            windows_shell_program(),
+            windows_shell_command_args("Write-Output 'quick-hello'"),
         );
         #[cfg(not(windows))]
         let (program, args) = (
@@ -2169,16 +2211,11 @@ mod tests {
         // 旧实现 wait_with_output 死等 EOF → 挂满超时；新实现以进程退出为准 + 限时排空。
         #[cfg(windows)]
         let (program, args) = (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                // cmd 立即退出，ping 继承管道写端并存活 30s
-                "Write-Output 'grand-child-test'; cmd /c \"start /b ping -n 30 127.0.0.1\""
-                    .to_string(),
-            ],
+            windows_shell_program(),
+            // cmd 立即退出，ping 继承管道写端并存活 30s
+            windows_shell_command_args(
+                "Write-Output 'grand-child-test'; cmd /c \"start /b ping -n 30 127.0.0.1\"",
+            ),
         );
         #[cfg(not(windows))]
         let (program, args) = (
@@ -2233,14 +2270,10 @@ mod tests {
         // 失败命令：退出码非 0 → 合并 stdout 与 stderr（combine_output 路径）
         #[cfg(windows)]
         let (program, args) = (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "Write-Output 'out-part'; [Console]::Error.Write('err-part'); exit 3".to_string(),
-            ],
+            windows_shell_program(),
+            windows_shell_command_args(
+                "Write-Output 'out-part'; [Console]::Error.Write('err-part'); exit 3",
+            ),
         );
         #[cfg(not(windows))]
         let (program, args) = (
@@ -2262,14 +2295,8 @@ mod tests {
         // 超过 10000 字符 → 截断标记 + 保留前 10000 字符
         #[cfg(windows)]
         let (program, args) = (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "Write-Output ('x'*12000)".to_string(),
-            ],
+            windows_shell_program(),
+            windows_shell_command_args("Write-Output ('x'*12000)"),
         );
         #[cfg(not(windows))]
         let (program, args) = (
@@ -2297,14 +2324,8 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         #[cfg(windows)]
         let (program, args) = (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "Get-Location".to_string(),
-            ],
+            windows_shell_program(),
+            windows_shell_command_args("Get-Location"),
         );
         #[cfg(not(windows))]
         let (program, args) = ("bash", vec!["-c".to_string(), "pwd".to_string()]);
@@ -2323,14 +2344,8 @@ mod tests {
         // 超时且无任何输出 → 仅返回超时标记，不携带空 body
         #[cfg(windows)]
         let (program, args) = (
-            "powershell.exe",
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "Start-Sleep -Seconds 30".to_string(),
-            ],
+            windows_shell_program(),
+            windows_shell_command_args("Start-Sleep -Seconds 30"),
         );
         #[cfg(not(windows))]
         let (program, args) = ("bash", vec!["-c".to_string(), "sleep 30".to_string()]);

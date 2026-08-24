@@ -16,6 +16,9 @@ Usage notes:
   - Use ; only when you need to run commands sequentially and don't care if earlier commands fail
   - Do not use newlines to separate commands (newlines can be used within quoted strings)
 - You can set a command timeout via the timeout parameter (in seconds). After timeout, the process will be terminated and a timeout message will be returned
+- Output encoding is already forced to UTF-8 by the runtime; never manually prepend `[Console]::OutputEncoding = ...`, `chcp`, or `$OutputEncoding` boilerplate
+- A few legacy system tools (e.g. ping, ipconfig, netstat) emit localized text in the legacy ANSI code page, which may appear garbled under forced UTF-8. This is expected: don't try to fix encoding; if the text matters, prefer an English/ASCII alternative (e.g. `ping -n 3 127.0.0.1`, `git status`), or extract only the ASCII parts (numbers, IPs, statuses) you need
+- If you must read/write files via PowerShell (avoid — prefer the read/write tools), always pass `-Encoding utf8` (Get-Content / Out-File / Set-Content); note PS 5.1 writes a BOM — prefer dedicated tools for source files
 
 # Git Operations
 
