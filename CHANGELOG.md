@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/dongdong306/hailux/compare/v0.8.1...v0.9.0) (2026-08-24)
+
+
+### Improvements
+
+* add token usage statistics for TUI and Web ([473e269](https://github.com/dongdong306/hailux/commit/473e26932a4abd080230205f9325974da4c66681))
+* support concurrent subagents in task tool ([b56a0d5](https://github.com/dongdong306/hailux/commit/b56a0d5ad7da579f914e6ced1fdcbc827cc5f1da))
+* **web:** add model provider management in settings view ([f5ed97a](https://github.com/dongdong306/hailux/commit/f5ed97ac90202fefd5be804ddef8eea26d7f421b))
+* **web:** add turn navigation rail on chat thread right edge ([0754b48](https://github.com/dongdong306/hailux/commit/0754b485beb8aace3a752805165247a8623ea6fe))
+* **web:** align compaction flow with TUI behavior ([42e4799](https://github.com/dongdong306/hailux/commit/42e47996ae76e7924e394e637f0a04d46819e560))
+* **web:** make yolo/plan mode server-level global state ([5c1e64f](https://github.com/dongdong306/hailux/commit/5c1e64ff97a52f6d9695db373cdbd0b742b0c6e0))
+* **web:** per-turn context usage and refined tool call titles ([f5eff2a](https://github.com/dongdong306/hailux/commit/f5eff2aa7de1549fe17711587cfd3e2fbfd66f56))
+
+
+### Bugfixes
+
+* **bash:** force bidirectional UTF-8 for Windows shell commands ([2c765fa](https://github.com/dongdong306/hailux/commit/2c765fa1daa96f2c60cf46ca6beddb9871c57baf))
+
+
+### Performance
+
+* **prompts:** slim down system and tool prompts to reduce token usage ([fcc10aa](https://github.com/dongdong306/hailux/commit/fcc10aa629d905e54b7a0f16dad24ce3adc038b4))
+
+
+### Documentation
+
+* update READMEs and align AGENTS.md architecture notes with code ([31e2cb2](https://github.com/dongdong306/hailux/commit/31e2cb2685b66a5d036afb6550c800706da7fbb6))
+
 ## [0.8.1](https://github.com/dongdong306/hailux/compare/v0.8.0...v0.8.1) (2026-08-18)
 
 
