@@ -148,13 +148,19 @@ pub struct CompactRequest {
 #[derive(Debug, Deserialize)]
 pub struct PlanModeRequest {
     pub enabled: bool,
-    pub work_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct YoloRequest {
     pub enabled: bool,
-    pub work_dir: Option<String>,
+}
+
+/// 全局模式状态（`GET /api/mode` 及 yolo/plan-mode 设置响应体）。
+/// 前端契约：`web/src/store/app-store.ts` 的 `ModeStatus` 接口。
+#[derive(Debug, Serialize)]
+pub struct ModeStatus {
+    pub yolo: bool,
+    pub plan_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
