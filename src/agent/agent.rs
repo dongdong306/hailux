@@ -47,7 +47,10 @@ pub struct Agent {
     client: Client<OpenAIConfig>,
     tool_registry: ToolRegistry,
     messages: Vec<SharedMessage>,
+    /// API 请求使用的模型 ID（如 `deepseek-chat`）
     model: String,
+    /// 展示用模型名（`provider/model`，与用量统计口径一致）
+    model_display: String,
     max_tokens: u32,
     plan_mode: bool,
     cancel: Arc<AtomicBool>,
@@ -60,6 +63,7 @@ impl Agent {
     pub fn new(
         config: OpenAIConfig,
         model: &str,
+        model_display: &str,
         max_tokens: u32,
         permission: PermissionManager,
         work_dir: &str,
@@ -69,6 +73,7 @@ impl Agent {
             tool_registry: ToolRegistry::new(),
             messages: Vec::new(),
             model: model.to_string(),
+            model_display: model_display.to_string(),
             max_tokens,
             plan_mode: false,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -103,9 +108,16 @@ impl Agent {
         self.plan_mode
     }
 
-    pub fn switch_model(&mut self, config: OpenAIConfig, model: &str, max_tokens: u32) {
+    pub fn switch_model(
+        &mut self,
+        config: OpenAIConfig,
+        model: &str,
+        model_display: &str,
+        max_tokens: u32,
+    ) {
         self.client = Client::with_config(config);
         self.model = model.to_string();
+        self.model_display = model_display.to_string();
         self.max_tokens = max_tokens;
     }
 
@@ -187,6 +199,7 @@ impl Agent {
             tool_registry,
             messages,
             model: self.model.clone(),
+            model_display: self.model_display.clone(),
             max_tokens: self.max_tokens,
             plan_mode: self.plan_mode,
             permission,
@@ -204,6 +217,7 @@ impl Agent {
                     format!("[Error: {}]", e),
                     &tx_clone,
                     Vec::new(),
+                    &state.model_display,
                     TaskStatus::Error,
                 );
             }
@@ -385,6 +399,8 @@ struct AgentStreamState {
     tool_registry: ToolRegistry,
     messages: Vec<SharedMessage>,
     model: String,
+    /// 快照的展示模型名（事件携带，用量统计归属依据）
+    model_display: String,
     max_tokens: u32,
     plan_mode: bool,
     permission: PermissionManager,
@@ -430,11 +446,13 @@ fn emit_persist_message(
     event_tx: &CoreEventTx,
     msg: &SharedMessage,
     usage: Option<MessageUsage>,
+    model: &str,
     display: Option<String>,
 ) {
     let _ = event_tx.try_send(CoreEvent::PersistMessage {
         msg: Arc::clone(msg),
         usage,
+        model: model.to_string(),
         display,
     });
 }
@@ -447,6 +465,7 @@ fn finalize_messages(
     fallback_content: String,
     event_tx: &CoreEventTx,
     usages: Vec<MessageUsage>,
+    model: &str,
     status: TaskStatus,
 ) {
     let needs_assistant = !matches!(
@@ -467,12 +486,13 @@ fn finalize_messages(
             .into(),
         );
         messages.push(Arc::clone(&msg));
-        emit_persist_message(event_tx, &msg, None, None);
+        emit_persist_message(event_tx, &msg, None, model, None);
     }
     let final_messages = std::mem::take(messages);
     let _ = event_tx.try_send(CoreEvent::AgentComplete {
         messages: final_messages,
         usages,
+        model: model.to_string(),
         status,
     });
 }
@@ -641,7 +661,13 @@ async fn run_stream_loop(
                 msg
             };
 
-            emit_persist_message(event_tx, &pushed_msg, last_usage, None);
+            emit_persist_message(
+                event_tx,
+                &pushed_msg,
+                last_usage,
+                &state.model_display,
+                None,
+            );
 
             handle_tool_calls_stream(state, &full_tool_calls, &cancel, event_tx).await?;
 
@@ -679,7 +705,13 @@ async fn run_stream_loop(
                 msg
             };
 
-            emit_persist_message(event_tx, &pushed_msg, last_usage, None);
+            emit_persist_message(
+                event_tx,
+                &pushed_msg,
+                last_usage,
+                &state.model_display,
+                None,
+            );
             break;
         }
     }
@@ -688,6 +720,7 @@ async fn run_stream_loop(
     let _ = event_tx.try_send(CoreEvent::AgentComplete {
         messages: final_messages,
         usages: all_usages,
+        model: state.model_display.clone(),
         status: TaskStatus::Completed,
     });
     Ok(())
@@ -773,7 +806,7 @@ async fn push_partial_assistant(
     };
 
     for msg in &pushed_msgs {
-        emit_persist_message(event_tx, msg, None, None);
+        emit_persist_message(event_tx, msg, None, &state.model_display, None);
     }
 
     Ok(())
@@ -814,7 +847,7 @@ async fn finalize_cancelled(
 
     // 为 orphaned tool 消息发送持久化 + ToolResult 事件
     for msg in &orphaned_tool_msgs {
-        emit_persist_message(event_tx, msg, None, None);
+        emit_persist_message(event_tx, msg, None, &state.model_display, None);
         if let CompatibleChatCompletionRequestMessage::Tool(t) = msg.as_ref() {
             let result_text = match &t.content {
                 ChatCompletionRequestToolMessageContent::Text(t) => t.clone(),
@@ -839,6 +872,7 @@ async fn finalize_cancelled(
         "[Task interrupted]".to_string(),
         event_tx,
         usages,
+        &state.model_display,
         TaskStatus::Interrupted,
     );
     Ok(())
@@ -877,7 +911,7 @@ async fn handle_tool_calls_stream(
                 state.messages.push(Arc::clone(&msg));
                 msg
             };
-            emit_persist_message(event_tx, &pushed_msg, None, None);
+            emit_persist_message(event_tx, &pushed_msg, None, &state.model_display, None);
             continue;
         }
         let (id, name, arguments) = match tool_call {
@@ -1024,7 +1058,7 @@ async fn handle_tool_calls_stream(
             state.messages.push(Arc::clone(&msg));
             msg
         };
-        emit_persist_message(event_tx, &pushed_msg, None, display);
+        emit_persist_message(event_tx, &pushed_msg, None, &state.model_display, display);
     }
     Ok(())
 }
@@ -1039,7 +1073,7 @@ mod tests {
             crate::permission::PermissionMode::Yolo,
             vec![],
         );
-        Agent::new(config, "test-model", 4096, pm, ".")
+        Agent::new(config, "test-model", "test/test-model", 4096, pm, ".")
     }
 
     #[test]

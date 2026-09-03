@@ -149,7 +149,7 @@ pub async fn chat_handler(
                         context_window: resolved.context_window,
                     });
                 }
-                CoreEvent::PersistMessage { msg, usage, display } => {
+                CoreEvent::PersistMessage { msg, usage, model, display } => {
                     // 持久化（对齐 TUI PersistMessage 处理；不推送给前端）
                     let mut stored = crate::storage::to_stored_message(&msg);
                     if let Some(u) = usage {
@@ -157,6 +157,8 @@ pub async fn chat_handler(
                         stored.completion_tokens = Some(u.completion_tokens as i64);
                         stored.cached_tokens = Some(u.cached_tokens as i64);
                     }
+                    // 用量统计按消息级模型归属（事件携带的流式快照值）
+                    stored.model = Some(model);
                     if let Some(d) = display {
                         stored.runtime_meta = Some(d);
                     }
@@ -202,23 +204,24 @@ pub async fn chat_handler(
                     guard.track_ask(request_id.clone(), response_tx);
                     yield sse_event(&ServerEvent::AskUser { request_id, questions });
                 }
-                CoreEvent::AgentComplete { messages, status, .. } => {
+                CoreEvent::AgentComplete { messages, status, model, .. } => {
                     // 同步 in-memory 上下文（对齐 TUI AgentComplete 处理）
                     if !messages.is_empty() {
                         session.sync_messages(messages);
                     }
                     let total_ms = started.elapsed().as_millis() as u64;
+                    // runtime_meta 用事件携带的快照模型（轮次中途切换不影响）
                     let _ = session.storage()
                         .update_last_assistant_runtime_meta(
                             &session_id,
-                            &runtime_meta_json(total_ms, &resolved.display, protocol::status_str(&status)),
+                            &runtime_meta_json(total_ms, &model, protocol::status_str(&status)),
                         )
                         .await;
                     let _ = session.storage().touch_session(&session_id).await;
                     yield sse_event(&ServerEvent::AgentComplete {
                         status: protocol::status_str(&status).to_string(),
                         total_ms,
-                        model: resolved.display.clone(),
+                        model,
                     });
 
                     // 自动压缩检查（对齐 TUI 阈值逻辑）；启动后继续消费压缩事件
@@ -474,6 +477,7 @@ async fn persist_user_message(
         prompt_tokens: None,
         completion_tokens: None,
         cached_tokens: None,
+        model: None,
         runtime_meta: None,
         think_ms: None,
         compacted: false,

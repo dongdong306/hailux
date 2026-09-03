@@ -112,11 +112,11 @@ subagent delegation, and custom slash commands.
   registers tools. `SharedMcpBackends` shared with `TaskTool` for subagent MCP access.
 - `storage/db.rs` — SQLite chat history at `~/.hailux/db/chat.db`. **Versioned migrations
   via `sqlx::migrate!`** (`migrations/*.sql`): new schema change = new migration file, no
-  hand-written fallbacks. `upgrade_legacy_schema()` is a one-time bootstrap for pre-0.4.0
-  DBs only. Max pool connections = 1. Supports subsessions (parent/child for subagent
-  isolation). `messages.compacted` + `sessions.compact_summary` support context compaction;
-  active-context queries filter `compacted = 0`. Migration failure aborts startup and
-  suggests `--rebuild-db`.
+  hand-written fallbacks (the pre-0.4.0 legacy bootstrap was removed; such DBs fail
+  migration and get the rebuild prompt). Max pool connections = 1. Supports subsessions
+  (parent/child for subagent isolation). `messages.compacted` + `sessions.compact_summary`
+  support context compaction; active-context queries filter `compacted = 0`. Migration
+  failure aborts startup and suggests `--rebuild-db`.
 - `updater.rs` — Self-update from GitHub releases (sha256-verified asset download when a
   `.sha256` asset exists — otherwise verification is skipped with a warning; Windows swaps
   via a `.old` file cleaned up on next startup).

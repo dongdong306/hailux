@@ -89,12 +89,14 @@ impl App {
             CoreEvent::AgentComplete {
                 messages: final_messages,
                 usages,
+                model: turn_model,
                 status,
             } => {
                 // 计算最终耗时
                 self.finalize_thinking_ms();
                 self.timing.finish(Instant::now());
-                // 将耗时和模型名写入 runtime_meta（含 status）
+                // 将耗时和模型名写入 runtime_meta（含 status）；
+                // model 为流式快照值，轮次中途切换模型不影响
                 if let Some(session_id) = &self.current_session_id
                     && let Some(total_ms) = self.timing.last_total_ms
                 {
@@ -105,7 +107,7 @@ impl App {
                     };
                     let meta = serde_json::json!({
                         "total_ms": total_ms,
-                        "model": self.resolved.display,
+                        "model": turn_model,
                         "status": status_str,
                     })
                     .to_string();
@@ -126,7 +128,7 @@ impl App {
                 if let Some(total_ms) = self.timing.last_total_ms {
                     self.messages.push(Message::AgentDone {
                         total_ms,
-                        model: self.resolved.display.clone(),
+                        model: turn_model.clone(),
                         status,
                     });
                 }
@@ -176,6 +178,7 @@ impl App {
             CoreEvent::PersistMessage {
                 msg,
                 usage,
+                model,
                 display,
             } => {
                 if let Some(session_id) = &self.current_session_id {
@@ -185,6 +188,8 @@ impl App {
                         stored.completion_tokens = Some(u.completion_tokens as i64);
                         stored.cached_tokens = Some(u.cached_tokens as i64);
                     }
+                    // 用量统计按消息级模型归属（事件携带的流式快照值）
+                    stored.model = Some(model);
                     if let Some(ref d) = display {
                         stored.runtime_meta = Some(d.clone());
                     }
@@ -579,6 +584,7 @@ impl App {
             prompt_tokens: None,
             completion_tokens: None,
             cached_tokens: None,
+            model: None,
             runtime_meta: if self.plan_mode {
                 Some(r#"{"plan_mode":true}"#.to_string())
             } else {
@@ -683,6 +689,7 @@ impl App {
                     prompt_tokens: None,
                     completion_tokens: None,
                     cached_tokens: None,
+                    model: None,
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,

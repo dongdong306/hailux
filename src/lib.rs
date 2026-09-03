@@ -86,6 +86,7 @@ pub fn build_agent_base(
     let mut agent = Agent::new(
         resolved.config.clone(),
         &resolved.model_id,
+        &resolved.display,
         resolved.max_tokens,
         pm,
         &work_dir.display().to_string(),

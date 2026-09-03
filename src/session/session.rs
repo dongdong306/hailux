@@ -319,6 +319,7 @@ impl ChatSession {
         self.agent.switch_model(
             resolved.config.clone(),
             &resolved.model_id,
+            &resolved.display,
             resolved.max_tokens,
         );
     }
@@ -414,6 +415,7 @@ mod tests {
             prompt_tokens: None,
             completion_tokens: None,
             cached_tokens: None,
+            model: None,
             runtime_meta: None,
             think_ms: None,
             compacted: false,

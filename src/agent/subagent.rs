@@ -406,9 +406,16 @@ impl SharedTaskCtx {
             })?;
             guard.clone()
         };
-        let (agent_config, agent_model, agent_max_tokens) = app_config
+        let (agent_config, agent_model, agent_display, agent_max_tokens) = app_config
             .resolve(model_selector)
-            .map(|resolved| (resolved.config, resolved.model_id, resolved.max_tokens))
+            .map(|resolved| {
+                (
+                    resolved.config,
+                    resolved.model_id,
+                    resolved.display,
+                    resolved.max_tokens,
+                )
+            })
             .map_err(|e| ToolExecuteError {
                 message: format!(
                     "Failed to resolve model \"{}\" for subagent \"{}\": {e}",
@@ -419,6 +426,7 @@ impl SharedTaskCtx {
         let mut agent = Agent::new(
             agent_config,
             &agent_model,
+            &agent_display,
             agent_max_tokens,
             self.permission.clone(),
             &self.work_dir,
@@ -738,6 +746,7 @@ async fn run_subagent_task_inner(
             prompt_tokens: None,
             completion_tokens: None,
             cached_tokens: None,
+            model: None,
             runtime_meta: None,
             think_ms: None,
             compacted: false,
@@ -749,8 +758,8 @@ async fn run_subagent_task_inner(
         (existing_id, restore_agent)
     } else {
         // 创建新会话
+        // subagent 实际使用的模型（与 subsession 的 sessions.model 同源，用于用量统计归属）
         let sub_model = config.model.clone().unwrap_or_else(|| ctx.model.clone());
-
         let sub_session_id = ctx
             .storage
             .create_subsession(&parent_id, &sub_model, &ctx.work_dir)
@@ -779,6 +788,7 @@ async fn run_subagent_task_inner(
             prompt_tokens: None,
             completion_tokens: None,
             cached_tokens: None,
+            model: None,
             runtime_meta: None,
             think_ms: None,
             compacted: false,
@@ -834,6 +844,7 @@ async fn run_subagent_task_inner(
             CoreEvent::PersistMessage {
                 msg,
                 usage,
+                model,
                 display,
             } => {
                 // 持久化到 subagent session
@@ -843,6 +854,8 @@ async fn run_subagent_task_inner(
                     stored.completion_tokens = Some(u.completion_tokens as i64);
                     stored.cached_tokens = Some(u.cached_tokens as i64);
                 }
+                // 用量统计按消息级模型归属（事件携带的流式快照值）
+                stored.model = Some(model);
                 if let Some(ref d) = display {
                     stored.runtime_meta = Some(d.clone());
                 }
