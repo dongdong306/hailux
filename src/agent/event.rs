@@ -53,6 +53,9 @@ pub enum CoreEvent {
     AgentComplete {
         messages: Vec<SharedMessage>,
         usages: Vec<MessageUsage>,
+        /// 本轮实际使用的模型 display（chat_stream 启动时的快照；
+        /// 轮次进行中切换模型不影响事件携带的值）
+        model: String,
         status: TaskStatus,
     },
     UsageUpdate {
@@ -63,6 +66,8 @@ pub enum CoreEvent {
     PersistMessage {
         msg: SharedMessage,
         usage: Option<MessageUsage>,
+        /// 产生该消息的模型 display（流式状态快照，非当前配置）
+        model: String,
         display: Option<String>,
     },
     ToolCallStart {

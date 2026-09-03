@@ -148,6 +148,8 @@ pub struct StoredMessage {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub cached_tokens: Option<i64>,
+    /// 该次 LLM 请求实际使用的模型（provider/model display）；用量统计按此分组
+    pub model: Option<String>,
     pub runtime_meta: Option<String>,
     pub think_ms: Option<i64>,
     pub compacted: bool,
@@ -237,191 +239,9 @@ impl ChatStorage {
     }
 
     async fn run_migration(&self) -> Result<()> {
-        // 旧版（< 0.4.0）用手写 ALTER TABLE fallback 演进 schema，没有 _sqlx_migrations 表。
-        // 检测到这类旧库时，先用幂等的 pragma 检查补齐缺失列（一次性引导），
-        // 之后所有 schema 演进交给版本化迁移（migrations/*.sql）管理。
-        let has_migrations_table: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        let has_sessions: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        if has_migrations_table.0 == 0 && has_sessions.0 == 1 {
-            self.upgrade_legacy_schema().await?;
-        }
-
-        // 版本化迁移。迁移失败由 new()/rebuild() 捕获处理。
+        // 版本化迁移（pre-0.4.0 旧库的引导升级已移除：此类库会在迁移中报错，
+        // 由 new()/rebuild() 捕获后提示用户 /rebuild-db 重建）。
         sqlx::migrate!("./migrations").run(&self.pool).await?;
-        Ok(())
-    }
-
-    /// 旧版（< 0.4.0）手写迁移的一次性引导：仅用于还没有 `_sqlx_migrations`
-    /// 表的旧库，幂等地补齐缺失列。新库和已迁移库不会走到这里。
-    async fn upgrade_legacy_schema(&self) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS sessions (
-                id                TEXT PRIMARY KEY,
-                title             TEXT NOT NULL DEFAULT '',
-                model             TEXT NOT NULL DEFAULT '',
-                work_dir          TEXT NOT NULL DEFAULT '',
-                created_at        TEXT NOT NULL,
-                updated_at        TEXT NOT NULL,
-                prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-                completion_tokens INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                role              TEXT NOT NULL,
-                content           TEXT NOT NULL DEFAULT '',
-                tool_calls        TEXT,
-                tool_call_id      TEXT,
-                reasoning_content TEXT,
-                prompt_tokens     INTEGER,
-                completion_tokens INTEGER,
-                created_at        TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        // 兼容旧表：若缺少 reasoning_content 列则补加
-        let has_column: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'reasoning_content'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-
-        if has_column.0 == 0 {
-            sqlx::query("ALTER TABLE messages ADD COLUMN reasoning_content TEXT")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // sessions.prompt_tokens
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'prompt_tokens'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE sessions ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // sessions.completion_tokens
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'completion_tokens'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query(
-                "ALTER TABLE sessions ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        // messages.prompt_tokens
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'prompt_tokens'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // messages.completion_tokens
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'completion_tokens'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE messages ADD COLUMN completion_tokens INTEGER")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // sessions.parent_id
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'parent_id'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE sessions ADD COLUMN parent_id TEXT")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // messages.runtime_meta
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'runtime_meta'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE messages ADD COLUMN runtime_meta TEXT")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // messages.think_ms
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'think_ms'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE messages ADD COLUMN think_ms INTEGER")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // messages.compacted
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'compacted'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE messages ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        // sessions.compact_summary
-        let has_col: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'compact_summary'",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if has_col.0 == 0 {
-            sqlx::query("ALTER TABLE sessions ADD COLUMN compact_summary TEXT")
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        tx.commit().await?;
         Ok(())
     }
 
@@ -475,7 +295,7 @@ impl ChatStorage {
     pub async fn append_message(&self, session_id: &str, msg: &StoredMessage) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query(
-            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(msg.role.as_str())
@@ -486,6 +306,7 @@ impl ChatStorage {
         .bind(msg.prompt_tokens)
         .bind(msg.completion_tokens)
         .bind(msg.cached_tokens)
+        .bind(&msg.model)
         .bind(&msg.runtime_meta)
         .bind(msg.think_ms)
         .bind(if msg.compacted { 1 } else { 0 })
@@ -498,7 +319,7 @@ impl ChatStorage {
     /// 执行给定 SQL 查询并将结果映射为 `StoredMessage` 列表。
     /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
     /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
-    ///  prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted`
+    ///  prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted`
     async fn query_messages(
         &self,
         sql: &'static str,
@@ -514,6 +335,7 @@ impl ChatStorage {
             Option<i64>,
             Option<i64>,
             Option<i64>,
+            Option<String>,
             Option<String>,
             Option<i64>,
             i64,
@@ -535,6 +357,7 @@ impl ChatStorage {
                     prompt_tokens,
                     completion_tokens,
                     cached_tokens,
+                    model,
                     runtime_meta,
                     think_ms,
                     compacted,
@@ -551,6 +374,7 @@ impl ChatStorage {
                         prompt_tokens,
                         completion_tokens,
                         cached_tokens,
+                        model,
                         runtime_meta,
                         think_ms,
                         compacted: compacted != 0,
@@ -562,7 +386,7 @@ impl ChatStorage {
 
     pub async fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? ORDER BY id ASC",
             session_id,
         )
         .await
@@ -571,7 +395,7 @@ impl ChatStorage {
     /// 加载活跃上下文消息（仅 compacted=0），按 id 升序。
     pub async fn load_active_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
             session_id,
         )
         .await
@@ -882,7 +706,7 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 按模型聚合（sessions.model），token 降序。
+    /// 按模型聚合（消息级 model，旧行回退 sessions.model），token 降序。
     pub async fn usage_by_model(
         &self,
         work_dir: Option<&str>,
@@ -890,11 +714,11 @@ impl ChatStorage {
     ) -> Result<Vec<ModelUsage>> {
         let binds = Self::usage_filter_binds(work_dir, days);
         let mut q = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
-            "SELECT s.model, COUNT(*), COALESCE(SUM(m.prompt_tokens),0), COALESCE(SUM(m.cached_tokens),0), COALESCE(SUM(m.completion_tokens),0) \
+            "SELECT COALESCE(m.model, s.model), COUNT(*), COALESCE(SUM(m.prompt_tokens),0), COALESCE(SUM(m.cached_tokens),0), COALESCE(SUM(m.completion_tokens),0) \
              FROM messages m JOIN sessions s ON s.id = m.session_id \
              WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
              AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?) \
-             GROUP BY s.model ORDER BY SUM(m.prompt_tokens) + SUM(m.completion_tokens) DESC",
+             GROUP BY COALESCE(m.model, s.model) ORDER BY SUM(m.prompt_tokens) + SUM(m.completion_tokens) DESC",
         );
         for b in binds {
             q = q.bind(b);
@@ -959,7 +783,7 @@ impl ChatStorage {
     ) -> Result<Vec<UsageRecord>> {
         let binds = Self::usage_filter_binds(work_dir, days);
         let mut q = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
-            "SELECT m.created_at, s.model, s.work_dir, m.prompt_tokens, COALESCE(m.cached_tokens,0), m.completion_tokens \
+            "SELECT m.created_at, COALESCE(m.model, s.model), s.work_dir, m.prompt_tokens, COALESCE(m.cached_tokens,0), m.completion_tokens \
              FROM messages m JOIN sessions s ON s.id = m.session_id \
              WHERE m.role = 'assistant' AND m.prompt_tokens IS NOT NULL \
              AND (? IS NULL OR s.work_dir IN (?, ?)) AND (? = '' OR m.created_at >= ?) \
@@ -1081,6 +905,7 @@ impl ChatStorage {
                     prompt_tokens: None,
                     completion_tokens: None,
                     cached_tokens: None,
+                    model: None,
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,
@@ -1262,6 +1087,7 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
         prompt_tokens: None,
         completion_tokens: None,
         cached_tokens: None,
+        model: None,
         runtime_meta: None,
         think_ms: None,
         compacted: false,
@@ -1350,6 +1176,7 @@ mod tests {
             prompt_tokens: None,
             completion_tokens: None,
             cached_tokens: None,
+            model: None,
             runtime_meta: None,
             think_ms: None,
             compacted: false,
@@ -1378,8 +1205,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_db_upgrades_to_versioned_schema() {
-        // 模拟旧版（手写迁移时代）的库：没有 _sqlx_migrations 表，且缺列
+    async fn migration4_backfills_message_model() {
+        // 模拟迁移 3 时代的库：每轮最后一条 assistant 行的 runtime_meta 带 {"model": ...}，
+        // 中间行为展示文本（非 JSON）；最后一行模拟崩溃轮次（本轮无标记行）。
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage
+            .create_session("deepseek/chat", "/tmp")
+            .await
+            .unwrap();
+        let rows: &[(&str, &str, &str)] = &[
+            ("user", "u1", ""),
+            ("assistant", "a-mid1", "tool display text"),
+            (
+                "assistant",
+                "a-end1",
+                r#"{"total_ms":100,"model":"deepseek/chat"}"#,
+            ),
+            ("assistant", "a-mid2", "tool display text"),
+            (
+                "assistant",
+                "a-end2",
+                r#"{"total_ms":200,"model":"glm-4.7"}"#,
+            ),
+            ("assistant", "a-crash", "tool display text"),
+        ];
+        for (role, content, meta) in rows {
+            sqlx::query(
+                "INSERT INTO messages (session_id, role, content, runtime_meta, created_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&sid)
+            .bind(role)
+            .bind(content)
+            .bind(meta)
+            .bind(ChatStorage::now_iso())
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        }
+
+        // 回退到迁移 3 状态（移除版本 4 记录、model 列及其索引），重跑迁移触发回填
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP INDEX IF EXISTS idx_messages_usage")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE messages DROP COLUMN model")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        storage.run_migration().await.unwrap();
+
+        let msgs = storage.load_messages(&sid).await.unwrap();
+        let model_of = |content: &str| {
+            msgs.iter()
+                .find(|m| m.content == content)
+                .and_then(|m| m.model.clone())
+        };
+        // 中间行取同轮后继标记行（含自身）的模型；user 行不在回填范围
+        assert_eq!(model_of("a-mid1").as_deref(), Some("deepseek/chat"));
+        assert_eq!(model_of("a-end1").as_deref(), Some("deepseek/chat"));
+        assert_eq!(model_of("a-mid2").as_deref(), Some("glm-4.7"));
+        assert_eq!(model_of("a-end2").as_deref(), Some("glm-4.7"));
+        // 崩溃轮次行后面无标记行，保持 NULL（统计时回退 sessions.model）
+        assert_eq!(model_of("a-crash"), None);
+        assert_eq!(msgs.iter().find(|m| m.content == "u1").unwrap().model, None);
+    }
+
+    #[tokio::test]
+    async fn legacy_pre_040_db_fails_migration() {
+        // 模拟旧版（手写迁移时代，< 0.4.0）的库：没有 _sqlx_migrations 表，且缺列。
+        // 引导升级已移除：此类库在版本化迁移中报错（迁移 4 的回填引用 runtime_meta），
+        // 由上层捕获后提示用户 /rebuild-db 重建，不做静默升级。
         let options = SqliteConnectOptions::new()
             .filename(":memory:")
             .create_if_missing(true);
@@ -1401,54 +1300,15 @@ mod tests {
         .await
         .unwrap();
 
-        let storage = ChatStorage {
+        let mut storage = ChatStorage {
             pool,
             migration_error: None,
         };
-        storage.run_migration().await.unwrap();
+        let result = storage.run_migration().await;
+        assert!(result.is_err(), "pre-0.4.0 旧库应迁移失败而非静默升级");
 
-        // 版本化迁移表已建立
-        let has_migrations: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-        )
-        .fetch_one(&storage.pool)
-        .await
-        .unwrap();
-        assert_eq!(has_migrations.0, 1);
-
-        // 缺失列已补齐
-        for col in [
-            "reasoning_content",
-            "prompt_tokens",
-            "completion_tokens",
-            "runtime_meta",
-            "think_ms",
-            "compacted",
-        ] {
-            let n: (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?")
-                    .bind(col)
-                    .fetch_one(&storage.pool)
-                    .await
-                    .unwrap();
-            assert_eq!(n.0, 1, "messages 缺少列 {col}");
-        }
-        for col in [
-            "prompt_tokens",
-            "completion_tokens",
-            "parent_id",
-            "compact_summary",
-        ] {
-            let n: (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?")
-                    .bind(col)
-                    .fetch_one(&storage.pool)
-                    .await
-                    .unwrap();
-            assert_eq!(n.0, 1, "sessions 缺少列 {col}");
-        }
-
-        // 升级后读写正常
+        // rebuild 后恢复正常
+        storage.rebuild().await.unwrap();
         let sid = storage.create_session("m", "/tmp").await.unwrap();
         storage
             .append_message(&sid, &make_message(MessageRole::User, "hi"))
@@ -1456,10 +1316,6 @@ mod tests {
             .unwrap();
         let msgs = storage.load_messages(&sid).await.unwrap();
         assert_eq!(msgs.len(), 1);
-        assert!(!msgs[0].compacted);
-
-        // 再次启动（幂等）不报错
-        storage.run_migration().await.unwrap();
     }
 
     #[tokio::test]
@@ -1638,49 +1494,69 @@ mod tests {
         assistant2.cached_tokens = Some(0);
         storage.append_message(&b, &assistant2).await.unwrap();
 
+        // 同一 session（a，创建模型 deepseek/chat）中途切换到 glm-4.7：
+        // 消息级 model 优先生效；NULL 则回退 sessions.model（旧数据）
+        let mut assistant3 = make_message(MessageRole::Assistant, "a3");
+        assistant3.prompt_tokens = Some(400);
+        assistant3.completion_tokens = Some(20);
+        assistant3.cached_tokens = Some(0);
+        assistant3.model = Some("glm-4.7".to_string());
+        storage.append_message(&a, &assistant3).await.unwrap();
+
         // 不带 usage 的消息不计入
         storage
             .append_message(&a, &make_message(MessageRole::User, "u"))
             .await
             .unwrap();
 
+        // load 往返保留消息级 model
+        let loaded = storage.load_messages(&a).await.unwrap();
+        assert_eq!(loaded[0].model, None);
+        assert_eq!(loaded[1].model.as_deref(), Some("glm-4.7"));
+
         // 全局汇总
         let summary = storage.usage_summary(None, 0).await.unwrap();
-        assert_eq!(summary.requests, 2);
-        assert_eq!(summary.prompt_tokens, 300);
+        assert_eq!(summary.requests, 3);
+        assert_eq!(summary.prompt_tokens, 700);
         assert_eq!(summary.cached_tokens, 80);
-        assert_eq!(summary.completion_tokens, 60);
+        assert_eq!(summary.completion_tokens, 80);
 
         // 按项目过滤
         let proj = storage.usage_summary(Some("/tmp/proj"), 0).await.unwrap();
-        assert_eq!(proj.requests, 1);
-        assert_eq!(proj.prompt_tokens, 100);
+        assert_eq!(proj.requests, 2);
+        assert_eq!(proj.prompt_tokens, 500);
 
         // 按日聚合
         let daily = storage.usage_daily(None, 0).await.unwrap();
         assert_eq!(daily.len(), 1);
-        assert_eq!(daily[0].requests, 2);
+        assert_eq!(daily[0].requests, 3);
 
-        // 按模型聚合
+        // 按模型聚合：消息级 model 优先，NULL 回退 sessions.model
+        // glm-4.7 = a3(400) + b 的 a2(200)；deepseek/chat = a1(100)
         let by_model = storage.usage_by_model(None, 0).await.unwrap();
         assert_eq!(by_model.len(), 2);
-        // 210 > 150，glm 在前
         assert_eq!(by_model[0].model, "glm-4.7");
-        assert_eq!(by_model[0].prompt_tokens, 200);
+        assert_eq!(by_model[0].requests, 2);
+        assert_eq!(by_model[0].prompt_tokens, 600);
+        assert_eq!(by_model[1].model, "deepseek/chat");
+        assert_eq!(by_model[1].requests, 1);
+        assert_eq!(by_model[1].prompt_tokens, 100);
 
         // 按项目聚合
         let by_project = storage.usage_by_project(None, 0, 10).await.unwrap();
         assert_eq!(by_project.len(), 2);
-        // 210 > 150，/tmp/other 在前
-        assert_eq!(by_project[0].work_dir, "/tmp/other");
-        assert_eq!(by_project[0].prompt_tokens, 200);
-        assert_eq!(by_project[1].work_dir, "/tmp/proj");
+        // 570 > 210，/tmp/proj 在前
+        assert_eq!(by_project[0].work_dir, "/tmp/proj");
+        assert_eq!(by_project[0].prompt_tokens, 500);
+        assert_eq!(by_project[1].work_dir, "/tmp/other");
 
         // 最近明细
         let recent = storage.list_recent_usage(None, 0, 10).await.unwrap();
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].model, "glm-4.7"); // id 降序
-        assert_eq!(recent[0].work_dir, "/tmp/other");
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].model, "glm-4.7"); // id 降序，a3 消息级模型
+        assert_eq!(recent[0].work_dir, "/tmp/proj");
+        assert_eq!(recent[1].model, "glm-4.7"); // a2 回退 sessions.model
+        assert_eq!(recent[2].model, "deepseek/chat"); // a1 回退 sessions.model
 
         // 已知项目列表
         let dirs = storage.list_work_dirs().await.unwrap();

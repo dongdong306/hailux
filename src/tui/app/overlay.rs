@@ -361,6 +361,7 @@ impl App {
                         self.agent.switch_model(
                             resolved.config.clone(),
                             &resolved.model_id,
+                            &resolved.display,
                             resolved.max_tokens,
                         );
                         self.resolved = resolved;
@@ -698,6 +699,7 @@ impl App {
                                 self.agent.switch_model(
                                     resolved.config.clone(),
                                     &resolved.model_id,
+                                    &resolved.display,
                                     resolved.max_tokens,
                                 );
                                 self.resolved = resolved;
@@ -721,6 +723,7 @@ impl App {
                             self.agent.switch_model(
                                 resolved.config.clone(),
                                 &resolved.model_id,
+                                &resolved.display,
                                 resolved.max_tokens,
                             );
                             self.resolved = resolved;
@@ -1697,6 +1700,7 @@ impl App {
         self.agent.switch_model(
             resolved.config.clone(),
             &resolved.model_id,
+            &resolved.display,
             resolved.max_tokens,
         );
         self.resolved = resolved;
