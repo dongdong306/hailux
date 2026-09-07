@@ -77,7 +77,7 @@ export function PermissionDialog() {
         </div>
       </div>
 
-      <p className="mb-3 whitespace-pre-wrap rounded-lg bg-muted/50 p-3 text-sm leading-relaxed">
+      <p className="mb-3 max-h-[50vh] overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-3 text-sm leading-relaxed">
         {permission.description}
       </p>
 
