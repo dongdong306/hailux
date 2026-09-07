@@ -5,11 +5,12 @@ use async_openai::types::chat::{
     ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestAssistantMessageContentPart,
     ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestDeveloperMessageContentPart,
+    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestSystemMessageContentPart, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionRequestUserMessageContentPart, ImageUrl,
 };
 use chrono::Local;
 use color_eyre::Result;
@@ -153,6 +154,8 @@ pub struct StoredMessage {
     pub runtime_meta: Option<String>,
     pub think_ms: Option<i64>,
     pub compacted: bool,
+    /// 图片附件 JSON（[{mime, data_url}]）；仅用户消息使用
+    pub attachments: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,7 +298,7 @@ impl ChatStorage {
     pub async fn append_message(&self, session_id: &str, msg: &StoredMessage) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query(
-            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(msg.role.as_str())
@@ -310,6 +313,7 @@ impl ChatStorage {
         .bind(&msg.runtime_meta)
         .bind(msg.think_ms)
         .bind(if msg.compacted { 1 } else { 0 })
+        .bind(&msg.attachments)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -319,7 +323,7 @@ impl ChatStorage {
     /// 执行给定 SQL 查询并将结果映射为 `StoredMessage` 列表。
     /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
     /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
-    ///  prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted`
+    ///  prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments`
     async fn query_messages(
         &self,
         sql: &'static str,
@@ -339,6 +343,7 @@ impl ChatStorage {
             Option<String>,
             Option<i64>,
             i64,
+            Option<String>,
         );
         let rows: Vec<MessageRow> = sqlx::query_as(sql)
             .bind(session_id)
@@ -361,6 +366,7 @@ impl ChatStorage {
                     runtime_meta,
                     think_ms,
                     compacted,
+                    attachments,
                 )| {
                     let role: MessageRole = role
                         .parse()
@@ -378,6 +384,7 @@ impl ChatStorage {
                         runtime_meta,
                         think_ms,
                         compacted: compacted != 0,
+                        attachments,
                     })
                 },
             )
@@ -386,7 +393,7 @@ impl ChatStorage {
 
     pub async fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments FROM messages WHERE session_id = ? ORDER BY id ASC",
             session_id,
         )
         .await
@@ -395,7 +402,7 @@ impl ChatStorage {
     /// 加载活跃上下文消息（仅 compacted=0），按 id 升序。
     pub async fn load_active_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
             session_id,
         )
         .await
@@ -853,21 +860,27 @@ impl ChatStorage {
     /// 修复 orphaned tool calls：扫描最后一条 assistant 消息的 tool_calls，
     /// 为缺少 tool result 的 tool_call_id 补一条 "Tool execution aborted" 消息。
     pub async fn repair_orphaned_tool_calls(&self, session_id: &str) -> Result<()> {
-        let messages = self.load_messages(session_id).await?;
+        // 轻量查询：只取角色与 tool call 字段，避免把正文与附件 base64
+        // 大字段全量拉入内存（本修复只需扫描尾部 tool call 配对）
+        let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT role, tool_calls, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
 
         // 反向找到最后一条带 tool_calls 的 assistant 消息
-        let Some(assistant_idx) = messages
+        let Some(assistant_idx) = rows
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, m)| m.role == MessageRole::Assistant && m.tool_calls.is_some())
+            .find(|(_, (role, tool_calls, _))| role == "assistant" && tool_calls.is_some())
             .map(|(i, _)| i)
         else {
             return Ok(());
         };
 
-        let assistant_msg = &messages[assistant_idx];
-        let tool_calls_json = assistant_msg.tool_calls.as_ref().unwrap();
+        let tool_calls_json = rows[assistant_idx].1.as_ref().unwrap();
         let tool_calls: Vec<serde_json::Value> =
             serde_json::from_str(tool_calls_json).unwrap_or_default();
 
@@ -882,11 +895,11 @@ impl ChatStorage {
         }
 
         // 收集该 assistant 消息之后已有的 tool result 的 tool_call_id
-        let existing_ids: std::collections::HashSet<&str> = messages[assistant_idx..]
+        let existing_ids: std::collections::HashSet<&str> = rows[assistant_idx..]
             .iter()
-            .filter_map(|m| {
-                if m.role == MessageRole::Tool {
-                    m.tool_call_id.as_deref()
+            .filter_map(|(role, _, tool_call_id)| {
+                if role == "tool" {
+                    tool_call_id.as_deref()
                 } else {
                     None
                 }
@@ -909,6 +922,7 @@ impl ChatStorage {
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,
+                    attachments: None,
                 };
                 self.append_message(session_id, &stored).await?;
             }
@@ -1078,6 +1092,39 @@ pub fn compatible_message_tool_call_id(
 }
 
 pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> StoredMessage {
+    // 用户消息的图片附件从 Array content 中抽出，以 JSON 存入 attachments 列
+    let attachments = match msg {
+        CompatibleChatCompletionRequestMessage::User(m) => match &m.content {
+            ChatCompletionRequestUserMessageContent::Array(parts) => {
+                let images: Vec<crate::agent::media::Attachment> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                            let mime = img
+                                .image_url
+                                .url
+                                .strip_prefix("data:")
+                                .and_then(|rest| rest.split(';').next())
+                                .unwrap_or("image/png")
+                                .to_string();
+                            Some(crate::agent::media::Attachment {
+                                mime,
+                                data_url: img.image_url.url.clone(),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if images.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&images).unwrap_or_default())
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     StoredMessage {
         role: compatible_message_role(msg),
         content: compatible_message_content_text(msg),
@@ -1091,6 +1138,7 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
         runtime_meta: None,
         think_ms: None,
         compacted: false,
+        attachments,
     }
 }
 
@@ -1103,13 +1151,53 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
             }
             .into(),
         ),
-        MessageRole::User => Some(
-            ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(msg.content.clone()),
-                name: None,
+        MessageRole::User => {
+            // 有附件 → 重建 Array content（Text + ImageUrl parts），历史重放时图片仍可用
+            let attachments = msg
+                .attachments
+                .as_deref()
+                .and_then(|json| {
+                    serde_json::from_str::<Vec<crate::agent::media::Attachment>>(json).ok()
+                })
+                .unwrap_or_default();
+            if attachments.is_empty() {
+                Some(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(msg.content.clone()),
+                        name: None,
+                    }
+                    .into(),
+                )
+            } else {
+                // 文本为空时跳过 Text part（与 build_user_message 对称，部分
+                // 兼容端点拒绝空 text part）
+                let mut parts = Vec::new();
+                if !msg.content.is_empty() {
+                    parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                        ChatCompletionRequestMessageContentPartText {
+                            text: msg.content.clone(),
+                        },
+                    ));
+                }
+                parts.extend(attachments.iter().map(|att| {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                        ChatCompletionRequestMessageContentPartImage {
+                            image_url: ImageUrl {
+                                url: att.data_url.clone(),
+                                detail: None,
+                            },
+                        },
+                    )
+                }));
+                Some(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Array(parts),
+                        name: None,
+                    }
+                    .into(),
+                )
             }
-            .into(),
-        ),
+        }
         MessageRole::Assistant => {
             let tool_calls: Option<Vec<ChatCompletionMessageToolCalls>> = msg
                 .tool_calls
@@ -1180,6 +1268,7 @@ mod tests {
             runtime_meta: None,
             think_ms: None,
             compacted: false,
+            attachments: None,
         }
     }
 
@@ -1202,6 +1291,66 @@ mod tests {
         let session_id = storage.create_session("test-model", "/tmp").await.unwrap();
         let summary = storage.get_compact_summary(&session_id).await.unwrap();
         assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn attachment_roundtrip_via_storage() {
+        use crate::agent::media::Attachment;
+
+        let png_bytes: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let att = Attachment::from_bytes("image/png", &png_bytes);
+
+        // 构造带图片附件的 user 消息 → 落库 → 读回 → 重建 Array content
+        let with_image = crate::agent::build_user_message("看图", std::slice::from_ref(&att));
+        let stored = to_stored_message(&with_image);
+        assert!(stored.attachments.is_some());
+        assert_eq!(stored.content, "看图");
+
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        storage.append_message(&sid, &stored).await.unwrap();
+        let loaded = storage.load_active_messages(&sid).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].attachments.is_some());
+
+        let rebuilt = from_stored_message(&loaded[0]).unwrap();
+        match &rebuilt {
+            crate::agent::models::CompatibleChatCompletionRequestMessage::User(u) => {
+                match &u.content {
+                    ChatCompletionRequestUserMessageContent::Array(parts) => {
+                        assert_eq!(parts.len(), 2);
+                        match &parts[1] {
+                            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                                assert_eq!(img.image_url.url, att.data_url);
+                            }
+                            _ => panic!("expected image part"),
+                        }
+                    }
+                    _ => panic!("expected array content"),
+                }
+            }
+            _ => panic!("expected User message"),
+        }
+
+        // 无附件 user 消息保持纯文本 content
+        let plain = to_stored_message(&crate::agent::build_user_message("纯文本", &[]));
+        assert!(plain.attachments.is_none());
+    }
+
+    #[test]
+    fn tool_attachments_not_persisted_in_tool_messages() {
+        // 工具消息本身不携带附件列（媒体剥离为合成 user 消息）
+        let tool_msg: crate::agent::models::CompatibleChatCompletionRequestMessage =
+            ChatCompletionRequestToolMessage {
+                content: ChatCompletionRequestToolMessageContent::Text(
+                    "Image read successfully".into(),
+                ),
+                tool_call_id: "call-1".into(),
+            }
+            .into();
+        let stored = to_stored_message(&tool_msg);
+        assert!(stored.attachments.is_none());
+        assert_eq!(stored.role, MessageRole::Tool);
     }
 
     #[tokio::test]
@@ -1272,6 +1421,88 @@ mod tests {
         // 崩溃轮次行后面无标记行，保持 NULL（统计时回退 sessions.model）
         assert_eq!(model_of("a-crash"), None);
         assert_eq!(msgs.iter().find(|m| m.content == "u1").unwrap().model, None);
+    }
+
+    #[tokio::test]
+    async fn migration5_adds_attachments_column() {
+        // 模拟迁移 4 时代的库：有数据行但无 attachments 列；重跑迁移补列后
+        // 旧行应可正常加载（attachments = NULL → 视为无附件的纯文本消息）
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage
+            .create_session("deepseek/chat", "/tmp")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&sid)
+        .bind("user")
+        .bind("旧消息")
+        .bind(ChatStorage::now_iso())
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        // 回退到迁移 4 状态（移除版本 5 记录、attachments 列），重跑迁移
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 5")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE messages DROP COLUMN attachments")
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        storage.run_migration().await.unwrap();
+
+        let msgs = storage.load_messages(&sid).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "旧消息");
+        assert_eq!(msgs[0].attachments, None);
+
+        // 重建的消息为纯文本 user 消息（无图片 part）
+        let chat = from_stored_message(&msgs[0]).unwrap();
+        match chat {
+            CompatibleChatCompletionRequestMessage::User(u) => match u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "旧消息"),
+                ChatCompletionRequestUserMessageContent::Array(_) => {
+                    panic!("旧消息不应重建出图片 part")
+                }
+            },
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupted_attachments_json_falls_back_to_text() {
+        // attachments 列存了畸形 JSON：加载保留原始值，重建时静默回退为纯文本
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let sid = storage.create_session("m", "/tmp").await.unwrap();
+        sqlx::query(
+            "INSERT INTO messages (session_id, role, content, attachments, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&sid)
+        .bind("user")
+        .bind("看图")
+        .bind("{not json")
+        .bind(ChatStorage::now_iso())
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        let msgs = storage.load_messages(&sid).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].attachments.as_deref(), Some("{not json"));
+
+        let chat = from_stored_message(&msgs[0]).unwrap();
+        match chat {
+            CompatibleChatCompletionRequestMessage::User(u) => match u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "看图"),
+                ChatCompletionRequestUserMessageContent::Array(_) => {
+                    panic!("畸形附件 JSON 不应重建出图片 part")
+                }
+            },
+            _ => panic!("expected User message"),
+        }
     }
 
     #[tokio::test]

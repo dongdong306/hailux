@@ -72,6 +72,49 @@ pub(super) struct CommandSuggestion {
     pub(super) selected: usize,
 }
 
+/// Windows bracketed paste 标记配对状态机。
+///
+/// crossterm 的 Windows 输入源走 Win32 `ReadConsoleInput`（INPUT_RECORD 按键），
+/// 没有 VT 输入解析——**永远不会产生 `Event::Paste`**。WT 按约定（对齐 Claude Code
+/// 等的空 paste 协议）在剪贴板只有图片时发送 `\e[200~\e[201~`（空 bracketed paste）；
+/// 由于 conhost 在 WinAPI 输入模式丢弃该序列，实际到达应用的是「Ctrl+V Release
+/// 泄漏」或按键流两种形态之一（paste_probe 实测，见 event.rs / chat_input.rs）。
+/// 按键流形态下 `\e[200~` 已被 conhost 拆成一串 `Esc`、`[`、`2`、`0`、`0`、`~`
+/// 按键，并被 PasteBurst 组装成文本交给 [`super::App::handle_paste`]。
+///
+/// 因此在 handle_paste 层做标记剥离与配对：
+/// - 仅 start+end 标记、无内容 → 空 paste（图片剪贴板 Ctrl+V）→ 触发剪贴板探测
+/// - 标记夹文本 → 剥掉标记后按普通粘贴处理
+#[derive(Default)]
+pub(super) struct BracketPasteState {
+    /// 已见 `[200~`（start 标记），等待 `[201~`
+    pub(super) pending_start: bool,
+    /// 状态建立时间；超时（孤立标记）自动失效
+    pub(super) at: Option<Instant>,
+}
+
+/// Esc 误清恢复快照。Windows 下 `\e[200~` 序列的首字节是 Esc，会把输入框
+/// 连同附件/粘贴/提及元素一起误清空；紧接着出现 paste 标记时整体恢复。
+#[derive(Default)]
+pub(super) struct EscClearedSnapshot {
+    pub(super) text: String,
+    pub(super) pending_images: Vec<(String, crate::agent::media::Attachment)>,
+    pub(super) pending_pastes: Vec<(String, String)>,
+    pub(super) mentions: Vec<(String, String)>,
+}
+
+impl EscClearedSnapshot {
+    /// 从当前输入框状态抓取快照（take 语义：原状态被清空）
+    pub(super) fn take_from(app: &mut App) -> Self {
+        Self {
+            text: app.input.text().to_string(),
+            pending_images: std::mem::take(&mut app.pending_images),
+            pending_pastes: std::mem::take(&mut app.pending_pastes),
+            mentions: std::mem::take(&mut app.file_picker.pending_mentions),
+        }
+    }
+}
+
 /// Task 跟踪
 #[derive(Default)]
 pub(super) struct TaskTracker {
@@ -203,6 +246,27 @@ pub struct App {
     pub(super) last_esc_time: Option<Instant>,
     pub(super) esc_hint_active: bool,
     pub(super) pending_pastes: Vec<(String, String)>,
+    /// 待发送的图片附件（占位符文本 → 附件），随消息提交传给 agent
+    pub(super) pending_images: Vec<(String, crate::agent::media::Attachment)>,
+    /// Windows bracketed paste 标记配对状态（见 BracketPasteState 注释）
+    pub(super) bracket_paste: BracketPasteState,
+    /// 最近一次 Esc 清空输入框的完整状态快照（文本 + 附件/粘贴/提及）。
+    /// Windows 下 `\e[200~` / `\e[201~` 序列的首字节是 Esc，会误清输入框；
+    /// 紧接着出现 paste 标记时用于整体恢复（见 handle_paste）。
+    pub(super) esc_cleared: Option<(EscClearedSnapshot, Instant)>,
+    /// 最近一次 Ctrl+V Press 的时间（Release 泄漏探测的去重窗口）：
+    /// 不拦截 Ctrl+V 的终端 Press+Release 成对到达，避免重复探测
+    pub(super) last_ctrl_v_press: Option<Instant>,
+    /// 剪贴板图片探测是否进行中（子进程探测异步分离执行，in-flight 期间
+    /// 忽略新请求，避免长按 Ctrl+V 排队大量探测）
+    pub(super) image_probe_in_flight: bool,
+    /// 最近一次静默剪贴板探测的发起时间（Release 泄漏 / 空 bracketed paste）。
+    /// 微信/QQ「复制图片」同时携带位图与 FileDrop，同一次 Ctrl+V 会经双通道
+    /// 到达：路径文本注入（原文件字节）+ 探测 GetImage（位图重编码字节）——
+    /// 两者 data_url 不同，attach_image 去重无法识别，需按配对时间窗丢弃副本
+    pub(super) leak_probe_started_at: Option<Instant>,
+    /// 最近一次路径注入通道挂图的时间（handle_paste 的 FileDrop→路径识别）
+    pub(super) path_image_attached_at: Option<Instant>,
     pub(super) config: config::Config,
     pub(super) skills: Vec<SkillInfo>,
     pub(super) home_dir: std::path::PathBuf,
@@ -264,6 +328,13 @@ impl App {
             last_esc_time: None,
             esc_hint_active: false,
             pending_pastes: Vec::new(),
+            pending_images: Vec::new(),
+            bracket_paste: BracketPasteState::default(),
+            esc_cleared: None,
+            last_ctrl_v_press: None,
+            image_probe_in_flight: false,
+            leak_probe_started_at: None,
+            path_image_attached_at: None,
             config,
             skills,
             home_dir,
@@ -573,7 +644,9 @@ impl App {
             &event,
             AppEvent::InputKey(_)
                 | AppEvent::InputPaste(_)
-                | AppEvent::UserSubmit(_)
+                | AppEvent::UserSubmit { .. }
+                | AppEvent::PasteImageProbe
+                | AppEvent::PasteImageResult { .. }
                 | AppEvent::Resize
                 | AppEvent::ScrollUp
                 | AppEvent::ScrollDown

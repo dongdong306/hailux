@@ -109,9 +109,19 @@ pub struct StatsResponse {
 
 // ── 请求体（前端 → 后端）─────────────────────────────────────
 
+/// 用户消息携带的图片附件（前端以 data URL 上传）。
+#[derive(Debug, Deserialize)]
+pub struct ChatAttachment {
+    pub mime: String,
+    /// `data:<mime>;base64,<data>` 完整 data URL
+    pub data_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
     pub session_id: Option<String>,
     pub work_dir: Option<String>,
 }

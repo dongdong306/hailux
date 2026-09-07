@@ -406,28 +406,31 @@ impl SharedTaskCtx {
             })?;
             guard.clone()
         };
-        let (agent_config, agent_model, agent_display, agent_max_tokens) = app_config
-            .resolve(model_selector)
-            .map(|resolved| {
-                (
-                    resolved.config,
-                    resolved.model_id,
-                    resolved.display,
-                    resolved.max_tokens,
-                )
-            })
-            .map_err(|e| ToolExecuteError {
-                message: format!(
-                    "Failed to resolve model \"{}\" for subagent \"{}\": {e}",
-                    model_selector, config.name
-                ),
-            })?;
+        let (agent_config, agent_model, agent_display, agent_max_tokens, agent_supports_vision) =
+            app_config
+                .resolve(model_selector)
+                .map(|resolved| {
+                    (
+                        resolved.config,
+                        resolved.model_id,
+                        resolved.display,
+                        resolved.max_tokens,
+                        resolved.supports_vision,
+                    )
+                })
+                .map_err(|e| ToolExecuteError {
+                    message: format!(
+                        "Failed to resolve model \"{}\" for subagent \"{}\": {e}",
+                        model_selector, config.name
+                    ),
+                })?;
 
         let mut agent = Agent::new(
             agent_config,
             &agent_model,
             &agent_display,
             agent_max_tokens,
+            agent_supports_vision,
             self.permission.clone(),
             &self.work_dir,
         );
@@ -750,6 +753,7 @@ async fn run_subagent_task_inner(
             runtime_meta: None,
             think_ms: None,
             compacted: false,
+            attachments: None,
         };
         if let Err(e) = ctx.storage.append_message(&existing_id, &user_stored).await {
             eprintln!("[warn] Failed to persist subagent user message: {e}");
@@ -792,6 +796,7 @@ async fn run_subagent_task_inner(
             runtime_meta: None,
             think_ms: None,
             compacted: false,
+            attachments: None,
         };
         if let Err(e) = ctx
             .storage
@@ -814,7 +819,7 @@ async fn run_subagent_task_inner(
 
     // 启动 subagent 流式对话
     agent
-        .chat_stream(&prompt, sub_tx)
+        .chat_stream(&prompt, Vec::new(), sub_tx)
         .map_err(|e| ToolExecuteError {
             message: e.to_string(),
         })?;

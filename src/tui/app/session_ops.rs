@@ -12,7 +12,9 @@ impl App {
 
         let compact_summary = self.storage.get_compact_summary(session_id).await?;
         let stored = self.storage.load_messages(session_id).await?;
-        let active_stored = self.storage.load_active_messages(session_id).await?;
+        // 内存过滤替代第二次查询：避免同会话连查两遍（两遍都会解析附件 base64 大字段）
+        let active_stored: Vec<&crate::storage::StoredMessage> =
+            stored.iter().filter(|m| !m.compacted).collect();
 
         let mut chat_messages = Vec::new();
         let mut display_messages = Vec::new();
@@ -154,7 +156,7 @@ impl App {
         }
         self.messages = display_messages;
 
-        for msg in &active_stored {
+        for msg in active_stored {
             if msg.role == MessageRole::System {
                 continue;
             }
@@ -252,6 +254,7 @@ impl App {
         self.render.cache.clear();
         self.input.reset();
         self.pending_pastes.clear();
+        self.pending_images.clear();
         self.file_picker.reset();
         self.scroll_offset = 0;
         self.should_auto_scroll = true;
@@ -277,6 +280,7 @@ impl App {
         self.render.cache.clear();
         self.input.reset();
         self.pending_pastes.clear();
+        self.pending_images.clear();
         self.file_picker.reset();
         self.scroll_offset = 0;
         self.should_auto_scroll = true;

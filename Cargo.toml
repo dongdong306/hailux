@@ -31,6 +31,7 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite-bundled", "migrat
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 encoding_rs = "0.8"
+base64 = "0.22"
 chrono = "0.4"
 serde_json = "1"
 serde = { version = "1.0.228", features = ["derive"] }

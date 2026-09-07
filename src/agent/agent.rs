@@ -4,6 +4,7 @@ use super::models::{
     SharedMessage, ThinkingConfig,
 };
 use super::tools::ToolRegistry;
+use super::{media::Attachment, tools::ToolExecution};
 use crate::agent::event::{CompactUsage, CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
 use crate::permission::{PermissionManager, PermissionReply, PermissionResult};
 use async_openai::{
@@ -12,10 +13,12 @@ use async_openai::{
     types::chat::{
         ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+        ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
         ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
         ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionToolChoiceOption, FinishReason, FunctionCall, ToolChoiceOptions,
+        ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, FinishReason,
+        FunctionCall, ImageUrl, ToolChoiceOptions,
     },
 };
 use futures_util::StreamExt;
@@ -27,7 +30,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// 规划模式提示词。开启 plan 模式时，会注入到本轮最后一条用户消息中，
-/// 作为软约束提醒模型处于只读阶段。改编自 opencode 的 plan.txt。
+/// 作为软约束提醒模型处于只读阶段。
 const PLAN_MODE_PROMPT: &str = crate::prompts::PLAN_MODE;
 
 /// 取消标志轮询间隔。通过定时 sleep 轮询 `AtomicBool` 实现取消，
@@ -42,6 +45,170 @@ struct PartialToolCall {
     arguments: String,
 }
 
+/// 不支持视觉的模型收到图片时看到的占位文本
+/// （让模型自行转告用户，避免直接触发 Provider 400）。
+fn unsupported_image_text() -> String {
+    "ERROR: Cannot read the attached image (this model does not support vision input). Inform the user.".to_string()
+}
+
+/// 空的/损坏的图片附件占位文本。
+fn corrupted_image_text() -> String {
+    "ERROR: Image file is empty or corrupted. Inform the user.".to_string()
+}
+
+/// 构造图片 content part（data URL）。
+fn image_content_part(att: &Attachment) -> ChatCompletionRequestUserMessageContentPart {
+    ChatCompletionRequestUserMessageContentPart::ImageUrl(
+        ChatCompletionRequestMessageContentPartImage {
+            image_url: ImageUrl {
+                url: att.data_url.clone(),
+                detail: None,
+            },
+        },
+    )
+}
+
+/// 构造用户消息：无附件 → 纯文本；有附件 → Text + ImageUrl content parts
+/// （文本为空时跳过 Text part——部分 OpenAI 兼容端点拒绝空 text part）。
+pub fn build_user_message(
+    text: &str,
+    attachments: &[Attachment],
+) -> CompatibleChatCompletionRequestMessage {
+    if attachments.is_empty() {
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text(text.to_string()),
+            name: None,
+        }
+        .into()
+    } else {
+        let mut parts = Vec::new();
+        if !text.is_empty() {
+            parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: text.to_string(),
+                },
+            ));
+        }
+        parts.extend(attachments.iter().map(image_content_part));
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(parts),
+            name: None,
+        }
+        .into()
+    }
+}
+
+/// 按模型视觉能力清洗消息列表中用户消息的图片附件。
+/// - 支持视觉：仅校验空 base64，替换为损坏提示文本
+/// - 不支持视觉：所有图片替换为「不支持」提示文本（在克隆上操作，不污染存储历史）
+fn sanitize_messages_for_request(
+    messages: &[SharedMessage],
+    supports_vision: bool,
+) -> Vec<SharedMessage> {
+    let needs_fix = messages
+        .iter()
+        .any(|msg| user_message_needs_vision_fix(msg, supports_vision));
+    if !needs_fix {
+        return messages.to_vec();
+    }
+    messages
+        .iter()
+        .map(|msg| {
+            if !user_message_needs_vision_fix(msg, supports_vision) {
+                return Arc::clone(msg);
+            }
+            // 按引用重建 parts：只克隆文本 part，避免深拷贝即将被丢弃的
+            // base64 载荷（单图可达 ~13MB）
+            let CompatibleChatCompletionRequestMessage::User(u) = msg.as_ref() else {
+                return Arc::clone(msg);
+            };
+            let ChatCompletionRequestUserMessageContent::Array(parts) = &u.content else {
+                return Arc::clone(msg);
+            };
+            let new_parts: Vec<_> = parts
+                .iter()
+                .map(|p| match p {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                        let text = if empty_image_payload(&img.image_url.url) {
+                            corrupted_image_text()
+                        } else {
+                            unsupported_image_text()
+                        };
+                        ChatCompletionRequestUserMessageContentPart::Text(
+                            ChatCompletionRequestMessageContentPartText { text },
+                        )
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            Arc::new(
+                ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Array(new_parts),
+                    name: u.name.clone(),
+                }
+                .into(),
+            )
+        })
+        .collect()
+}
+
+/// 用户消息是否含有需要降级的图片 part（模型不支持视觉，或 base64 载荷为空）。
+fn user_message_needs_vision_fix(msg: &SharedMessage, supports_vision: bool) -> bool {
+    matches!(
+        msg.as_ref(),
+        CompatibleChatCompletionRequestMessage::User(u)
+            if matches!(&u.content, ChatCompletionRequestUserMessageContent::Array(parts)
+                if parts.iter().any(|p| match p {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(img) =>
+                        !supports_vision || empty_image_payload(&img.image_url.url),
+                    _ => false,
+                }))
+    )
+}
+
+/// 判断 data URL 的 base64 载荷是否为空。
+fn empty_image_payload(data_url: &str) -> bool {
+    crate::agent::media::data_url_payload_is_empty(data_url)
+}
+
+/// 压缩场景的媒体降级：图片 part 替换为占位文本（摘要无需图片本体，
+/// 且压缩请求不应携带大体量 base64）。
+fn strip_media_for_compaction(msg: &SharedMessage) -> SharedMessage {
+    let CompatibleChatCompletionRequestMessage::User(u) = msg.as_ref() else {
+        return Arc::clone(msg);
+    };
+    let ChatCompletionRequestUserMessageContent::Array(parts) = &u.content else {
+        return Arc::clone(msg);
+    };
+    if !parts
+        .iter()
+        .any(|p| matches!(p, ChatCompletionRequestUserMessageContentPart::ImageUrl(_)))
+    {
+        return Arc::clone(msg);
+    }
+    // 按引用重建 parts：只克隆文本 part，不搬运即将被丢弃的 base64 载荷
+    let new_parts: Vec<_> = parts
+        .iter()
+        .map(|p| match p {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
+                ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: "[Attached image: removed for context compaction]".to_string(),
+                    },
+                )
+            }
+            other => other.clone(),
+        })
+        .collect();
+    Arc::new(
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(new_parts),
+            name: u.name.clone(),
+        }
+        .into(),
+    )
+}
+
 /// Agent，封装了与 LLM 交互的核心逻辑
 pub struct Agent {
     client: Client<OpenAIConfig>,
@@ -52,6 +219,8 @@ pub struct Agent {
     /// 展示用模型名（`provider/model`，与用量统计口径一致）
     model_display: String,
     max_tokens: u32,
+    /// 当前模型是否支持视觉（图片）输入；不支持时附件在请求组装层降级为提示文本
+    supports_vision: bool,
     plan_mode: bool,
     cancel: Arc<AtomicBool>,
     permission: PermissionManager,
@@ -65,6 +234,7 @@ impl Agent {
         model: &str,
         model_display: &str,
         max_tokens: u32,
+        supports_vision: bool,
         permission: PermissionManager,
         work_dir: &str,
     ) -> Self {
@@ -75,6 +245,7 @@ impl Agent {
             model: model.to_string(),
             model_display: model_display.to_string(),
             max_tokens,
+            supports_vision,
             plan_mode: false,
             cancel: Arc::new(AtomicBool::new(false)),
             permission,
@@ -114,11 +285,13 @@ impl Agent {
         model: &str,
         model_display: &str,
         max_tokens: u32,
+        supports_vision: bool,
     ) {
         self.client = Client::with_config(config);
         self.model = model.to_string();
         self.model_display = model_display.to_string();
         self.max_tokens = max_tokens;
+        self.supports_vision = supports_vision;
     }
 
     pub fn permission(&self) -> &PermissionManager {
@@ -178,15 +351,11 @@ impl Agent {
     pub fn chat_stream(
         &mut self,
         user_input: &str,
+        attachments: Vec<Attachment>,
         event_tx: CoreEventTx,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.messages.push(Arc::new(
-            ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(user_input.to_string()),
-                name: None,
-            }
-            .into(),
-        ));
+        self.messages
+            .push(Arc::new(build_user_message(user_input, &attachments)));
 
         let client = self.client.clone();
         let tool_registry = self.tool_registry.clone_registry();
@@ -201,6 +370,7 @@ impl Agent {
             model: self.model.clone(),
             model_display: self.model_display.clone(),
             max_tokens: self.max_tokens,
+            supports_vision: self.supports_vision,
             plan_mode: self.plan_mode,
             permission,
             work_dir,
@@ -283,7 +453,7 @@ impl Agent {
                     CompatibleChatCompletionRequestMessage::System(_)
                 )
             })
-            .cloned()
+            .map(strip_media_for_compaction)
             .collect();
 
         if conversation.len() < 2 {
@@ -402,6 +572,8 @@ struct AgentStreamState {
     /// 快照的展示模型名（事件携带，用量统计归属依据）
     model_display: String,
     max_tokens: u32,
+    /// 当前模型是否支持视觉输入（决定图片附件是否降级）
+    supports_vision: bool,
     plan_mode: bool,
     permission: PermissionManager,
     work_dir: String,
@@ -418,14 +590,27 @@ impl AgentStreamState {
             for msg in messages.iter_mut().rev() {
                 let msg_mut = Arc::make_mut(msg);
                 if let CompatibleChatCompletionRequestMessage::User(u) = msg_mut {
-                    if let ChatCompletionRequestUserMessageContent::Text(t) = &mut u.content {
-                        t.push_str("\n\n");
-                        t.push_str(PLAN_MODE_PROMPT);
+                    match &mut u.content {
+                        ChatCompletionRequestUserMessageContent::Text(t) => {
+                            t.push_str("\n\n");
+                            t.push_str(PLAN_MODE_PROMPT);
+                        }
+                        // 带图片附件的消息：提示词追加为独立的 text part
+                        ChatCompletionRequestUserMessageContent::Array(parts) => {
+                            parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                                ChatCompletionRequestMessageContentPartText {
+                                    text: format!("\n\n{PLAN_MODE_PROMPT}"),
+                                },
+                            ));
+                        }
                     }
                     break;
                 }
             }
         }
+        // 视觉能力兜底校验：
+        // 不支持视觉的模型收到图片时替换为错误文本，由模型转告用户
+        let messages = sanitize_messages_for_request(&messages, self.supports_vision);
         let mut builder = CompatibleCreateChatCompletionRequestArgs::default();
         builder
             .max_completion_tokens(self.max_tokens)
@@ -884,6 +1069,10 @@ async fn handle_tool_calls_stream(
     cancel: &Arc<AtomicBool>,
     event_tx: &CoreEventTx,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // 附件统一在循环结束后注入：合成 user 消息若插在连续 tool 消息中间，
+    // 会破坏「tool 消息必须紧跟带 tool_calls 的 assistant 消息」的约束
+    // （严格 Provider 直接 400），且已持久化的交错序列会污染后续每轮请求。
+    let mut pending_attachments: Vec<Attachment> = Vec::new();
     for tool_call in tool_calls {
         if cancel.load(Ordering::Relaxed) {
             let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
@@ -1009,9 +1198,8 @@ async fn handle_tool_calls_stream(
             });
         }
 
-        let result_display: (String, Option<String>) = if let Some(deny_reason) = permission_denied
-        {
-            (deny_reason, None)
+        let execution: ToolExecution = if let Some(deny_reason) = permission_denied {
+            ToolExecution::text(deny_reason)
         } else if let Some(tool) = tool_arc {
             if tool.cancellable() {
                 let cancel_clone = cancel.clone();
@@ -1019,25 +1207,37 @@ async fn handle_tool_calls_stream(
                 tokio::pin!(execute_fut);
                 tokio::select! {
                     r = &mut execute_fut => {
-                        r.unwrap_or_else(|err| (err.message, None))
+                        r.unwrap_or_else(|err| ToolExecution::text(err.message))
                     }
                     _ = async {
                         while !cancel_clone.load(Ordering::Relaxed) {
                             tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
                         }
                     } => {
-                        ("Tool execution aborted".to_string(), None)
+                        ToolExecution::text("Tool execution aborted")
                     }
                 }
             } else {
                 tool.execute_async_with_display(arguments)
                     .await
-                    .unwrap_or_else(|err| (err.message, None))
+                    .unwrap_or_else(|err| ToolExecution::text(err.message))
             }
         } else {
-            ("Unknown function".to_string(), None)
+            ToolExecution::text("Unknown function")
         };
-        let (result, display) = result_display;
+        let ToolExecution {
+            content: mut result,
+            display,
+            attachments,
+        } = execution;
+
+        // 模型不支持视觉时不注入合成消息，改为在工具输出尾部附说明，让模型转告用户
+        let omit_images = !attachments.is_empty() && !state.supports_vision;
+        if omit_images {
+            result.push_str(
+                "\n[Image attachment omitted: this model does not support vision input. Inform the user.]",
+            );
+        }
 
         let _ = event_tx.try_send(CoreEvent::ToolResult {
             name: name.clone(),
@@ -1059,6 +1259,30 @@ async fn handle_tool_calls_stream(
             msg
         };
         emit_persist_message(event_tx, &pushed_msg, None, &state.model_display, display);
+
+        // 工具返回了媒体附件（如 read 读到图片）：OpenAI Chat Completions 的 tool result
+        // 只允许文本，媒体收集后在全部 tool 消息之后统一剥离为一条合成 user 消息
+        //（保持 tool 消息连续以满足 Provider 校验）。
+        if !attachments.is_empty() && !omit_images {
+            pending_attachments.extend(attachments);
+        }
+    }
+    if !pending_attachments.is_empty() {
+        let mut parts = vec![ChatCompletionRequestUserMessageContentPart::Text(
+            ChatCompletionRequestMessageContentPartText {
+                text: "[Attached image(s) from tool result]".to_string(),
+            },
+        )];
+        parts.extend(pending_attachments.iter().map(image_content_part));
+        let synth_msg: SharedMessage = Arc::new(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Array(parts),
+                name: None,
+            }
+            .into(),
+        );
+        state.messages.push(Arc::clone(&synth_msg));
+        emit_persist_message(event_tx, &synth_msg, None, &state.model_display, None);
     }
     Ok(())
 }
@@ -1066,6 +1290,7 @@ async fn handle_tool_calls_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tools::ToolExecuteError;
 
     fn make_test_agent() -> Agent {
         let config = OpenAIConfig::new().with_api_base("http://localhost:0");
@@ -1073,7 +1298,15 @@ mod tests {
             crate::permission::PermissionMode::Yolo,
             vec![],
         );
-        Agent::new(config, "test-model", "test/test-model", 4096, pm, ".")
+        Agent::new(
+            config,
+            "test-model",
+            "test/test-model",
+            4096,
+            false,
+            pm,
+            ".",
+        )
     }
 
     #[test]
@@ -1146,6 +1379,263 @@ mod tests {
         assert!(matches!(
             agent.messages[2].as_ref(),
             CompatibleChatCompletionRequestMessage::User(_)
+        ));
+    }
+
+    // ── 图片附件 ─────────────────────────────────────────
+
+    fn user_msg(text: &str) -> SharedMessage {
+        Arc::new(build_user_message(text, &[]))
+    }
+
+    fn png_attachment() -> Attachment {
+        let png_bytes: [u8; 16] = [
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4, 5, 6, 7, 8,
+        ];
+        Attachment::from_bytes("image/png", &png_bytes)
+    }
+
+    #[test]
+    fn build_user_message_with_attachments_uses_array_content() {
+        let msg = build_user_message("看这张图", &[png_attachment()]);
+        match &msg {
+            CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert_eq!(parts.len(), 2);
+                    assert!(matches!(
+                        parts[0],
+                        ChatCompletionRequestUserMessageContentPart::Text(_)
+                    ));
+                    assert!(matches!(
+                        parts[1],
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                    ));
+                }
+                _ => panic!("expected array content"),
+            },
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn sanitize_vision_unsupported_replaces_images_with_error_text() {
+        let msgs = vec![
+            user_msg("看这张图"),
+            Arc::new(build_user_message("", &[png_attachment()])),
+        ];
+        let sanitized = sanitize_messages_for_request(&msgs, false);
+        assert_eq!(sanitized.len(), 2);
+        match sanitized[1].as_ref() {
+            CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert!(parts.iter().all(|p| matches!(
+                        p,
+                        ChatCompletionRequestUserMessageContentPart::Text(_)
+                    )));
+                    let joined: String = parts
+                        .iter()
+                        .map(|p| match p {
+                            ChatCompletionRequestUserMessageContentPart::Text(t) => t.text.clone(),
+                            _ => String::new(),
+                        })
+                        .collect();
+                    assert!(joined.contains("does not support vision"));
+                }
+                _ => panic!("expected array content"),
+            },
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn sanitize_vision_supported_keeps_images() {
+        let msgs = vec![Arc::new(build_user_message("图", &[png_attachment()]))];
+        let sanitized = sanitize_messages_for_request(&msgs, true);
+        match sanitized[0].as_ref() {
+            CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert!(matches!(
+                        parts[1],
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                    ));
+                }
+                _ => panic!("expected array content"),
+            },
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn sanitize_empty_payload_replaced_even_with_vision() {
+        let corrupted = Attachment {
+            mime: "image/png".to_string(),
+            data_url: "data:image/png;base64,".to_string(),
+        };
+        let msgs = vec![Arc::new(build_user_message("空图", &[corrupted]))];
+        let sanitized = sanitize_messages_for_request(&msgs, true);
+        match sanitized[0].as_ref() {
+            CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    let joined: String = parts
+                        .iter()
+                        .map(|p| match p {
+                            ChatCompletionRequestUserMessageContentPart::Text(t) => t.text.clone(),
+                            _ => String::new(),
+                        })
+                        .collect();
+                    assert!(joined.contains("empty or corrupted"));
+                }
+                _ => panic!("expected array content"),
+            },
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn sanitize_plain_text_messages_untouched() {
+        let msgs = vec![user_msg("纯文本"), user_msg("第二条")];
+        let sanitized = sanitize_messages_for_request(&msgs, false);
+        assert_eq!(sanitized.len(), 2);
+        // Arc 未被克隆重建（同一指针）时无需修复 —— 仅校验内容不变
+        match sanitized[0].as_ref() {
+            CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "纯文本"),
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected User message"),
+        }
+    }
+
+    // ── 并行工具调用的附件注入 ──────────────────────────────
+
+    /// 返回固定图片附件的测试工具（permission_category 为 None，跳过权限检查）
+    struct AttachmentTool;
+
+    impl super::super::tools::Tool for AttachmentTool {
+        fn name(&self) -> &str {
+            "attachment_tool"
+        }
+        fn description(&self) -> &str {
+            "returns an image attachment"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute_async<'a>(
+            &'a self,
+            _arguments: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, ToolExecuteError>> + Send + 'a>,
+        > {
+            Box::pin(async { Ok("image loaded".to_string()) })
+        }
+        fn execute_async_with_display<'a>(
+            &'a self,
+            _arguments: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ToolExecution, ToolExecuteError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(ToolExecution {
+                    content: "image loaded".to_string(),
+                    display: None,
+                    attachments: vec![png_attachment()],
+                })
+            })
+        }
+    }
+
+    fn tool_call(id: &str, name: &str) -> ChatCompletionMessageToolCalls {
+        ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
+            id: id.to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        })
+    }
+
+    fn test_stream_state(supports_vision: bool) -> AgentStreamState {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(AttachmentTool));
+        AgentStreamState {
+            client: Client::with_config(OpenAIConfig::new().with_api_base("http://localhost:0")),
+            tool_registry: registry,
+            messages: Vec::new(),
+            model: "test-model".to_string(),
+            model_display: "test/test-model".to_string(),
+            max_tokens: 4096,
+            supports_vision,
+            plan_mode: false,
+            permission: crate::permission::PermissionManager::new(
+                crate::permission::PermissionMode::Yolo,
+                vec![],
+            ),
+            work_dir: ".".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_attachments_go_after_all_tool_messages() {
+        let (event_tx, _rx) = crate::agent::event::create_core_event_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut state = test_stream_state(true);
+        let calls = vec![
+            tool_call("call_1", "attachment_tool"),
+            tool_call("call_2", "attachment_tool"),
+        ];
+
+        handle_tool_calls_stream(&mut state, &calls, &cancel, &event_tx)
+            .await
+            .unwrap();
+
+        // 期望序列：tool → tool → user(合成)。合成 user 消息若插在两条
+        // tool 消息之间，严格 Provider 会以 400 拒绝整轮请求。
+        assert_eq!(state.messages.len(), 3);
+        assert!(matches!(
+            state.messages[0].as_ref(),
+            CompatibleChatCompletionRequestMessage::Tool(_)
+        ));
+        assert!(matches!(
+            state.messages[1].as_ref(),
+            CompatibleChatCompletionRequestMessage::Tool(_)
+        ));
+        match state.messages[2].as_ref() {
+            CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    let image_count = parts
+                        .iter()
+                        .filter(|p| {
+                            matches!(p, ChatCompletionRequestUserMessageContentPart::ImageUrl(_))
+                        })
+                        .count();
+                    assert_eq!(image_count, 2, "两张图片应合并进同一条合成消息");
+                }
+                _ => panic!("expected array content"),
+            },
+            _ => panic!("expected synthetic User message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn text_only_tool_calls_produce_no_synthetic_message() {
+        let (event_tx, _rx) = crate::agent::event::create_core_event_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut state = test_stream_state(true);
+        let calls = vec![tool_call("call_1", "unknown_tool")];
+
+        handle_tool_calls_stream(&mut state, &calls, &cancel, &event_tx)
+            .await
+            .unwrap();
+
+        assert_eq!(state.messages.len(), 1);
+        assert!(matches!(
+            state.messages[0].as_ref(),
+            CompatibleChatCompletionRequestMessage::Tool(_)
         ));
     }
 }

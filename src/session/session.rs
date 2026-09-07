@@ -148,14 +148,15 @@ impl ChatSession {
 
     // ── 消息 ─────────────────────────────────────────────
 
-    /// 发送用户消息并启动流式处理（不等待完成，事件经 `tx` 流出）。
+    /// 发送用户消息（可携带图片附件）并启动流式处理（不等待完成，事件经 `tx` 流出）。
     /// 前置条件：已绑定事件通道（见 `bind_event_channel`）。
     pub fn send_message(
         &mut self,
         message: &str,
+        attachments: Vec<crate::agent::media::Attachment>,
         tx: CoreEventTx,
     ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.agent.chat_stream(message, tx)
+        self.agent.chat_stream(message, attachments, tx)
     }
 
     /// 为本次请求绑定事件通道（ask_user / subagent 转发走 hub）
@@ -222,12 +223,15 @@ impl ChatSession {
             .permission()
             .switch_session(session_id.to_string());
 
+        // 一次查询拉全量，内存中过滤 compacted 得到活跃上下文，
+        // 避免同会话连查两遍（两遍都会解析附件 base64 大字段）
         let stored = self.storage.load_messages(session_id).await?;
-        let active = self.storage.load_active_messages(session_id).await?;
+        let active: Vec<&crate::storage::StoredMessage> =
+            stored.iter().filter(|m| !m.compacted).collect();
         let compact_summary = self.storage.get_compact_summary(session_id).await?;
 
         let mut chat_messages = Vec::new();
-        for msg in &active {
+        for msg in active {
             if msg.role == crate::storage::MessageRole::System {
                 continue;
             }
@@ -321,6 +325,7 @@ impl ChatSession {
             &resolved.model_id,
             &resolved.display,
             resolved.max_tokens,
+            resolved.supports_vision,
         );
     }
 
@@ -368,6 +373,7 @@ mod tests {
             max_tokens: 1024,
             context_window: 8192,
             display: "test/test-model".to_string(),
+            supports_vision: false,
         };
         let session = ChatSession::new(
             &resolved,
@@ -419,6 +425,7 @@ mod tests {
             runtime_meta: None,
             think_ms: None,
             compacted: false,
+            attachments: None,
         }
     }
 

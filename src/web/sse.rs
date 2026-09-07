@@ -17,7 +17,10 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 
+use base64::Engine as _;
+
 use crate::agent::event::{CoreEvent, CoreEventTx, create_core_event_channel};
+use crate::agent::media;
 use crate::session::ChatSession;
 use crate::storage::{MessageRole, StoredMessage};
 
@@ -27,6 +30,58 @@ use super::task_registry::ConnectionGuard;
 
 /// 工具结果推送前端的长度上限（字符）
 const TOOL_RESULT_MAX_CHARS: usize = 100_000;
+
+/// 聊天接口请求体上限。axum `Json` 提取器默认 2MB body limit，
+/// 附件 base64 膨胀 4/3 后原图 >~1.4MB 即触发 413，使 10MB 上限形同
+/// 虚设——路由层必须用本常量显式放开（见 web/mod.rs）。
+/// 取满额附件（数量上限 × 单附件 base64 后大小）+ JSON 结构余量。
+pub(super) const CHAT_BODY_LIMIT: usize =
+    media::MAX_ATTACHMENT_COUNT * (media::MAX_IMAGE_BYTES / 3 * 4) + 64 * 1024;
+
+/// 校验并转换前端上传的图片附件：剥 data URL 前缀（严格匹配 mime）→
+/// base64 解码（顺带校验字符集与 padding）→ 精确大小校验 → 魔数嗅探并以
+/// 嗅探结果覆盖 mime。校验失败返回 Err(原因)，由调用方回送 SSE Error 事件。
+fn convert_attachments(
+    attachments: &[protocol::ChatAttachment],
+) -> Result<Vec<media::Attachment>, String> {
+    if attachments.len() > media::MAX_ATTACHMENT_COUNT {
+        return Err(format!(
+            "图片附件数量超过上限（{} 张）",
+            media::MAX_ATTACHMENT_COUNT
+        ));
+    }
+    attachments
+        .iter()
+        .enumerate()
+        .map(|(i, att)| {
+            let idx = i + 1;
+            if !media::is_supported_image_mime(&att.mime) {
+                return Err(format!(
+                    "第 {idx} 个附件类型不支持（{}），仅支持 PNG/JPEG/GIF/WebP",
+                    att.mime
+                ));
+            }
+            let prefix = format!("data:{};base64,", att.mime);
+            let Some(payload) = att.data_url.strip_prefix(&prefix) else {
+                return Err(format!("第 {idx} 个附件 data URL 格式非法"));
+            };
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload.trim())
+                .map_err(|_| format!("第 {idx} 个附件 base64 解码失败"))?;
+            if bytes.len() > media::MAX_IMAGE_BYTES {
+                return Err(format!("第 {idx} 个附件超过大小上限（10 MB）"));
+            }
+            if bytes.is_empty() {
+                return Err(format!("第 {idx} 个附件内容为空"));
+            }
+            let Some(mime) = media::sniff_image_mime(&bytes) else {
+                return Err(format!("第 {idx} 个附件内容不是受支持的图片格式"));
+            };
+            // 用魔数嗅探结果重建附件（规范化 data_url，入库与发送同构）
+            Ok(media::Attachment::from_bytes(mime, &bytes))
+        })
+        .collect()
+}
 
 pub async fn chat_handler(
     State(state): State<Arc<WebServerState>>,
@@ -41,6 +96,11 @@ pub async fn chat_handler(
     let (core_tx, mut core_rx) = create_core_event_channel();
     let guard = ConnectionGuard::new(state.registry.clone());
     let message = req.message;
+    // 图片附件：入口处一次性校验（类型/大小/空载荷）
+    let attachments = match convert_attachments(&req.attachments) {
+        Ok(a) => a,
+        Err(e) => return error_response(e),
+    };
     let requested_session_id = req.session_id;
     let resolved = state.manager.resolved();
     let compact_threshold = state.manager.cfg().compact_threshold;
@@ -84,7 +144,7 @@ pub async fn chat_handler(
             }
         };
 
-        if let Err(e) = persist_user_message(&session, &session_id, &message).await {
+        if let Err(e) = persist_user_message(&session, &session_id, &message, &attachments).await {
             yield sse_event(&ServerEvent::Error { message: format!("持久化用户消息失败: {e}") });
             return;
         }
@@ -113,7 +173,7 @@ pub async fn chat_handler(
         // PersistMessage 时求和写入 think_ms）
         let mut thinking_started: Option<Instant> = None;
         let mut think_total_ms: u64 = 0;
-        if let Err(e) = session.send_message(&message, core_tx.clone()) {
+        if let Err(e) = session.send_message(&message, attachments, core_tx.clone()) {
             yield sse_event(&ServerEvent::Error { message: e.to_string() });
             return;
         }
@@ -467,7 +527,13 @@ async fn persist_user_message(
     session: &ChatSession,
     session_id: &str,
     message: &str,
+    attachments: &[crate::agent::media::Attachment],
 ) -> Result<(), String> {
+    let attachments_json = if attachments.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(attachments).map_err(|e| e.to_string())?)
+    };
     let stored = StoredMessage {
         role: MessageRole::User,
         content: message.to_string(),
@@ -481,6 +547,7 @@ async fn persist_user_message(
         runtime_meta: None,
         think_ms: None,
         compacted: false,
+        attachments: attachments_json,
     };
     session
         .storage()
@@ -541,4 +608,81 @@ fn sse_event(event: &ServerEvent) -> Result<Event, std::convert::Infallible> {
 
 fn error_response(msg: String) -> Response {
     (StatusCode::BAD_REQUEST, msg).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn att(mime: &str, data_url: &str) -> protocol::ChatAttachment {
+        protocol::ChatAttachment {
+            mime: mime.to_string(),
+            data_url: data_url.to_string(),
+        }
+    }
+
+    fn png_data_url() -> String {
+        crate::agent::media::Attachment::from_bytes(
+            "image/png",
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2],
+        )
+        .data_url
+    }
+
+    #[test]
+    fn converts_valid_png() {
+        let out = convert_attachments(&[att("image/png", &png_data_url())]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].mime, "image/png");
+        assert!(out[0].data_url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn rejects_unsupported_mime() {
+        let err = convert_attachments(&[att("image/svg+xml", "data:image/svg+xml;base64,AAAA")])
+            .unwrap_err();
+        assert!(err.contains("类型不支持"));
+    }
+
+    #[test]
+    fn rejects_malformed_data_url() {
+        // 前缀与 mime 不匹配
+        let err = convert_attachments(&[att("image/png", "data:image/jpeg;base64,iVBORw0KGgo")])
+            .unwrap_err();
+        assert!(err.contains("data URL 格式非法"));
+        // 完全没有 data URL 前缀
+        let err = convert_attachments(&[att("image/png", "iVBORw0KGgo")]).unwrap_err();
+        assert!(err.contains("data URL 格式非法"));
+    }
+
+    #[test]
+    fn rejects_invalid_base64() {
+        let err =
+            convert_attachments(&[att("image/png", "data:image/png;base64,!!!!")]).unwrap_err();
+        assert!(err.contains("base64 解码失败"));
+    }
+
+    #[test]
+    fn rejects_empty_payload() {
+        let err = convert_attachments(&[att("image/png", "data:image/png;base64,")]).unwrap_err();
+        assert!(err.contains("内容为空"));
+    }
+
+    #[test]
+    fn rejects_non_image_content() {
+        // 合法 base64 但内容不是图片（魔数嗅探失败）
+        let err =
+            convert_attachments(&[att("image/png", "data:image/png;base64,aGVsbG8=")]).unwrap_err();
+        assert!(err.contains("不是受支持的图片格式"));
+    }
+
+    #[test]
+    fn rejects_count_over_limit() {
+        let durl = png_data_url();
+        let many: Vec<_> = (0..media::MAX_ATTACHMENT_COUNT + 1)
+            .map(|_| att("image/png", &durl))
+            .collect();
+        let err = convert_attachments(&many).unwrap_err();
+        assert!(err.contains("数量超过上限"));
+    }
 }

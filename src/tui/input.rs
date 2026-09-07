@@ -5,6 +5,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub(crate) enum ElementKind {
     Paste,
     FileMention,
+    Image,
 }
 
 #[derive(Debug, Clone)]

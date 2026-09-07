@@ -34,7 +34,7 @@ const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[
   return [];
 };
 
-/* ── 用户消息：官方 base（bg-muted 气泡）────────────────────── */
+/* ── 用户消息：官方 base（bg-muted 气泡，图片附件渲染缩略图）──── */
 function UserMessage() {
   return (
     <MessagePrimitive.Root className="flex justify-end">
@@ -43,6 +43,18 @@ function UserMessage() {
           components={{
             Text: ({ text }) => (
               <p className="whitespace-pre-wrap leading-relaxed">{text}</p>
+            ),
+            Image: ({ image }) => (
+              <img
+                src={image}
+                alt="attachment"
+                loading="lazy"
+                decoding="async"
+                onError={(ev) => {
+                  ev.currentTarget.style.opacity = "0.3";
+                }}
+                className="mt-1 max-h-48 rounded-lg border border-border object-contain"
+              />
             ),
           }}
         />

@@ -1,6 +1,7 @@
 // 应用状态：会话/消息/权限请求/模式（Zustand）
 import { create, type StoreApi } from "zustand";
 import type {
+  ChatAttachment,
   ChatRequest,
   CommandInfo,
   CreateModelInput,
@@ -41,6 +42,8 @@ export interface ChatItem {
   ctxCompletionTokens?: number; // 本轮上下文占用快照（最后一次请求输出 token）
   thinkMs?: number; // 思考耗时（最终）
   thinkStartedAt?: number; // 思考计时起点（进行中，epoch ms）
+  /** 用户消息的图片附件（data URL，用于气泡内缩略图） */
+  images?: ChatAttachment[];
 }
 
 /** localStorage：上次访问的项目目录 key */
@@ -310,7 +313,7 @@ interface AppState {
   newSession: (workDir?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
-  sendMessage: (message: string) => Promise<void>;
+  sendMessage: (message: string, attachments?: ChatAttachment[]) => Promise<void>;
   /** 手动压缩当前会话上下文（POST /api/compact，SSE 响应） */
   runCompact: () => Promise<void>;
   interrupt: () => Promise<void>;
@@ -673,7 +676,15 @@ export const useApp = create<AppState>((set, get) => ({
         compactMarkerInserted = true;
       }
       if (msg.role === "User") {
-        items.push({ kind: "user", text: msg.content });
+        let images: ChatAttachment[] = [];
+        if (msg.attachments) {
+          try {
+            images = JSON.parse(msg.attachments) as ChatAttachment[];
+          } catch {
+            // 忽略解析失败
+          }
+        }
+        items.push({ kind: "user", text: msg.content, images });
         turnCtx = null;
       } else if (msg.role === "Assistant") {
         if (msg.prompt_tokens !== null) {
@@ -803,10 +814,11 @@ export const useApp = create<AppState>((set, get) => ({
     await get().loadSessions();
   },
 
-  async sendMessage(message) {
+  async sendMessage(message, attachments) {
     if (get().isRunning) return;
     const req: ChatRequest = {
       message,
+      attachments: attachments?.length ? attachments : undefined,
       session_id: get().sessionId ?? undefined,
       work_dir: get().workDir || undefined,
     };
@@ -818,7 +830,7 @@ export const useApp = create<AppState>((set, get) => ({
       isRunning: true,
       runStartedAt: Date.now(),
       inputHistory: [...s.inputHistory.filter((h) => h !== message), message].slice(-100),
-      items: [...s.items, { kind: "user", text: message }],
+      items: [...s.items, { kind: "user", text: message, images: attachments }],
     }));
 
     // 本轮最近一次 UsageUpdate 快照：AgentComplete 时随 done 行落进消息底部操作栏

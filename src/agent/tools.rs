@@ -1,4 +1,5 @@
 use crate::agent::event::{CoreEvent, QuestionInfo, QuestionOption};
+use crate::agent::media::Attachment;
 use crate::agent::utils::compare_mtime;
 use crate::permission::PermissionRequest;
 use crate::permission::bash_arity::extract_bash_pattern;
@@ -23,8 +24,30 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::oneshot;
 
+/// 工具执行结果：文本输出 + 可选 UI 展示数据 + 可选媒体附件。
+///
+/// 附件约定：文本输出只放占位说明文字，
+/// 媒体本体（`data:<mime>;base64,<data>`）放 attachments，
+/// 由 agent loop 在请求组装层决定内联或降级。
+#[derive(Debug, Clone, Default)]
+pub struct ToolExecution {
+    pub content: String,
+    pub display: Option<String>,
+    pub attachments: Vec<Attachment>,
+}
+
+impl ToolExecution {
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            display: None,
+            attachments: Vec::new(),
+        }
+    }
+}
+
 type ToolFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(String, Option<String>), ToolExecuteError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<ToolExecution, ToolExecuteError>> + Send + 'a>>;
 
 #[derive(Debug)]
 pub struct ToolExecuteError {
@@ -147,14 +170,18 @@ pub trait Tool: Send + Sync {
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>>;
 
-    /// 异步执行并返回用于 UI 展示的额外数据（如 diff）。
-    /// 默认委托给 `execute_async`，display 返回 `None`。
-    /// 仅需要提供 UI 专用展示信息的工具（如 edit/write）覆写此方法。
+    /// 异步执行并返回用于 UI 展示的额外数据（如 diff）与媒体附件。
+    /// 默认委托给 `execute_async`，display 返回 `None`、attachments 为空。
+    /// 需要提供 UI 专用展示信息的工具（如 edit/write）或媒体附件的工具（如 read）覆写此方法。
     fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
         let fut = self.execute_async(arguments);
         Box::pin(async move {
             let content = fut.await?;
-            Ok((content, None))
+            Ok(ToolExecution {
+                content,
+                display: None,
+                attachments: Vec::new(),
+            })
         })
     }
 
@@ -947,6 +974,13 @@ impl Tool for ReadTool {
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
+            let exec = self.execute_async_with_display(arguments).await?;
+            Ok(exec.content)
+        })
+    }
+
+    fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
+        Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
                 message: format!("Invalid JSON parameter: {e}"),
             })?;
@@ -971,9 +1005,9 @@ impl Tool for ReadTool {
                 .unwrap_or(2000);
 
             let path = Path::new(file_path);
-            let mut result = String::new();
             if path.is_dir() {
                 let entries = fs::read_dir(path)?;
+                let mut result = String::new();
                 result.push_str(
                     format!(
                         indoc! { r#"
@@ -1007,31 +1041,81 @@ impl Tool for ReadTool {
                     }
                 }
                 result.push_str("</entries>");
-            } else {
-                let content = fs::read_to_string(path)?;
-                let content = content
-                    .lines()
-                    .skip(offset - 1)
-                    .take(limit)
-                    .collect::<Vec<_>>();
+                return Ok(ToolExecution::text(result));
+            }
+
+            // 图片文件：魔数嗅探命中 → 文本只放确认说明，图片本体作为附件返回。
+            // 注意：此处不校验模型是否支持视觉，能力校验推迟到发送层。
+            // 先用前 12 字节嗅探魔数（PNG/JPEG/GIF/WebP 的魔数均在前 12 字节内）：
+            // 命中且超限时仅凭元数据拒绝，避免把超大文件整个读入内存后再丢弃
+            let mut prefix = Vec::with_capacity(12);
+            {
+                use std::io::Read as _;
+                fs::File::open(path)?.take(12).read_to_end(&mut prefix)?;
+            }
+            if crate::agent::media::sniff_image_mime(&prefix).is_some() {
+                let meta = fs::metadata(path)?;
+                if meta.len() > crate::agent::media::MAX_IMAGE_BYTES as u64 {
+                    return Ok(ToolExecution::text(format!(
+                        "Image at {} is too large ({:.1} MB, max {} MB) and was not loaded.",
+                        file_path,
+                        meta.len() as f64 / (1024.0 * 1024.0),
+                        crate::agent::media::MAX_IMAGE_BYTES / (1024 * 1024)
+                    )));
+                }
+            }
+            let bytes = fs::read(path)?;
+            if let Some(mime) = crate::agent::media::sniff_image_mime(&bytes) {
+                let canonical = path.canonicalize()?.display().to_string();
+                let mut result = String::new();
                 result.push_str(
                     format!(
                         indoc! { r#"
                     <path>{}</path>
-                    <type>file</type>
+                    <type>image</type>
+                    <mime>{}</mime>
                 "#},
-                        path.canonicalize()?.display()
+                        canonical, mime
                     )
                     .as_str(),
                 );
-                result.push_str("<content>");
-                for (line_number, line) in (offset..).zip(content) {
-                    result.push_str(format!("{}: {}\n", line_number, line).as_str());
-                }
-                result.push_str("</content>");
+                result.push_str(
+                    "Image read successfully. The image content is attached for visual analysis.",
+                );
+                return Ok(ToolExecution {
+                    content: result,
+                    display: None,
+                    attachments: vec![Attachment::from_bytes(mime, &bytes)],
+                });
             }
 
-            Ok(result)
+            // 文本文件（非 UTF-8 二进制保持原有报错行为）
+            let content = String::from_utf8(bytes).map_err(|e| ToolExecuteError {
+                message: format!("Stream did not contain valid UTF-8: {e} (binary file?)"),
+            })?;
+            let content = content
+                .lines()
+                .skip(offset - 1)
+                .take(limit)
+                .collect::<Vec<_>>();
+            let mut result = String::new();
+            result.push_str(
+                format!(
+                    indoc! { r#"
+                    <path>{}</path>
+                    <type>file</type>
+                "#},
+                    path.canonicalize()?.display()
+                )
+                .as_str(),
+            );
+            result.push_str("<content>");
+            for (line_number, line) in (offset..).zip(content) {
+                result.push_str(format!("{}: {}\n", line_number, line).as_str());
+            }
+            result.push_str("</content>");
+
+            Ok(ToolExecution::text(result))
         })
     }
 }
@@ -1192,8 +1276,8 @@ impl Tool for EditTool {
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
-            let (content, _display) = self.execute_async_with_display(arguments).await?;
-            Ok(content)
+            let exec = self.execute_async_with_display(arguments).await?;
+            Ok(exec.content)
         })
     }
 
@@ -1271,7 +1355,11 @@ impl Tool for EditTool {
             tokio::fs::write(&file_path, &res).await?;
 
             let display = serialize_diff_data(Some(&content), &res, &file_path);
-            Ok(("Edit successful".to_string(), Some(display)))
+            Ok(ToolExecution {
+                content: "Edit successful".to_string(),
+                display: Some(display),
+                attachments: Vec::new(),
+            })
         })
     }
 }
@@ -1346,8 +1434,8 @@ impl Tool for WriteTool {
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
-            let (content, _display) = self.execute_async_with_display(arguments).await?;
-            Ok(content)
+            let exec = self.execute_async_with_display(arguments).await?;
+            Ok(exec.content)
         })
     }
 
@@ -1383,7 +1471,11 @@ impl Tool for WriteTool {
             tokio::fs::write(&file_path, &content).await?;
 
             let display = serialize_diff_data(old_content.as_deref(), &content, &file_path);
-            Ok(("File written successfully".to_string(), Some(display)))
+            Ok(ToolExecution {
+                content: "File written successfully".to_string(),
+                display: Some(display),
+                attachments: Vec::new(),
+            })
         })
     }
 }
@@ -2007,6 +2099,86 @@ mod tests {
         assert_eq!(v["additions"], 0);
         assert_eq!(v["deletions"], 0);
         assert_eq!(v["hunks"].as_array().unwrap().len(), 0);
+    }
+
+    // ── read 工具图片附件 ────────────────────────────────
+
+    fn png_bytes() -> Vec<u8> {
+        let mut v = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(b"fake-png-payload");
+        v
+    }
+
+    #[tokio::test]
+    async fn read_image_file_returns_attachment() {
+        let dir = tmp_workdir("read_image");
+        let path = dir.join("pic.png");
+        let bytes = png_bytes();
+        fs::write(&path, &bytes).unwrap();
+
+        let args = json!({ "file_path": path.display().to_string() }).to_string();
+        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        assert_eq!(exec.attachments.len(), 1);
+        assert_eq!(exec.attachments[0].mime, "image/png");
+        assert!(
+            exec.attachments[0]
+                .data_url
+                .starts_with("data:image/png;base64,")
+        );
+        assert!(exec.content.contains("Image read successfully"));
+        assert!(exec.content.contains("<type>image</type>"));
+
+        // execute_async 通道只回文本（附件经 execute_async_with_display 流转）
+        let text = ReadTool.execute_async(&args).await.unwrap();
+        assert!(text.contains("Image read successfully"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_text_file_has_no_attachments() {
+        let dir = tmp_workdir("read_text");
+        let path = dir.join("note.txt");
+        fs::write(&path, "hello\nworld\n").unwrap();
+
+        let args = json!({ "file_path": path.display().to_string() }).to_string();
+        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        assert!(exec.attachments.is_empty());
+        assert!(exec.content.contains("hello"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_fake_image_extension_sniffs_real_content() {
+        // 扩展名为 .png 但内容是文本 → 不当图片处理（魔数优先）
+        let dir = tmp_workdir("read_fake");
+        let path = dir.join("fake.png");
+        fs::write(&path, "just text").unwrap();
+
+        let args = json!({ "file_path": path.display().to_string() }).to_string();
+        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        assert!(exec.attachments.is_empty());
+        assert!(exec.content.contains("just text"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_oversized_image_rejected_without_attachment() {
+        let dir = tmp_workdir("read_oversized");
+        let path = dir.join("big.png");
+        let mut data = png_bytes();
+        data.resize(crate::agent::media::MAX_IMAGE_BYTES + 1, 0);
+        fs::write(&path, &data).unwrap();
+
+        let args = json!({ "file_path": path.display().to_string() }).to_string();
+        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        assert!(exec.attachments.is_empty());
+        assert!(exec.content.contains("too large"));
+        assert!(exec.content.contains("10.0 MB"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

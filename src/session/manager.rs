@@ -248,6 +248,7 @@ mod tests {
             max_tokens: 1024,
             context_window: 8192,
             display: "test/test-model".to_string(),
+            supports_vision: false,
         };
         let manager = SessionManager::new(
             resolved,

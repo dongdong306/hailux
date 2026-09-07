@@ -28,6 +28,8 @@ pub(crate) struct ModelDef {
     pub(crate) max_tokens: u32,
     /// 上下文窗口大小（UI 进度显示用）
     pub(crate) context_window: u32,
+    /// 预定义模型是否支持视觉（图片）输入
+    pub(crate) supports_vision: bool,
 }
 
 pub(crate) const PROVIDERS: &[ProviderDef] = &[
@@ -41,12 +43,21 @@ pub(crate) const PROVIDERS: &[ProviderDef] = &[
                 name: "deepseek-v4-flash",
                 max_tokens: 131072,
                 context_window: 1000000,
+                supports_vision: false,
+            },
+            ModelDef {
+                id: "deepseek-v4-flash-vision-exp",
+                name: "deepseek-v4-flash-vision-exp",
+                max_tokens: 131072,
+                context_window: 1000000,
+                supports_vision: true,
             },
             ModelDef {
                 id: "deepseek-v4-pro",
                 name: "deepseek-v4-pro",
                 max_tokens: 131072,
                 context_window: 1000000,
+                supports_vision: false,
             },
         ],
     },
@@ -60,18 +71,14 @@ pub(crate) const PROVIDERS: &[ProviderDef] = &[
                 name: "GLM-5.3",
                 max_tokens: 131072,
                 context_window: 1000000,
+                supports_vision: false,
             },
             ModelDef {
-                id: "GLM-5.2",
-                name: "GLM-5.2",
+                id: "GLM-5.3-Flash",
+                name: "GLM-5.3-Flash",
                 max_tokens: 131072,
                 context_window: 1000000,
-            },
-            ModelDef {
-                id: "GLM-5.1",
-                name: "GLM-5.1",
-                max_tokens: 131072,
-                context_window: 204800,
+                supports_vision: true,
             },
         ],
     },
@@ -80,6 +87,14 @@ pub(crate) const PROVIDERS: &[ProviderDef] = &[
 pub(crate) fn find_provider_def(id: &str) -> Option<&'static ProviderDef> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
+
+/// 曾在预定义列表中、后被下架的模型。老用户 config.toml 里自动同步时代写入的
+/// 残留条目会让 resolve 静默命中（ensure_provider_models 只增不删），直到请求时
+/// 才收到 provider 侧「模型不存在」。这里显式拦截，给出重新选择的升级指引。
+const REMOVED_PREDEFINED_MODELS: &[(&str, &str)] = &[
+    ("zhipu-coding-plan", "GLM-5.1"),
+    ("zhipu-coding-plan", "GLM-5.2"),
+];
 
 // ── 运行时配置结构 ───────────────────────────────────────────
 
@@ -154,6 +169,10 @@ pub struct CustomModelEntry {
     /// 上下文窗口大小
     #[serde(default = "default_context_window")]
     pub context_window: u32,
+    /// 是否支持视觉（图片）输入。缺省（None）时按回退链取值：
+    /// 同 provider 预定义模型声明 > false。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -308,6 +327,15 @@ impl Config {
             .get(provider_id)
             .ok_or_else(|| color_eyre::eyre::eyre!("未找到 provider: {}", provider_id))?;
 
+        if REMOVED_PREDEFINED_MODELS
+            .iter()
+            .any(|(p, m)| *p == provider_id && *m == model_id)
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "模型 {selector} 已从预定义列表移除，请通过 /model 重新选择（config 中残留的旧条目可删除）"
+            ));
+        }
+
         if entry.api_key.is_empty() {
             return Err(color_eyre::eyre::eyre!(
                 "provider {} 的 api_key 未设置",
@@ -320,15 +348,24 @@ impl Config {
             .ok_or_else(|| color_eyre::eyre::eyre!("provider {} 未配置 base_url", provider_id))?;
 
         // 查找模型的 max_tokens 和 context_window
-        let (max_tokens, context_window) = if let Some(ref custom_models) = entry.models {
-            if let Some(custom) = custom_models.get(model_id) {
-                (custom.max_tokens, custom.context_window)
+        let (max_tokens, context_window, supports_vision) =
+            if let Some(ref custom_models) = entry.models {
+                if let Some(custom) = custom_models.get(model_id) {
+                    (
+                        custom.max_tokens,
+                        custom.context_window,
+                        custom.supports_vision,
+                    )
+                } else {
+                    fallback_model_values(provider_id, model_id)
+                }
             } else {
                 fallback_model_values(provider_id, model_id)
-            }
-        } else {
-            fallback_model_values(provider_id, model_id)
-        };
+            };
+        // supports_vision 回退链：显式配置 > 同 provider 预定义模型声明 > false
+        let supports_vision = supports_vision
+            .or_else(|| predefined_vision_flag(provider_id, model_id))
+            .unwrap_or(false);
 
         let config = OpenAIConfig::new()
             .with_api_key(&entry.api_key)
@@ -340,6 +377,7 @@ impl Config {
             max_tokens,
             context_window,
             display: format!("{}/{}", provider_id, model_id),
+            supports_vision,
         })
     }
 
@@ -352,12 +390,22 @@ impl Config {
     }
 }
 
-/// 从预定义模型中查找值作为回退
-fn fallback_model_values(provider_id: &str, model_id: &str) -> (u32, u32) {
-    find_provider_def(provider_id)
-        .and_then(|d| d.models.iter().find(|m| m.id == model_id))
-        .map(|m| (m.max_tokens, m.context_window))
-        .unwrap_or((default_max_tokens(), default_context_window()))
+/// 从预定义模型中查找值作为回退。
+/// 预定义模型返回其硬编码声明 `Some(supports_vision)`，非预定义模型返回 `None`。
+fn fallback_model_values(provider_id: &str, model_id: &str) -> (u32, u32, Option<bool>) {
+    match find_provider_def(provider_id).and_then(|d| d.models.iter().find(|m| m.id == model_id)) {
+        Some(m) => (m.max_tokens, m.context_window, Some(m.supports_vision)),
+        None => (default_max_tokens(), default_context_window(), None),
+    }
+}
+
+/// 查询预定义模型的 supports_vision 声明（仅用于 supports_vision 缺省时的回退）。
+fn predefined_vision_flag(provider_id: &str, model_id: &str) -> Option<bool> {
+    find_provider_def(provider_id)?
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.supports_vision)
 }
 
 /// 从预定义 provider 构造模型表
@@ -371,6 +419,7 @@ fn predefined_models_table(provider_id: &str) -> Option<BTreeMap<String, CustomM
                     CustomModelEntry {
                         max_tokens: m.max_tokens,
                         context_window: m.context_window,
+                        supports_vision: Some(m.supports_vision),
                     },
                 )
             })
@@ -381,6 +430,7 @@ fn predefined_models_table(provider_id: &str) -> Option<BTreeMap<String, CustomM
 impl Config {
     /// 添加自定义模型到已有 provider，返回新模型的 display 字符串
     /// 如果 provider 不存在会自动创建（需同时提供 base_url 和 api_key）
+    #[allow(clippy::too_many_arguments)]
     pub fn add_custom_model(
         &mut self,
         provider_id: &str,
@@ -407,11 +457,18 @@ impl Config {
         }
 
         let models = entry.models.get_or_insert_with(BTreeMap::new);
+        // 保留已有条目的 supports_vision（重复添加不丢用户配置）；
+        // 缺省时物化预定义声明，使 config.toml 始终反映生效值
+        let supports_vision = models
+            .get(model_id)
+            .and_then(|m| m.supports_vision)
+            .or_else(|| predefined_vision_flag(provider_id, model_id));
         models.insert(
             model_id.to_string(),
             CustomModelEntry {
                 max_tokens,
                 context_window,
+                supports_vision,
             },
         );
 
@@ -572,6 +629,27 @@ impl Config {
         }
     }
 
+    /// 存量配置迁移：将 models 表中 supports_vision 缺省（None）且命中预定义表
+    /// 的条目补写预定义声明值。显式配置（含 false）与自定义 provider 不动。
+    /// 返回是否有变更（调用方据此决定是否 save）。
+    pub fn migrate_predefined_vision_flags(&mut self) -> bool {
+        let mut changed = false;
+        for (pid, entry) in self.providers.iter_mut() {
+            let Some(models) = entry.models.as_mut() else {
+                continue;
+            };
+            for (mid, custom) in models.iter_mut() {
+                if custom.supports_vision.is_none()
+                    && let Some(sv) = predefined_vision_flag(pid, mid)
+                {
+                    custom.supports_vision = Some(sv);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     /// 返回当前所有已配置 provider 的列表（用于 UI 中选择目标 provider）
     pub fn configured_providers(&self) -> Vec<ProviderInfo> {
         let mut result = Vec::new();
@@ -610,6 +688,8 @@ pub struct ResolvedModel {
     pub max_tokens: u32,
     pub context_window: u32,
     pub display: String,
+    /// 模型是否支持视觉（图片）输入；不支持时附件在请求组装层降级为提示文本
+    pub supports_vision: bool,
 }
 
 // ── 配置文件 I/O ─────────────────────────────────────────────
@@ -649,6 +729,12 @@ pub fn load() -> Result<LoadResult> {
     let has_valid_provider = config.providers.values().any(|e| !e.api_key.is_empty());
     if !has_valid_provider {
         return Ok(LoadResult::NeedsSetup);
+    }
+
+    // 存量配置迁移：supports_vision 缺省且命中预定义表的条目物化声明值。
+    // save 失败静默忽略——resolve 的回退链已保证运行时取值正确。
+    if config.migrate_predefined_vision_flags() {
+        let _ = save_config(&config);
     }
 
     if config.main_model.is_empty() {
@@ -701,6 +787,9 @@ pub fn save_config(config: &Config) -> Result<()> {
                     "context_window".into(),
                     toml::Value::Integer(custom.context_window as i64),
                 );
+                if let Some(vision) = custom.supports_vision {
+                    m.insert("supports_vision".into(), toml::Value::Boolean(vision));
+                }
                 models_table.insert(mid.clone(), toml::Value::Table(m));
             }
             table.insert("models".into(), toml::Value::Table(models_table));
@@ -783,6 +872,18 @@ mod tests {
     }
 
     #[test]
+    fn resolve_removed_predefined_model_gives_clear_error() {
+        // 模拟老用户残留：自动同步时代写入、后被下架的智谱模型条目
+        let mut cfg = Config::default();
+        cfg.add_predefined_provider("zhipu-coding-plan", "sk-test");
+        cfg.add_custom_model("zhipu-coding-plan", None, None, "GLM-5.1", 131072, 1000000);
+        let err = cfg.resolve("zhipu-coding-plan/GLM-5.1").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("已从预定义列表移除"), "实际报错: {msg}");
+        assert!(msg.contains("/model"), "实际报错: {msg}");
+    }
+
+    #[test]
     fn remove_custom_model_deletes_entry() {
         let mut cfg = test_config();
         // main_model 指向别的模型 → 不迁移
@@ -860,6 +961,7 @@ mod tests {
             CustomModelEntry {
                 max_tokens: 65536,
                 context_window: 131072,
+                supports_vision: None,
             },
         );
         cfg.providers.insert(
@@ -960,5 +1062,199 @@ mod tests {
             .find(|m| m.display == "deepseek/deepseek-v4-flash")
             .unwrap();
         assert!(!ds2.deletable);
+    }
+
+    // ── 视觉能力解析 ─────────────────────────────────────
+
+    #[test]
+    fn supports_vision_explicit_true_respected() {
+        // 非视觉模型显式 true 生效
+        let mut cfg = Config::default();
+        cfg.add_predefined_provider("deepseek", "sk-test");
+        cfg.add_custom_model("deepseek", None, None, "text-model", 4096, 8192);
+        let entry = cfg.providers.get_mut("deepseek").unwrap();
+        let custom = entry
+            .models
+            .as_mut()
+            .unwrap()
+            .get_mut("text-model")
+            .unwrap();
+        custom.supports_vision = Some(true);
+
+        let resolved = cfg.resolve("deepseek/text-model").unwrap();
+        assert!(resolved.supports_vision);
+    }
+
+    #[test]
+    fn supports_vision_explicit_false_respected() {
+        // 预定义声明为 true 的模型（GLM-5.3-Flash），显式 false 覆盖声明
+        let mut cfg = Config::default();
+        cfg.add_predefined_provider("zhipu-coding-plan", "sk-test");
+        let entry = cfg.providers.get_mut("zhipu-coding-plan").unwrap();
+        let custom = entry
+            .models
+            .as_mut()
+            .unwrap()
+            .get_mut("GLM-5.3-Flash")
+            .unwrap();
+        assert_eq!(custom.supports_vision, Some(true));
+        custom.supports_vision = Some(false);
+
+        let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3-Flash").unwrap();
+        assert!(!resolved.supports_vision);
+    }
+
+    #[test]
+    fn supports_vision_predefined_declaration_fallback() {
+        // 存量场景：手写 config 中 GLM-5.3-Flash 条目 supports_vision 缺省（None），
+        // resolve 回退到预定义声明 true
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "zhipu-coding-plan".to_string(),
+            ProviderEntry {
+                api_key: "sk-test".to_string(),
+                base_url: None,
+                models: Some(BTreeMap::from([(
+                    "GLM-5.3-Flash".to_string(),
+                    CustomModelEntry {
+                        max_tokens: 131072,
+                        context_window: 1000000,
+                        supports_vision: None,
+                    },
+                )])),
+            },
+        );
+
+        let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3-Flash").unwrap();
+        assert!(resolved.supports_vision);
+    }
+
+    #[test]
+    fn supports_vision_unknown_model_defaults_false() {
+        let cfg = test_config();
+        // 未命中预定义表且未配置 → false
+        let resolved = cfg.resolve("deepseek/custom-model").unwrap();
+        assert!(!resolved.supports_vision);
+        // 预定义声明 false → false
+        let resolved = cfg.resolve("deepseek/deepseek-v4-flash").unwrap();
+        assert!(!resolved.supports_vision);
+    }
+
+    #[test]
+    fn predefined_model_vision_flag_propagates() {
+        // 预定义模型的 supports_vision 声明直通 resolve（GLM-5.3-Flash 支持图片输入）
+        let mut cfg = Config::default();
+        cfg.add_predefined_provider("zhipu-coding-plan", "sk-test");
+
+        let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3-Flash").unwrap();
+        assert!(resolved.supports_vision);
+        let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3").unwrap();
+        assert!(!resolved.supports_vision);
+    }
+
+    #[test]
+    fn migrate_writes_predefined_vision_flag() {
+        // 模拟手写 config：缺省 None 且命中预定义表 → 补写声明值；
+        // 显式 false 与自定义 provider 下的模型不动
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "zhipu-coding-plan".to_string(),
+            ProviderEntry {
+                api_key: "sk-test".to_string(),
+                base_url: None,
+                models: Some(BTreeMap::from([
+                    (
+                        "GLM-5.3".to_string(),
+                        CustomModelEntry {
+                            max_tokens: 131072,
+                            context_window: 1000000,
+                            supports_vision: None,
+                        },
+                    ),
+                    (
+                        "GLM-5.3-Flash".to_string(),
+                        CustomModelEntry {
+                            max_tokens: 131072,
+                            context_window: 1000000,
+                            supports_vision: Some(false),
+                        },
+                    ),
+                ])),
+            },
+        );
+        cfg.add_custom_model("deepseek", None, None, "text-model", 4096, 8192);
+
+        assert!(cfg.migrate_predefined_vision_flags());
+
+        let models = cfg
+            .providers
+            .get("zhipu-coding-plan")
+            .unwrap()
+            .models
+            .as_ref()
+            .unwrap();
+        // GLM-5.3（声明 false）：None → Some(false)
+        assert_eq!(models.get("GLM-5.3").unwrap().supports_vision, Some(false));
+        // 显式 false 未被改写
+        assert_eq!(
+            models.get("GLM-5.3-Flash").unwrap().supports_vision,
+            Some(false)
+        );
+        // 自定义 provider 下的模型不命中预定义表，保持 None
+        let custom = cfg
+            .providers
+            .get("deepseek")
+            .unwrap()
+            .models
+            .as_ref()
+            .unwrap()
+            .get("text-model")
+            .unwrap();
+        assert_eq!(custom.supports_vision, None);
+
+        // 幂等：再次迁移无变更
+        assert!(!cfg.migrate_predefined_vision_flags());
+    }
+
+    #[test]
+    fn migrate_resolves_none_to_declared_true() {
+        // GLM-5.3-Flash（声明 true）缺省 None → 迁移为 Some(true)
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "zhipu-coding-plan".to_string(),
+            ProviderEntry {
+                api_key: "sk-test".to_string(),
+                base_url: None,
+                models: Some(BTreeMap::from([(
+                    "GLM-5.3-Flash".to_string(),
+                    CustomModelEntry {
+                        max_tokens: 131072,
+                        context_window: 1000000,
+                        supports_vision: None,
+                    },
+                )])),
+            },
+        );
+
+        assert!(cfg.migrate_predefined_vision_flags());
+        let models = cfg
+            .providers
+            .get("zhipu-coding-plan")
+            .unwrap()
+            .models
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            models.get("GLM-5.3-Flash").unwrap().supports_vision,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn migrate_no_change_when_all_explicit() {
+        // 全部条目显式配置 → 无变更（不触发 save）
+        let mut cfg = Config::default();
+        cfg.add_predefined_provider("deepseek", "sk-test");
+        assert!(!cfg.migrate_predefined_vision_flags());
     }
 }

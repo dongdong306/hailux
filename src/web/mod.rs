@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -120,6 +121,9 @@ pub async fn run_web(host: &str, port: u16, open: bool, work_dir: &Path) -> Resu
         .merge(handlers::api_router())
         .route("/", get(static_handler))
         .route("/{*path}", get(static_handler))
+        // 附件 base64 膨胀后远超 axum 默认 2MB body limit，显式放开
+        // （上限与 sse.rs 的附件常量同源推导，见 CHAT_BODY_LIMIT）
+        .layer(DefaultBodyLimit::max(sse::CHAT_BODY_LIMIT))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

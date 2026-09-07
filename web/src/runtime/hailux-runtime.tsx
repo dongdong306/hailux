@@ -319,10 +319,16 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
         // user / notice / error / compact-marker / compacting：结束当前 acc，各产出一条非助手消息
         flush();
         if (item.kind === "user") {
+          const content: Array<
+            { type: "text"; text: string } | { type: "image"; image: string }
+          > = [{ type: "text", text: item.text ?? "" }];
+          for (const img of item.images ?? []) {
+            content.push({ type: "image", image: img.data_url });
+          }
           messages.push({
             role: "user",
             id: `u-${messages.length}`,
-            content: [{ type: "text", text: item.text ?? "" }],
+            content,
           });
         } else {
           const row: SystemRow =

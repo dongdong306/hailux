@@ -24,7 +24,9 @@ export function postSse(
 
     if (!response.ok || !response.body) {
       const text = await response.text().catch(() => "");
-      throw new Error(text || `HTTP ${response.status}`);
+      throw new Error(
+        text || (response.status === 413 ? "请求体过大（附件过多或过大）" : `HTTP ${response.status}`),
+      );
     }
 
     const reader = response.body.getReader();

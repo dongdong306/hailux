@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
                     max_tokens: 16384,
                     context_window: 131072,
                     display: String::new(),
+                    supports_vision: false,
                 }
             } else {
                 cfg.resolve_default()?
