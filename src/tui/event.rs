@@ -4,8 +4,7 @@ pub use crate::agent::event::{
 };
 use crate::mcp::McpConnection;
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
 };
 use tokio::sync::mpsc;
 
@@ -105,6 +104,8 @@ pub async fn collect_terminal_events(tx: EventTx) {
 /// 一律不匹配（Release 维持原有的丢弃行为）。
 #[cfg(windows)]
 fn is_ctrl_v_paste_leak(key: &KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
     key.kind == KeyEventKind::Release
         && matches!(
             key.code,
@@ -136,6 +137,7 @@ fn handle_mouse_event(mouse: MouseEvent, tx: &EventTx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     fn key(kind: KeyEventKind, code: KeyCode, ctrl: bool) -> KeyEvent {
         KeyEvent::new_with_kind(
