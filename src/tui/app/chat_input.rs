@@ -1122,13 +1122,22 @@ mod tests {
         assert_eq!(clean, "");
     }
 
-    /// 资源管理器复制文件 → WT paste 注入的路径文本（带/不带引号、含空格）
+    /// 资源管理器复制文件 → WT paste 注入的路径文本（带/不带引号、含空格）。
+    /// `is_absolute` 是平台语义：Windows 用盘符路径，Unix 用绝对 POSIX 路径。
     #[test]
     fn image_path_from_paste_accepts_single_image_file() {
-        let p = App::image_path_from_paste(r#"C:\Users\a b\Pictures\shot.png"#);
-        assert!(p.is_some());
-        let p = App::image_path_from_paste(r#""C:\Users\a b\Pictures\shot.png""#);
-        assert!(p.is_some());
+        #[cfg(windows)]
+        let (raw, quoted) = (
+            r#"C:\Users\a b\Pictures\shot.png"#,
+            r#""C:\Users\a b\Pictures\shot.png""#,
+        );
+        #[cfg(not(windows))]
+        let (raw, quoted) = (
+            "/home/a b/Pictures/shot.png",
+            "\"/home/a b/Pictures/shot.png\"",
+        );
+        assert!(App::image_path_from_paste(raw).is_some());
+        assert!(App::image_path_from_paste(quoted).is_some());
     }
 
     /// 多文件列表 / 相对路径 / 非图片扩展名 / 纯文本 → 不识别
