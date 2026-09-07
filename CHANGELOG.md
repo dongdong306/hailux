@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/dongdong306/hailux/compare/v0.9.0...v0.10.0) (2026-09-07)
+
+
+### Improvements
+
+* add image attachment input across TUI and Web ([5a055ce](https://github.com/dongdong306/hailux/commit/5a055cef9136e4d367f8f491e95967bf04310234))
+* **web:** auto-fallback port binding and running-instance detection ([eb45c51](https://github.com/dongdong306/hailux/commit/eb45c5163d48afc232036cb1b50c996e734faac8))
+
+
+### Bugfixes
+
+* **tui:** make image path paste test platform-aware for unix ([f730655](https://github.com/dongdong306/hailux/commit/f730655778da31c9bfa7e767f8a5269e33702431))
+* **tui:** move platform-specific crossterm imports into cfg blocks ([4234e2b](https://github.com/dongdong306/hailux/commit/4234e2bcb9c1d5e973644941b035c7c195d15a68))
+* **ui:** keep permission dialog within screen height for long descriptions ([d5e2077](https://github.com/dongdong306/hailux/commit/d5e2077b567df3a53c90185157e7256fe15c3585))
+* **usage:** track per-message model for accurate usage attribution ([439e42a](https://github.com/dongdong306/hailux/commit/439e42ab7c30c6bca8198aece294204491e2e9b0))
+
 ## [0.9.0](https://github.com/dongdong306/hailux/compare/v0.8.1...v0.9.0) (2026-08-24)
 
 
