@@ -54,9 +54,9 @@ enum Commands {
         /// 监听地址
         #[arg(long = "host", default_value = "127.0.0.1")]
         host: String,
-        /// 监听端口
-        #[arg(long = "port", default_value = "18080")]
-        port: u16,
+        /// 监听端口（默认 18080；显式指定后如被占用将直接报错，不做自动回退）
+        #[arg(long = "port")]
+        port: Option<u16>,
         /// 自动打开浏览器
         #[arg(long)]
         open: bool,
@@ -85,7 +85,14 @@ async fn main() -> Result<()> {
     #[cfg(feature = "web")]
     if cli.web && !matches!(cli.command, Some(Commands::Web { .. })) {
         let work_dir = resolve_work_dir(cli.work_dir.as_deref())?;
-        return web::run_web("127.0.0.1", 18080, false, &work_dir).await;
+        return web::run_web(web::WebOptions {
+            host: "127.0.0.1".to_string(),
+            port: 18080,
+            open: false,
+            auto_fallback: true,
+            work_dir,
+        })
+        .await;
     }
     #[cfg(not(feature = "web"))]
     if cli.web {
@@ -106,7 +113,15 @@ async fn main() -> Result<()> {
         #[cfg(feature = "web")]
         Some(Commands::Web { host, port, open }) => {
             let work_dir = resolve_work_dir(cli.work_dir.as_deref())?;
-            web::run_web(&host, port, open, &work_dir).await
+            let auto_fallback = port.is_none();
+            web::run_web(web::WebOptions {
+                host,
+                port: port.unwrap_or(18080),
+                open,
+                auto_fallback,
+                work_dir,
+            })
+            .await
         }
         None => {
             let work_dir = resolve_work_dir(cli.work_dir.as_deref())?;

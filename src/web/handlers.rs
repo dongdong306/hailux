@@ -68,6 +68,16 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         .route("/api/mode", get(get_mode))
         .route("/api/commands", get(list_commands))
         .route("/api/stats", get(get_stats))
+        .route("/api/instance", get(instance_info))
+}
+
+// ── 实例探测 ─────────────────────────────────────────────────
+
+/// 实例探测端点：`hailux web` 启动时用于识别同机其他 hailux Web UI
+/// 实例。响应标记值与 `mod.rs::detect_hailux_instance` 锁步
+/// （共享 [`super::INSTANCE_MARKER_APP`]）。
+async fn instance_info() -> impl IntoResponse {
+    Json(serde_json::json!({ "app": super::INSTANCE_MARKER_APP }))
 }
 
 // ── 会话管理 ─────────────────────────────────────────────────
