@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::types::Message;
 use super::command;
 use super::history_cell::{
-    CHAT_FG, CHAT_FILE_MENTION, CHAT_PASTE, CHAT_PLACEHOLDER, HistoryCell, PLAN_BADGE,
+    CHAT_FG, CHAT_FILE_MENTION, CHAT_IMAGE, CHAT_PASTE, CHAT_PLACEHOLDER, HistoryCell, PLAN_BADGE,
 };
 use super::input::ElementKind;
 
@@ -417,6 +417,11 @@ impl<'a> ChatWidget<'a> {
         } else {
             Style::default().fg(CHAT_FILE_MENTION)
         };
+        let image_style = if self.is_processing {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(CHAT_IMAGE)
+        };
 
         if self.input_buffer.is_empty() && !self.is_processing {
             let input_paragraph = Paragraph::new(Line::from(vec![
@@ -477,6 +482,7 @@ impl<'a> ChatWidget<'a> {
                 let ch_style = match in_element {
                     Some(ElementKind::Paste) => element_style,
                     Some(ElementKind::FileMention) => file_mention_style,
+                    Some(ElementKind::Image) => image_style,
                     None => text_style,
                 };
 

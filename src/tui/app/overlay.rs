@@ -363,6 +363,7 @@ impl App {
                             &resolved.model_id,
                             &resolved.display,
                             resolved.max_tokens,
+                            resolved.supports_vision,
                         );
                         self.resolved = resolved;
                         self.config.main_model = display;
@@ -701,6 +702,7 @@ impl App {
                                     &resolved.model_id,
                                     &resolved.display,
                                     resolved.max_tokens,
+                                    resolved.supports_vision,
                                 );
                                 self.resolved = resolved;
                                 self.state = AppState::Chat;
@@ -725,6 +727,7 @@ impl App {
                                 &resolved.model_id,
                                 &resolved.display,
                                 resolved.max_tokens,
+                                resolved.supports_vision,
                             );
                             self.resolved = resolved;
                             self.config = cfg;
@@ -1702,6 +1705,7 @@ impl App {
             &resolved.model_id,
             &resolved.display,
             resolved.max_tokens,
+            resolved.supports_vision,
         );
         self.resolved = resolved;
         self.config.main_model = entry.display.clone();

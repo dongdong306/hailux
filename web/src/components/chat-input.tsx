@@ -12,11 +12,35 @@ import {
   Loader2,
   Square,
   Terminal,
+  X,
   Zap,
 } from "lucide-react";
 import { anyDialogOpen, useApp } from "../store/app-store";
-import type { CommandInfo } from "../runtime/types";
+import type { ChatAttachment, CommandInfo } from "../runtime/types";
 import { cn, fmtTokens } from "../lib/utils";
+
+/** 单张待发送附件大小上限（10 MB，对齐后端 ATTACHMENT_MAX_BYTES） */
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+/** 单条消息附件数量上限（对齐后端） */
+const ATTACHMENT_MAX_COUNT = 6;
+/** 受支持的图片类型（对齐后端 is_supported_image_mime，SVG/BMP 等后端会 400） */
+const SUPPORTED_IMAGE_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+/** 从文件读取 data URL 附件（仅图片，超出大小上限时返回带错误的结果） */
+function fileToAttachment(file: File): Promise<ChatAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve({ mime: file.type, data_url: reader.result as string });
+    reader.onerror = () => reject(new Error(`读取失败: ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
 
 /** 解析光标前输入中的 `@query` 片段；无有效触发时返回 null（query 可为空串） */
 function fileMentionQuery(beforeCursor: string): string | null {
@@ -101,6 +125,9 @@ export function ChatInput() {
   const [pastedAt, setPastedAt] = useState(0);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [slash, setSlash] = useState<SlashState | null>(null);
+  const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
+  /** 附件被忽略的提示（超限/类型不支持），提交或再次粘贴时清除 */
+  const [imageNotice, setImageNotice] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionListRef = useRef<HTMLDivElement>(null);
   const slashListRef = useRef<HTMLDivElement>(null);
@@ -139,6 +166,14 @@ export function ChatInput() {
     const t = setTimeout(() => setEscHint(false), 5000);
     return () => clearTimeout(t);
   }, [escHint, setEscHint]);
+
+  const sessionId = useApp((s) => s.sessionId);
+  const workDir = useApp((s) => s.workDir);
+  useEffect(() => {
+    // 切换会话/项目时清空待发送附件与提示，避免图片误发进新会话
+    setPendingImages([]);
+    setImageNotice(null);
+  }, [sessionId, workDir]);
 
   // 自适应高度：默认 2 行，内容超过后增高，最高 10 行（超出后滚动）
   useLayoutEffect(() => {
@@ -256,7 +291,7 @@ export function ChatInput() {
   };
 
   const submit = () => {
-    if (!text.trim() || isRunning) return;
+    if ((!text.trim() && pendingImages.length === 0) || isRunning) return;
     const value = expandMentions(text.trim());
 
     // ui 型斜杠命令本地分发（当前仅 /compact）；prompt 型发送原文由后端展开
@@ -274,10 +309,47 @@ export function ChatInput() {
       }
     }
 
+    const attachments = pendingImages;
     setText("");
+    setPendingImages([]);
+    setImageNotice(null);
     setHistoryIndex(null);
     setDraft("");
-    sendMessage(value);
+    sendMessage(value, attachments.length > 0 ? attachments : undefined);
+  };
+
+  /** 追加粘贴/选择的图片附件（类型/数量/大小校验与后端一致） */
+  const addImageFiles = async (files: File[]) => {
+    const images = files.filter((f) => SUPPORTED_IMAGE_MIMES.has(f.type));
+    const rejected = files.length - images.length;
+    if (images.length === 0) {
+      if (rejected > 0)
+        setImageNotice(`不支持的图片类型（仅支持 PNG/JPEG/GIF/WebP）`);
+      return;
+    }
+    let oversize = 0;
+    for (const file of images) {
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        oversize++;
+        continue;
+      }
+      if (pendingImages.length >= ATTACHMENT_MAX_COUNT) break;
+      try {
+        const att = await fileToAttachment(file);
+        setPendingImages((prev) =>
+          prev.length >= ATTACHMENT_MAX_COUNT ? prev : [...prev, att],
+        );
+      } catch {
+        // 读取失败：跳过
+      }
+    }
+    if (pendingImages.length >= ATTACHMENT_MAX_COUNT) {
+      setImageNotice(`最多附加 ${ATTACHMENT_MAX_COUNT} 张图片`);
+    } else if (oversize > 0) {
+      setImageNotice(`${oversize} 张图片超过 10MB 已忽略`);
+    } else if (rejected > 0) {
+      setImageNotice(`${rejected} 个文件类型不支持（仅支持 PNG/JPEG/GIF/WebP）`);
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -544,10 +616,61 @@ export function ChatInput() {
                   scheduleMentionSearch(query);
                 }
               }}
-              onPaste={() => setPastedAt(Date.now())}
+              onPaste={(e) => {
+                setPastedAt(Date.now());
+                // 粘贴图片：拦截并转为附件 chips。仅当剪贴板同时没有文本时
+                // 才整体拦截——图文混合时文本走默认插入、图片另行追加
+                const files = Array.from(e.clipboardData?.files ?? []);
+                const hasImage = files.some((f) =>
+                  SUPPORTED_IMAGE_MIMES.has(f.type),
+                );
+                const hasText = (e.clipboardData?.getData("text/plain") ?? "").length > 0;
+                if (hasImage && !hasText) {
+                  e.preventDefault();
+                  void addImageFiles(files);
+                }
+              }}
               onKeyDown={onKeyDown}
             />
           </div>
+
+          {/* 图片附件 chips：缩略图 + 移除按钮 */}
+          {imageNotice && (
+            <div className="px-4 pb-1 pt-1 text-xs text-muted-foreground">
+              {imageNotice}
+            </div>
+          )}
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-4 pb-2 pt-1">
+              {pendingImages.map((att, i) => (
+                <div
+                  key={`${att.data_url.slice(-16)}-${i}`}
+                  className="group relative size-14 overflow-hidden rounded-lg border border-border"
+                >
+                  <img
+                    src={att.data_url}
+                    alt={att.mime}
+                    loading="lazy"
+                    decoding="async"
+                    onError={(ev) => {
+                      ev.currentTarget.style.opacity = "0.3";
+                    }}
+                    className="size-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    aria-label="移除图片"
+                    onClick={() =>
+                      setPendingImages((prev) => prev.filter((_, j) => j !== i))
+                    }
+                    className="absolute right-0.5 top-0.5 hidden size-4 cursor-pointer items-center justify-center rounded-full bg-background/80 text-foreground group-hover:flex"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="flex min-w-0 items-center justify-between gap-2 px-2.5 pb-2.5 pt-0.5">
             {/* 左侧工具区：Plan / YOLO 开关 / 模型选择 */}
@@ -634,7 +757,7 @@ export function ChatInput() {
                 <button
                   type="button"
                   title="发送（Enter）"
-                  disabled={!text.trim()}
+                  disabled={!text.trim() && pendingImages.length === 0}
                   onClick={submit}
                   className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95 disabled:cursor-default disabled:opacity-30"
                 >

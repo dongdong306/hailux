@@ -4,6 +4,7 @@ Usage:
 - The `file_path` parameter should be an absolute path.
 - For directories, each entry is returned per line, with subdirectories ending with a `/` symbol.
 - When returning file content, each line is prefixed with a line number in the format `<line_number>: <content>`; do not include the prefix when passing text to other tools (e.g. `edit`).
+- For image files (PNG, JPEG, GIF, WebP), the image content is returned as a visual attachment you can see (only if the current model supports image input; otherwise a plain-text notice is returned instead); the text output is only a confirmation message.
 - To read subsequent sections, call this tool again with a larger `offset` value.
 - For large files or files with long lines, use the `grep` tool to find specific content; if unsure about the correct file path, use the `glob` tool to find files by glob pattern.
 - Avoid reading very small fragments (e.g., 30 lines at a time). If you need more context, read a larger range at once.

@@ -79,9 +79,12 @@ export interface StoredMessage {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
+  model: string | null;
   runtime_meta: string | null;
   think_ms: number | null;
   compacted: boolean;
+  /** 图片附件 JSON（[{mime, data_url}]）；仅用户消息使用 */
+  attachments: string | null;
 }
 
 export interface SessionDetail {
@@ -148,8 +151,15 @@ export interface McpServerInfo {
   tools: number;
 }
 
+/** 用户消息携带的图片附件（data URL 上传；后端校验类型/大小/空载荷） */
+export interface ChatAttachment {
+  mime: string;
+  data_url: string;
+}
+
 export interface ChatRequest {
   message: string;
+  attachments?: ChatAttachment[];
   session_id?: string;
   work_dir?: string;
 }

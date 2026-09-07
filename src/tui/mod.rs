@@ -1,6 +1,7 @@
 pub mod app;
 mod ask_user;
 mod chat_widget;
+mod clipboard;
 mod command;
 pub mod event;
 mod history_cell;

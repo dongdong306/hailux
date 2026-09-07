@@ -88,6 +88,7 @@ pub fn build_agent_base(
         &resolved.model_id,
         &resolved.display,
         resolved.max_tokens,
+        resolved.supports_vision,
         pm,
         &work_dir.display().to_string(),
     );
@@ -247,7 +248,7 @@ pub async fn run_non_interactive(
     }
 
     agent
-        .chat_stream(&message, event_tx.clone())
+        .chat_stream(&message, Vec::new(), event_tx.clone())
         .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     let mut in_reasoning = false;
@@ -444,6 +445,7 @@ pub async fn run_tui_setup(work_dir: &Path) -> Result<()> {
         max_tokens: 16384,
         context_window: 131072,
         display: String::new(),
+        supports_vision: false,
     };
 
     let (event_tx, event_rx) = tui::event::create_event_channel();

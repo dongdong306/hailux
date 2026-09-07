@@ -1581,6 +1581,7 @@ pub(crate) const CHAT_PLACEHOLDER: Color = Color::Rgb(130, 130, 130); // #828282
 pub(crate) const CHAT_PASTE: Color = Color::Rgb(34, 211, 238); // #22D3EE
 /// 路径引用 `@file`/`@folder` 高亮
 pub(crate) const CHAT_FILE_MENTION: Color = Color::Rgb(251, 191, 36); // #FBBF24
+pub(crate) const CHAT_IMAGE: Color = Color::Rgb(167, 139, 250); // #A78BFA
 /// Plan 模式徽标
 pub(crate) const PLAN_BADGE: Color = Color::Rgb(217, 159, 7); // #D99F07
 

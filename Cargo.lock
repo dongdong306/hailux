@@ -1531,6 +1531,7 @@ dependencies = [
  "async-openai",
  "async-stream",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "color-eyre",

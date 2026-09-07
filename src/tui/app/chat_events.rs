@@ -26,13 +26,28 @@ impl App {
             AppEvent::Core(core) => self.handle_core_event(core).await?,
             AppEvent::InputKey(key) => self.handle_chat_key(key).await?,
             AppEvent::InputPaste(text) => {
+                // 空 Event::Paste（Unix 图片剪贴板）：探测图片，命中即拦截；
+                // 非空文本（含空 bracketed paste）走默认流程
+                if text.is_empty() {
+                    self.spawn_clipboard_image_probe(false);
+                    return Ok(());
+                }
                 self.handle_paste(text);
             }
-            AppEvent::UserSubmit(input) => {
-                if let Some(matched) = command::match_command(&input, &self.command_registry) {
+            AppEvent::PasteImageProbe => {
+                // Windows：crossterm WinAPI 输入不产生 Event::Paste，WT 的空
+                // bracketed paste（图片剪贴板 Ctrl+V）以字符按键形态被
+                // handle_paste 的标记配对捕获 → 在此触发剪贴板图片探测
+                self.spawn_clipboard_image_probe(false);
+            }
+            AppEvent::PasteImageResult { image, interactive } => {
+                self.handle_clipboard_image_result(image, interactive);
+            }
+            AppEvent::UserSubmit { text, attachments } => {
+                if let Some(matched) = command::match_command(&text, &self.command_registry) {
                     self.handle_command(matched).await?;
                 } else {
-                    self.handle_user_message(input).await?;
+                    self.handle_user_message(text, attachments).await?;
                 }
             }
             AppEvent::Resize => {}
@@ -458,6 +473,11 @@ impl App {
         match matched {
             command::MatchedCommand::Ui(cmd) => {
                 self.input.clear();
+                // 清空输入框的同时清掉 pending 状态，避免残留附件附着到
+                // 后续无关消息（元素已随 clear 一起消失）
+                self.pending_images.clear();
+                self.pending_pastes.clear();
+                self.file_picker.pending_mentions.clear();
                 self.cmd_suggestion.show = false;
                 self.cmd_suggestion.items.clear();
                 match cmd {
@@ -521,7 +541,7 @@ impl App {
                     self.input.clear();
                     self.cmd_suggestion.show = false;
                     self.cmd_suggestion.items.clear();
-                    self.handle_user_message(rendered).await?;
+                    self.handle_user_message(rendered, Vec::new()).await?;
                 }
             }
         }
@@ -547,12 +567,17 @@ impl App {
         }
     }
 
-    pub(super) async fn handle_user_message(&mut self, input: String) -> Result<()> {
+    pub(super) async fn handle_user_message(
+        &mut self,
+        input: String,
+        attachments: Vec<crate::agent::media::Attachment>,
+    ) -> Result<()> {
         self.is_processing = true;
         self.input.set_processing(true);
         self.timing.start_request();
         self.input.submit(&input);
         self.pending_pastes.clear();
+        self.pending_images.clear();
         self.file_picker.reset();
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
@@ -575,6 +600,11 @@ impl App {
         }
 
         let session_id = self.current_session_id.as_deref().unwrap().to_string();
+        let attachments_json = if attachments.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&attachments).ok()
+        };
         let stored = StoredMessage {
             role: MessageRole::User,
             content: input.clone(),
@@ -592,6 +622,7 @@ impl App {
             },
             think_ms: None,
             compacted: false,
+            attachments: attachments_json,
         };
         self.storage.append_message(&session_id, &stored).await?;
 
@@ -693,6 +724,7 @@ impl App {
                     runtime_meta: None,
                     think_ms: None,
                     compacted: false,
+                    attachments: None,
                 };
                 self.storage
                     .append_message(&session_id, &assistant_stored)
@@ -707,7 +739,7 @@ impl App {
         }
 
         let tx = self.core_tx.clone();
-        if let Err(e) = self.agent.chat_stream(&input, tx) {
+        if let Err(e) = self.agent.chat_stream(&input, attachments, tx) {
             self.messages.push(Message::Agent(format!("[错误: {}]", e)));
             self.is_processing = false;
             self.input.set_processing(false);

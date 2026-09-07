@@ -77,6 +77,7 @@ impl SetupForm {
                 CustomModelEntry {
                     max_tokens: DEFAULT_OUTPUT_TOKENS,
                     context_window,
+                    supports_vision: None,
                 },
             );
             let mut providers = BTreeMap::new();
@@ -102,6 +103,7 @@ impl SetupForm {
                     CustomModelEntry {
                         max_tokens: m.max_tokens,
                         context_window: m.context_window,
+                        supports_vision: Some(m.supports_vision),
                     },
                 );
             }
