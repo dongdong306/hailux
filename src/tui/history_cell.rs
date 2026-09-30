@@ -2218,7 +2218,7 @@ pub(crate) fn tool_result_summary(name: &str, result: &str) -> String {
             }
         }
         "edit" | "write" => {
-            if result.contains("成功") {
+            if result.contains("successful") {
                 "done".to_string()
             } else {
                 truncate_str(result.trim(), 40)
