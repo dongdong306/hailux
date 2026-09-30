@@ -152,6 +152,13 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   parameter only exists on non-Windows. Windows commands are wrapped with a UTF-8 prologue
   (`WINDOWS_UTF8_PROLOGUE` in `agent/tools.rs`) to force UTF-8 on both pipe directions.
   Windows adds a `crossterm_winapi` dependency and different paste-detection timing constants.
+  The Windows shell is spawned with `CREATE_NO_WINDOW` (own hidden console) and
+  `stdin(null)`: GUI-subsystem grandchildren (e.g. headless Edge/Chrome) would otherwise
+  `AttachConsole(ATTACH_PARENT_PROCESS)` and scribble the TUI's alternate screen directly
+  (ratatui diff-rendering never repairs those cells). Side effect: PowerShell table output
+  formats to the hidden console's default width (~120 cols), and console resize from within
+  commands is unreliable — don't "fix" either. After a bash tool run, TUI forces a full
+  repaint (`render.force_clear`) as belt-and-braces.
 - **Web is loopback-only by default** (`127.0.0.1`). Work-dir selection means the server can
   read any local directory — exposing `0.0.0.0` is an explicit trust decision (documented in `web/mod.rs`).
 - **ask_user reply contract** (4 implementations must stay in lockstep): TUI submits

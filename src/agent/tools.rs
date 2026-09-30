@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -478,6 +480,20 @@ pub(crate) fn plan_mode_bash_denial(arguments: &str) -> Option<String> {
     }
 }
 
+/// Windows CREATE_NO_WINDOW：让 shell 子进程获得一块隐藏的独立控制台。
+/// 若不加，pwsh 继承 hailux 的可见控制台，其启动的 GUI 子系统程序（浏览器等）
+/// 在自身没有有效 std 句柄时（如经 Start-Process/ShellExecute 启动）会走
+/// Chromium 式 AttachConsole(ATTACH_PARENT_PROCESS) + freopen("CONOUT$")，
+/// 把日志直接写进 hailux 所在控制台的当前屏幕缓冲区，污染备用屏幕上的 TUI
+/// （ratatui 是 diff 渲染，不会修复被外部写入的格子，脏区永久残留）。
+/// 隐藏控制台使这类写入不可见，管道捕获不受影响；配套 stdin 置空（见
+/// run_shell_command）防止子进程抢夺 TUI 键盘输入。
+/// 已知副作用：PowerShell 表格按隐藏控制台默认宽度（~120 列）排版；
+/// 实测在隐藏控制台内 resize 宽度行为不可靠（部分目标宽度直接失败，
+/// MaxWindowSize 与实际可设值自相矛盾），勿尝试在 prologue 中调整。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Windows shell 程序选择：优先 PowerShell 7+（pwsh.exe），未安装时回退
 /// powershell.exe。注意：pwsh 7 仅修复 PS→原生命令方向（$OutputEncoding 默认
 /// UTF-8）；native→PS 解码仍按 [Console]::OutputEncoding（默认系统 GBK），
@@ -522,6 +538,7 @@ fn windows_shell_description() -> String {
         .args(windows_shell_command_args(
             "$PSVersionTable.PSVersion.ToString()",
         ))
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -768,7 +785,7 @@ async fn kill_process_tree(pid: Option<u32>) {
     if let Some(pid) = pid {
         let _ = tokio::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .await;
     }
@@ -792,6 +809,10 @@ async fn run_shell_command(
     if let Some(dir) = &workdir {
         cmd.current_dir(dir);
     }
+    // 隐藏独立控制台 + stdin 置空，动机与副作用见 CREATE_NO_WINDOW 文档
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.stdin(std::process::Stdio::null());
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

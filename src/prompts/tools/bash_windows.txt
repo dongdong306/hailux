@@ -19,6 +19,8 @@ Usage notes:
 - Output encoding is already forced to UTF-8 by the runtime; never manually prepend `[Console]::OutputEncoding = ...`, `chcp`, or `$OutputEncoding` boilerplate
 - A few legacy system tools (e.g. ping, ipconfig, netstat) emit localized text in the legacy ANSI code page, which may appear garbled under forced UTF-8. This is expected: don't try to fix encoding; if the text matters, prefer an English/ASCII alternative (e.g. `ping -n 3 127.0.0.1`, `git status`), or extract only the ASCII parts (numbers, IPs, statuses) you need
 - If you must read/write files via PowerShell (avoid — prefer the read/write tools), always pass `-Encoding utf8` (Get-Content / Out-File / Set-Content); note PS 5.1 writes a BOM — prefer dedicated tools for source files
+- The shell runs with a hidden console. GUI-subsystem programs launched from here (browsers, etc.) may bypass the output pipes entirely and log to that hidden console, so their log output is invisible. When launching them, rely on artifacts (files created) rather than console logs, or redirect explicitly if you need the logs (e.g. `Start-Process -RedirectStandardOutput out.txt -RedirectStandardError err.txt -Wait -FilePath $edge -ArgumentList ...`)
+- Because of that hidden console, PowerShell table output (Format-Table, Get-ChildItem tables, etc.) is formatted to a fixed ~120-column width regardless of the user's real terminal width; do not try to resize the console (unreliable). Prefer the read/glob/grep tools for long values, or format explicitly (e.g. `... | ForEach-Object { $_.FullName }`, `Select-Object -ExpandProperty Name`) when you need untruncated fields
 
 # Git Operations
 

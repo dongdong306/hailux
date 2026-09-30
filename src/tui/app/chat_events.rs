@@ -303,6 +303,12 @@ impl App {
                 subagent_name,
                 subagent_index,
             } => {
+                // bash 子进程树里的 GUI 程序可能绕过管道直接写控制台屏幕
+                // （见 agent/tools.rs 的 CREATE_NO_WINDOW 注释），执行结束后
+                // 强制一次全量重绘，清掉可能残留的屏幕脏区
+                if name == "bash" {
+                    self.render.force_clear = true;
+                }
                 if subagent_name.is_some() {
                     let tool_name = name.as_str();
                     let result_summary =
