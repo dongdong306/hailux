@@ -747,8 +747,10 @@ fn render_skill_md(name: &str, description: &str, content: &str) -> String {
     )
 }
 
-/// 安全校验 location：canonicalize 后必须位于两个合法 skills 根之下且文件名为 SKILL.md，
-/// 返回 canonicalize 结果（防任意文件读写删除）
+/// 安全校验 location：canonicalize 后必须位于某个 skills 根之下至少两层
+/// （`<skills 根>/<技能目录>/SKILL.md`）且文件名为 SKILL.md，
+/// 返回 canonicalize 结果（防任意文件读写删除）。
+/// 至少两层是硬性要求：否则 `<根>/SKILL.md` 的 parent 即根目录，删除时会抹掉整个 skills 根。
 fn validate_skill_location(
     location: &str,
     work_dir: &std::path::Path,
@@ -757,8 +759,16 @@ fn validate_skill_location(
     if canonical.file_name()?.to_str()? != "SKILL.md" {
         return None;
     }
-    let global_ok = global_skills_root().is_some_and(|root| path_is_under(&canonical, &root));
-    let project_ok = path_is_under(&canonical, &project_skills_root(work_dir));
+    let nested_under = |root: &std::path::Path| {
+        // 两边都 canonicalize 消除 verbatim（`\\?\`）前缀差异后才能做相等比较
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        path_is_under(&canonical, root)
+            && canonical
+                .parent()
+                .is_some_and(|p| norm_cmp_key(p) != norm_cmp_key(&root_canon))
+    };
+    let global_ok = global_skills_root().is_some_and(|root| nested_under(&root));
+    let project_ok = nested_under(&project_skills_root(work_dir));
     (global_ok || project_ok).then_some(canonical)
 }
 
@@ -1488,11 +1498,15 @@ mod tests {
         std::fs::write(&skill_file, "---\nname: demo\n---\nbody").unwrap();
         let outside = tmp.join("SKILL.md");
         std::fs::write(&outside, "---\nname: evil\n---\nbody").unwrap();
+        let root_level = tmp.join(".hailux").join("skills").join("SKILL.md");
+        std::fs::write(&root_level, "---\nname: root\n---\nbody").unwrap();
 
         // skills 根下的 SKILL.md 合法
         assert!(validate_skill_location(&skill_file.display().to_string(), &tmp).is_some());
         // 项目根下（非 skills 子目录）的同名文件非法
         assert!(validate_skill_location(&outside.display().to_string(), &tmp).is_none());
+        // skills 根直属的 SKILL.md 非法（parent == 根目录，删除会抹掉整个 skills 根）
+        assert!(validate_skill_location(&root_level.display().to_string(), &tmp).is_none());
         // 不存在的路径非法
         assert!(
             validate_skill_location(
