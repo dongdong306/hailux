@@ -1675,85 +1675,101 @@ impl Tool for GrepTool {
                     message: "Regex pattern too long (max 500 characters)".to_string(),
                 });
             }
-            let path = args["path"].as_str().unwrap_or(".");
-            let include = args["include"].as_str();
+            let path = args["path"].as_str().unwrap_or(".").to_string();
+            let include = args["include"].as_str().map(str::to_string);
 
-            let matcher = RegexMatcher::new(&pattern).map_err(|err| ToolExecuteError {
-                message: format!("Invalid regex: {}", err),
-            })?;
-
-            let mut walk_builder = WalkBuilder::new(path);
-            walk_builder.sort_by_file_path(compare_mtime);
-            walk_builder.hidden(false);
-            walk_builder.filter_entry(|entry| {
-                !crate::agent::IGNORED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
-            });
-            if let Some(glob) = include {
-                let mut override_builder = ignore::overrides::OverrideBuilder::new(path);
-                override_builder.add(glob).map_err(|err| ToolExecuteError {
-                    message: format!("Invalid include pattern: {}", err),
+            // 遍历 + 文件扫描是纯阻塞 I/O，放 blocking 线程池执行：不占用 reactor
+            // worker，且 agent.rs 的 cancel select 分支能在下方 await 挂起期间被 poll
+            let task = tokio::task::spawn_blocking(move || -> Result<String, ToolExecuteError> {
+                let matcher = RegexMatcher::new(&pattern).map_err(|err| ToolExecuteError {
+                    message: format!("Invalid regex: {}", err),
                 })?;
-                let overrides = override_builder.build().map_err(|err| ToolExecuteError {
-                    message: format!("Failed to build include filter: {}", err),
-                })?;
-                walk_builder.overrides(overrides);
-            }
 
-            let mut searcher = Searcher::new();
-            let mut results = String::new();
-            let mut match_count = 0u64;
-            const MAX_MATCHES: u64 = 100;
-
-            for entry in walk_builder.build() {
-                let entry = entry.map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?;
-                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    continue;
+                let mut walk_builder = WalkBuilder::new(&path);
+                walk_builder.sort_by_file_path(compare_mtime);
+                walk_builder.hidden(false);
+                walk_builder.filter_entry(|entry| {
+                    !crate::agent::IGNORED_DIRS
+                        .contains(&entry.file_name().to_string_lossy().as_ref())
+                });
+                if let Some(glob) = &include {
+                    let mut override_builder = ignore::overrides::OverrideBuilder::new(&path);
+                    override_builder.add(glob).map_err(|err| ToolExecuteError {
+                        message: format!("Invalid include pattern: {}", err),
+                    })?;
+                    let overrides = override_builder.build().map_err(|err| ToolExecuteError {
+                        message: format!("Failed to build include filter: {}", err),
+                    })?;
+                    walk_builder.overrides(overrides);
                 }
 
-                let file_path = entry.path().to_path_buf();
-                let mut file_lines = Vec::new();
-                if let Err(e) = searcher.search_path(
-                    &matcher,
-                    &file_path,
-                    UTF8(|lnum, line| {
-                        if match_count >= MAX_MATCHES {
-                            return Ok(false);
-                        }
-                        match_count += 1;
-                        file_lines.push(format!("  {}: {}\n", lnum, line.trim_end()));
-                        Ok(true)
-                    }),
-                ) {
-                    if file_lines.is_empty() {
+                let mut searcher = Searcher::new();
+                let mut results = String::new();
+                let mut match_count = 0u64;
+                const MAX_MATCHES: u64 = 100;
+
+                for entry in walk_builder.build() {
+                    // sink 返回 false 只能停当前文件，这里终止整树遍历
+                    if match_count >= MAX_MATCHES {
+                        break;
+                    }
+                    let entry = entry.map_err(|e| ToolExecuteError {
+                        message: e.to_string(),
+                    })?;
+                    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                         continue;
                     }
-                    if !e.to_string().contains("invalid utf-8") {
-                        results.push_str(&format!(
-                            "{}: (search error: {})\n",
-                            file_path.display(),
-                            e
-                        ));
+
+                    let file_path = entry.path().to_path_buf();
+                    let mut file_lines = Vec::new();
+                    if let Err(e) = searcher.search_path(
+                        &matcher,
+                        &file_path,
+                        UTF8(|lnum, line| {
+                            if match_count >= MAX_MATCHES {
+                                return Ok(false);
+                            }
+                            match_count += 1;
+                            file_lines.push(format!("  {}: {}\n", lnum, line.trim_end()));
+                            Ok(true)
+                        }),
+                    ) {
+                        if file_lines.is_empty() {
+                            continue;
+                        }
+                        if !e.to_string().contains("invalid utf-8") {
+                            results.push_str(&format!(
+                                "{}: (search error: {})\n",
+                                file_path.display(),
+                                e
+                            ));
+                        }
+                    }
+
+                    if !file_lines.is_empty() {
+                        results.push_str(&format!("{}:\n", file_path.canonicalize()?.display()));
+                        results.push_str(&file_lines.join(""));
                     }
                 }
 
-                if !file_lines.is_empty() {
-                    results.push_str(&format!("{}:\n", file_path.canonicalize()?.display()));
-                    results.push_str(&file_lines.join(""));
+                if results.is_empty() {
+                    Ok("No matches found".to_string())
+                } else if match_count >= MAX_MATCHES {
+                    results.push_str(&format!(
+                        "\n... Too many results, truncated (showing at most {} matches)",
+                        MAX_MATCHES
+                    ));
+                    Ok(results)
+                } else {
+                    Ok(results)
                 }
-            }
+            });
 
-            if results.is_empty() {
-                Ok("No matches found".to_string())
-            } else if match_count >= MAX_MATCHES {
-                results.push_str(&format!(
-                    "\n... Too many results, truncated (showing at most {} matches)",
-                    MAX_MATCHES
-                ));
-                Ok(results)
-            } else {
-                Ok(results)
+            match task.await {
+                Ok(result) => result,
+                Err(err) => Err(ToolExecuteError {
+                    message: format!("grep background task failed: {err}"),
+                }),
             }
         })
     }
@@ -1831,68 +1847,79 @@ impl Tool for GlobTool {
                     });
                 }
             };
-            let path = args["path"].as_str().unwrap_or(".");
+            let path = args["path"].as_str().unwrap_or(".").to_string();
 
-            let mut walk_builder = WalkBuilder::new(path);
-            walk_builder.sort_by_file_path(compare_mtime);
-            walk_builder.hidden(false);
-            walk_builder.filter_entry(|entry| {
-                !crate::agent::IGNORED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+            // 与 grep 同理：目录遍历是阻塞 I/O，放 blocking 线程池执行
+            let task = tokio::task::spawn_blocking(move || -> Result<String, ToolExecuteError> {
+                let mut walk_builder = WalkBuilder::new(&path);
+                walk_builder.sort_by_file_path(compare_mtime);
+                walk_builder.hidden(false);
+                walk_builder.filter_entry(|entry| {
+                    !crate::agent::IGNORED_DIRS
+                        .contains(&entry.file_name().to_string_lossy().as_ref())
+                });
+
+                let glob_matcher = globset::Glob::new(&pattern)
+                    .map_err(|err| ToolExecuteError {
+                        message: format!("Invalid glob pattern: {}", err),
+                    })?
+                    .compile_matcher();
+
+                const MAX_FILES: usize = 100;
+
+                let mut results = String::new();
+                let mut file_count = 0usize;
+                let mut total_count = 0usize;
+                let mut truncated = false;
+                for entry in walk_builder.build() {
+                    let entry = entry.map_err(|e| ToolExecuteError {
+                        message: e.to_string(),
+                    })?;
+                    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                        continue;
+                    }
+                    if glob_matcher.is_match(entry.path()) {
+                        total_count += 1;
+                        if file_count < MAX_FILES
+                            && let Ok(canonical) = entry.path().canonicalize()
+                        {
+                            results.push_str(&format!("{}\n", canonical.display()));
+                            file_count += 1;
+                        }
+                        if total_count >= MAX_FILES * 5 {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+
+                if results.is_empty() {
+                    Ok("No matching files found".to_string())
+                } else if truncated {
+                    results.push_str(&format!(
+                        "\n... Too many results, truncated (showing {} of {}+ files)",
+                        MAX_FILES,
+                        MAX_FILES * 5
+                    ));
+                    Ok(results)
+                } else if total_count > MAX_FILES {
+                    results.push_str(&format!(
+                        "\n... Too many results, truncated (showing {} of {} files, {} more omitted)",
+                        MAX_FILES,
+                        total_count,
+                        total_count - MAX_FILES
+                    ));
+                    Ok(results)
+                } else {
+                    Ok(results)
+                }
             });
 
-            let glob_matcher = globset::Glob::new(&pattern)
-                .map_err(|err| ToolExecuteError {
-                    message: format!("Invalid glob pattern: {}", err),
-                })?
-                .compile_matcher();
-
-            const MAX_FILES: usize = 100;
-
-            let mut results = String::new();
-            let mut file_count = 0usize;
-            let mut total_count = 0usize;
-            let mut truncated = false;
-            for entry in walk_builder.build() {
-                let entry = entry.map_err(|e| ToolExecuteError {
-                    message: e.to_string(),
-                })?;
-                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    continue;
-                }
-                if glob_matcher.is_match(entry.path()) {
-                    total_count += 1;
-                    if file_count < MAX_FILES
-                        && let Ok(canonical) = entry.path().canonicalize()
-                    {
-                        results.push_str(&format!("{}\n", canonical.display()));
-                        file_count += 1;
-                    }
-                    if total_count >= MAX_FILES * 5 {
-                        truncated = true;
-                        break;
-                    }
-                }
-            }
-
-            if results.is_empty() {
-                Ok("No matching files found".to_string())
-            } else if truncated {
-                results.push_str(&format!(
-                    "\n... Too many results, truncated (showing {} of {}+ files)",
-                    MAX_FILES,
-                    MAX_FILES * 5
-                ));
-                Ok(results)
-            } else if total_count > MAX_FILES {
-                results.push_str(&format!(
-                    "\n... Too many results, truncated (showing {} of {} files, {} more omitted)",
-                    MAX_FILES,
-                    total_count,
-                    total_count - MAX_FILES
-                ));
-                Ok(results)
-            } else {
-                Ok(results)
+            match task.await {
+                Ok(result) => result,
+                Err(err) => Err(ToolExecuteError {
+                    message: format!("glob background task failed: {err}"),
+                }),
             }
         })
     }
@@ -2582,5 +2609,63 @@ mod tests {
         let out = BashTool.execute_async(&arguments).await.expect("e2e run");
         assert!(out.contains("tool-e2e"), "missing output: {out}");
         assert!(!out.contains("timed out"), "unexpected marker: {out}");
+    }
+
+    #[tokio::test]
+    async fn grep_tool_caps_at_max_matches() {
+        // 超过 MAX_MATCHES → 恰好 100 条命中 + 截断标记（外层遍历提前终止，输出不变）
+        let dir = test_tmp_dir("hailux_grep_truncate_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let content: String = (0..150).map(|i| format!("needle line {i}\n")).collect();
+        std::fs::write(dir.join("big.txt"), &content).expect("write file");
+        let arguments =
+            serde_json::json!({ "pattern": "needle", "path": dir.display().to_string() })
+                .to_string();
+        let out = GrepTool.execute_async(&arguments).await.expect("grep run");
+        let match_lines = out
+            .lines()
+            .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .count();
+        assert_eq!(match_lines, 100, "should cap at 100 matches: {out}");
+        assert!(out.contains("Too many results"), "missing marker: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn grep_tool_no_matches_returns_marker() {
+        let dir = test_tmp_dir("hailux_grep_empty_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("a.txt"), "hello world\n").expect("write file");
+        let arguments =
+            serde_json::json!({ "pattern": "zzz_not_there", "path": dir.display().to_string() })
+                .to_string();
+        let out = GrepTool.execute_async(&arguments).await.expect("grep run");
+        assert_eq!(out, "No matches found");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn glob_tool_filters_by_pattern() {
+        let dir = test_tmp_dir("hailux_glob_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").expect("write file");
+        std::fs::write(dir.join("b.txt"), "text\n").expect("write file");
+        let arguments =
+            serde_json::json!({ "pattern": "*.rs", "path": dir.display().to_string() }).to_string();
+        let out = GlobTool.execute_async(&arguments).await.expect("glob run");
+        assert!(out.contains("a.rs"), "missing match: {out}");
+        assert!(!out.contains("b.txt"), "unexpected match: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 测试临时目录：放在 target/ 下（沙箱/受限环境常禁写 %TEMP%，target 必可写）
+    fn test_tmp_dir(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(name)
     }
 }
