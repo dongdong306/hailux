@@ -393,13 +393,14 @@ impl Tool for McpTool {
         &self,
         _arguments: &str,
         _work_dir: &str,
-    ) -> Option<crate::permission::PermissionRequest> {
-        Some(crate::permission::PermissionRequest {
+    ) -> Vec<crate::permission::PermissionRequest> {
+        vec![crate::permission::PermissionRequest {
             permission: "mcp".to_string(),
             patterns: vec![self.registered_name.clone()],
             always_patterns: vec![self.registered_name.clone()],
             description: format!("MCP tool: {}", self.registered_name),
-        })
+            force_ask: false,
+        }]
     }
 
     fn execute_async<'a>(

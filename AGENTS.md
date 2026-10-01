@@ -174,11 +174,28 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   rules in `permission/mod.rs::default_rules()`: `* allow`, `external_directory * ask`,
   `read *.env` / `*.env.* ask` (`.env.example allow`), `mcp * ask`. Tools issue
   `external_directory` requests when a path resolves outside the workdir — read/edit/write/
-  grep/glob path args and `bash` file-path args (`BASH_FILE_COMMANDS`) plus the bash `workdir`
-  param. `[permission.xxx]` config rules (session > config > builtin defaults) override the
-  defaults; `read` in-workdir requests use absolute-path patterns so `.env` rules match via
-  `wildcard_match` — a `\`→`/`-normalized, Windows case-insensitive, `*`/`?`-wildcard matcher
-  with literal special chars.
+  grep/glob path args plus the bash `workdir` param. `[permission.xxx]` config rules
+  (session > config > builtin defaults) override the defaults; `read` in-workdir requests use
+  absolute-path patterns so `.env` rules match via `wildcard_match` — a `\`→`/`-normalized,
+  Windows case-insensitive, `*`/`?`-wildcard matcher with literal special chars.
+  `Tool::extract_permission` returns an **ordered** `Vec<PermissionRequest>`: bash puts its
+  command-rule request first, external-directory second, so `[permission.bash] "rm *"="deny"`
+  short-circuits before the out-of-workdir ask (`agent/agent.rs::evaluate_permission_requests`
+  evaluates in order; Deny short-circuits, first Ask dialogs, `Once` only covers that one
+  request). Session "always" rules persist under the **request's** permission category, not the
+  tool category.
+- **Bash static analysis** (`permission/bash_scan.rs`): best-effort gating, NOT a sandbox —
+  documented in tool prompts and help skill. Splits sub-commands on top-level `&&`/`;`/`|`/`&`
+  (quote-aware); classifies first tokens as FileOps (`cat`, `rm`, `ln`, `tee`, ... — all
+  args scanned as path candidates) / Executor (`sudo`, `sh`, `python`, `eval`, `xargs`, ... —
+  sets `force_ask` on the bash request so builtin `* allow` doesn't waive it; only explicit
+  session/config rules do) / Other (redirection targets still checked). `cd X` tracks a
+  per-command resolution base (updated per segment) instead of gating cd itself: the hit
+  lands on the segment that actually touches files, so `cd .. && ls` is silent while
+  `cd .. && cat secret` asks for the real target dir. Known vars
+  (`$HOME`/`$env:NAME`) are expanded; unknown `$var`/`$(...)`/backticks are skipped (documented
+  best-effort trade-off); `~` expands; globs resolve by their path prefix so `../x/*.pem` is
+  gated while in-workdir globs pass.
 - **Plan mode** (`/plan` or Shift+Tab): filters out write/edit tools from the tool list and
   injects a read-only system-reminder into the last user message (on a clone, not stored).
   `bash` stays available but is hard-gated by `permission/bash_readonly.rs::is_read_only_bash_command`

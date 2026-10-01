@@ -25,8 +25,11 @@ By default, operations inside the working directory are allowed without confirma
 
 - bash commands, `read`/`edit`/`write`/`grep`/`glob` inside the working directory run freely
 - reading sensitive files such as `.env` / `.env.local` asks for confirmation (`.env.example` is allowed)
-- any operation touching content outside the working directory (e.g. `cat ../secrets.txt`, `rm /tmp/x`, editing a file outside the project) asks for confirmation
+- any operation touching content outside the working directory (e.g. `cat ../secrets.txt`, `rm /tmp/x`, editing a file outside the project) asks for confirmation — including bash sub-commands chained with `&&`/`;`/`|`, redirection targets, and `cd` targets outside the working directory
+- bash commands that cannot be statically analyzed (sudo, sh/bash, python/node interpreters, eval, xargs, ...) ask for confirmation on first use per session — built-in defaults never silently authorize them
 - MCP tools always ask for confirmation
+
+> **Note**: The permission layer is convenience gating, not a security sandbox. bash is arbitrary code execution by nature; the static analysis of shell commands is best-effort (e.g. unknown `$variables` cannot be resolved). Treat `--yolo` and permission rules as trust decisions.
 
 Override the defaults with rules in `~/.hailux/config.toml`:
 
@@ -34,6 +37,7 @@ Override the defaults with rules in `~/.hailux/config.toml`:
 [permission.bash]
 "rm *" = "deny"
 "git push *" = "ask"
+"sudo *" = "allow"   # stop asking for sudo commands
 
 [permission.read]
 "*.env" = "allow"   # 关闭 .env 读取确认
@@ -42,7 +46,7 @@ Override the defaults with rules in `~/.hailux/config.toml`:
 "C:\\Users\\me\\shared\\*" = "allow"
 ```
 
-Choosing "always" in the permission dialog persists the rule for the current session; `hailux --yolo` skips all confirmations.
+Rule evaluation for a bash command is ordered: command rules (`[permission.bash]`) are evaluated first (a `deny` short-circuits), then the external-directory check. Choosing "always" in the permission dialog persists the rule for the current session; `hailux --yolo` skips all confirmations.
 
 ## Slash Commands
 
