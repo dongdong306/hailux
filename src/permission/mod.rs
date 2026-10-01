@@ -1,6 +1,8 @@
 pub mod bash_arity;
 pub mod bash_readonly;
+pub mod bash_scan;
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// 权限动作
@@ -96,6 +98,11 @@ pub struct PermissionRequest {
     pub always_patterns: Vec<String>,
     /// 给用户看的简短描述
     pub description: String,
+    /// 内置默认规则不豁免：仅 session/config 显式规则可放行或拒绝，
+    /// 无显式命中时回落为 ask。用于 bash 执行原语（sudo/sh/python 等
+    /// 无法静态判定文件访问范围的命令）——全局 `* allow` 是低打扰默认，
+    /// 不应被当作对任意代码执行的显式授权。
+    pub force_ask: bool,
 }
 
 /// 用户对权限请求的回复
@@ -350,11 +357,22 @@ impl PermissionManager {
         let defaults = default_rules();
 
         for pattern in &request.patterns {
-            let action = evaluate(
-                &request.permission,
-                pattern,
-                &[&session_rules, &config_rules, &defaults],
-            );
+            // force_ask：内置默认规则不参与评估（`* allow` 是低打扰默认而非
+            // 显式授权），仅 session/config 显式规则可放行/拒绝；
+            // 无显式命中时 evaluate 回落为 Ask。
+            let action = if request.force_ask {
+                evaluate(
+                    &request.permission,
+                    pattern,
+                    &[&session_rules, &config_rules],
+                )
+            } else {
+                evaluate(
+                    &request.permission,
+                    pattern,
+                    &[&session_rules, &config_rules, &defaults],
+                )
+            };
             match action {
                 PermissionAction::Allow => continue,
                 PermissionAction::Deny => {
@@ -376,6 +394,82 @@ impl PermissionManager {
         }
 
         PermissionResult::Allowed
+    }
+}
+
+/// 词法规范化路径（解析 `.` 与 `..`），不做文件系统访问。
+/// 用于 canonicalize 失败（文件不存在）时仍能正确判断「工作目录内」。
+pub(crate) fn normalize_lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 去掉 Windows canonicalize 返回的 `\\?\` 扩展路径前缀，
+/// 保证 canonicalize 与词法回退路径都能用 `starts_with` 正确比较。
+#[cfg(windows)]
+fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// 解析权限检查用的路径。
+/// 相对路径先按 work_dir 拼接并做词法规范化（解析 ..），再尝试 canonicalize
+/// （解析符号链接等）；文件不存在时回退到规范化后的拼接路径。
+/// 注意不能直接 canonicalize 相对路径——它会相对进程 cwd 而非 work_dir 解析。
+pub(crate) fn resolve_permission_path(path: &str, work_dir: &str) -> PathBuf {
+    let p = Path::new(path);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        normalize_lexical(&Path::new(work_dir).join(path))
+    };
+    match std::fs::canonicalize(&joined) {
+        Ok(c) => strip_extended_prefix(c),
+        Err(_) => {
+            // 文件不存在时，逐级向上找到第一个存在的祖先目录并 canonicalize，
+            // 再把不存在的部分拼回去。这解决了 Windows 短路径名（如 RUNNER~1）
+            // 与 canonicalize 结果不一致导致 starts_with 匹配失败的问题。
+            let mut existing = joined.clone();
+            let mut missing: Vec<std::ffi::OsString> = Vec::new();
+            while !existing.as_os_str().is_empty() {
+                match std::fs::canonicalize(&existing) {
+                    Ok(canon) => {
+                        let mut result = strip_extended_prefix(canon);
+                        for part in missing.into_iter().rev() {
+                            result.push(part);
+                        }
+                        return result;
+                    }
+                    Err(_) => {
+                        if let Some(name) = existing.file_name() {
+                            missing.push(name.to_os_string());
+                        }
+                        if !existing.pop() {
+                            break;
+                        }
+                    }
+                }
+            }
+            strip_extended_prefix(joined)
+        }
     }
 }
 
@@ -534,6 +628,17 @@ mod tests {
             patterns: vec!["example-server".into()],
             always_patterns: vec![],
             description: "test".into(),
+            force_ask: false,
+        }
+    }
+
+    fn test_req(permission: &str, patterns: &[&str]) -> PermissionRequest {
+        PermissionRequest {
+            permission: permission.into(),
+            patterns: patterns.iter().map(|s| (*s).into()).collect(),
+            always_patterns: vec![],
+            description: "test".into(),
+            force_ask: false,
         }
     }
 
@@ -563,12 +668,7 @@ mod tests {
             action: PermissionAction::Allow,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        let req = PermissionRequest {
-            permission: "bash".into(),
-            patterns: vec!["git *".into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+        let req = test_req("bash", &["git *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
 
@@ -580,12 +680,7 @@ mod tests {
             action: PermissionAction::Deny,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        let req = PermissionRequest {
-            permission: "bash".into(),
-            patterns: vec!["rm *".into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+        let req = test_req("bash", &["rm *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
     }
 
@@ -609,12 +704,7 @@ mod tests {
             "rm -rf ./target *",
             "npm install *",
         ] {
-            let req = PermissionRequest {
-                permission: "bash".into(),
-                patterns: vec![cmd.into()],
-                always_patterns: vec![],
-                description: "test".into(),
-            };
+            let req = test_req("bash", &[cmd]);
             assert!(
                 matches!(pm.check(&req, false), PermissionResult::Allowed),
                 "expected default allow for {}",
@@ -626,24 +716,14 @@ mod tests {
     #[test]
     fn test_default_allow_in_workdir_edit() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        let req = PermissionRequest {
-            permission: "edit".into(),
-            patterns: vec!["C:\\proj\\src\\main.rs".into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+        let req = test_req("edit", &["C:\\proj\\src\\main.rs"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
 
     #[test]
     fn test_default_ask_external_directory() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        let req = PermissionRequest {
-            permission: "external_directory".into(),
-            patterns: vec!["C:\\proj\\*".into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+        let req = test_req("external_directory", &["C:\\proj\\*"]);
         assert!(matches!(
             pm.check(&req, false),
             PermissionResult::NeedsAsk(_)
@@ -653,12 +733,7 @@ mod tests {
     #[test]
     fn test_default_read_env_ask() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        let req = |path: &str| PermissionRequest {
-            permission: "read".into(),
-            patterns: vec![path.into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+        let req = |path: &str| test_req("read", &[path]);
         // .env / .env.local 默认询问
         assert!(matches!(
             pm.check(&req("C:\\proj\\.env"), false),
@@ -693,12 +768,7 @@ mod tests {
             action: PermissionAction::Deny,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        let req = PermissionRequest {
-            permission: "bash".into(),
-            patterns: vec!["rm -rf ./target *".into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+        let req = test_req("bash", &["rm -rf ./target *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
     }
 
@@ -706,12 +776,53 @@ mod tests {
     fn test_session_rule_after_always() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
         pm.add_session_rules("bash", &["git *".to_string()]);
-        let req = PermissionRequest {
+        let req = test_req("bash", &["git *"]);
+        assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
+    }
+
+    #[test]
+    fn test_force_ask_ignores_builtin_defaults() {
+        // 全局默认 `* allow` 不豁免 force_ask 请求：无任何显式规则 → ask
+        let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
+        let mut req = test_req("bash", &["sudo *"]);
+        req.force_ask = true;
+        assert!(matches!(
+            pm.check(&req, false),
+            PermissionResult::NeedsAsk(_)
+        ));
+        // 用户选 always 后（session 显式规则）→ 放行，不再打扰
+        pm.add_session_rules("bash", &["sudo *".to_string()]);
+        assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
+    }
+
+    #[test]
+    fn test_force_ask_respects_config_rules() {
+        let mut req = test_req("bash", &["sudo *"]);
+        req.force_ask = true;
+        // config 显式 allow：放行
+        let allow_rules = vec![PermissionRule {
             permission: "bash".into(),
-            patterns: vec!["git *".into()],
-            always_patterns: vec![],
-            description: "test".into(),
-        };
+            pattern: "sudo *".into(),
+            action: PermissionAction::Allow,
+        }];
+        let pm = PermissionManager::new(PermissionMode::Normal, allow_rules);
+        assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
+        // config 显式 deny：拒绝优先
+        let deny_rules = vec![PermissionRule {
+            permission: "bash".into(),
+            pattern: "sudo *".into(),
+            action: PermissionAction::Deny,
+        }];
+        let pm = PermissionManager::new(PermissionMode::Normal, deny_rules);
+        assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
+    }
+
+    #[test]
+    fn test_force_ask_still_allowed_in_yolo() {
+        // YOLO 语义 = 跳过所有权限确认，force_ask 不例外
+        let pm = PermissionManager::new(PermissionMode::Yolo, vec![]);
+        let mut req = test_req("bash", &["sudo *"]);
+        req.force_ask = true;
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
 
@@ -802,6 +913,7 @@ mod tests {
             patterns: patterns.into_iter().map(String::from).collect(),
             always_patterns: vec!["C:\\proj\\*".into()],
             description: "test".into(),
+            force_ask: false,
         };
         let first = req(vec!["C:\\proj\\sub\\*"]);
         assert!(matches!(

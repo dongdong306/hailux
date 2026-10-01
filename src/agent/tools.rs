@@ -3,6 +3,8 @@ use crate::agent::media::Attachment;
 use crate::agent::utils::compare_mtime;
 use crate::permission::PermissionRequest;
 use crate::permission::bash_arity::extract_bash_pattern;
+use crate::permission::bash_scan;
+use crate::permission::resolve_permission_path;
 use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
 use grep::regex::RegexMatcher;
 use grep::searcher::Searcher;
@@ -72,91 +74,43 @@ impl From<reqwest::Error> for ToolExecuteError {
     }
 }
 
-/// 词法规范化路径（解析 `.` 与 `..`），不做文件系统访问。
-/// 用于 canonicalize 失败（文件不存在）时仍能正确判断「工作目录内」。
-fn normalize_lexical(path: &Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut out = std::path::PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// 去掉 Windows canonicalize 返回的 `\\?\` 扩展路径前缀，
-/// 保证 canonicalize 与词法回退路径都能用 `starts_with` 正确比较。
-#[cfg(windows)]
-fn strip_extended_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix(r"\\?\") {
-        return std::path::PathBuf::from(stripped);
-    }
-    path
-}
-
-#[cfg(not(windows))]
-fn strip_extended_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
-    path
-}
-
-/// 解析权限检查用的路径。
-/// 相对路径先按 work_dir 拼接并做词法规范化（解析 ..），再尝试 canonicalize
-/// （解析符号链接等）；文件不存在时回退到规范化后的拼接路径。
-/// 注意不能直接 canonicalize 相对路径——它会相对进程 cwd 而非 work_dir 解析。
-fn resolve_permission_path(path: &str, work_dir: &str) -> std::path::PathBuf {
-    let p = Path::new(path);
-    let joined = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        normalize_lexical(&Path::new(work_dir).join(path))
-    };
-    match std::fs::canonicalize(&joined) {
-        Ok(c) => strip_extended_prefix(c),
-        Err(_) => {
-            // 文件不存在时，逐级向上找到第一个存在的祖先目录并 canonicalize，
-            // 再把不存在的部分拼回去。这解决了 Windows 短路径名（如 RUNNER~1）
-            // 与 canonicalize 结果不一致导致 starts_with 匹配失败的问题。
-            let mut existing = joined.clone();
-            let mut missing: Vec<std::ffi::OsString> = Vec::new();
-            while !existing.as_os_str().is_empty() {
-                match std::fs::canonicalize(&existing) {
-                    Ok(canon) => {
-                        let mut result = strip_extended_prefix(canon);
-                        for part in missing.into_iter().rev() {
-                            result.push(part);
-                        }
-                        return result;
-                    }
-                    Err(_) => {
-                        if let Some(name) = existing.file_name() {
-                            missing.push(name.to_os_string());
-                        }
-                        if !existing.pop() {
-                            break;
-                        }
-                    }
-                }
-            }
-            strip_extended_prefix(joined)
-        }
-    }
-}
-
 /// 构造「操作非工作目录内容」的权限请求（external_directory，默认询问）。
-fn external_dir_request(dir: &Path, description: String) -> PermissionRequest {
-    let pattern = dir.join("*").display().to_string();
+fn external_dir_request(dirs: &[std::path::PathBuf], description: String) -> PermissionRequest {
+    let patterns: Vec<String> = dirs
+        .iter()
+        .map(|d| d.join("*").display().to_string())
+        .collect();
     PermissionRequest {
         permission: "external_directory".to_string(),
-        patterns: vec![pattern.clone()],
-        always_patterns: vec![pattern],
+        patterns: patterns.clone(),
+        always_patterns: patterns,
         description,
+        force_ask: false,
     }
+}
+
+/// 若路径解析在工作目录之外，返回应询问的目录（文件取父目录，目录取自身）。
+/// 工作目录之内返回 None。
+fn external_dir_of(path: &str, work_dir: &str) -> Option<std::path::PathBuf> {
+    let canonical = resolve_permission_path(path, work_dir);
+    let work_canonical = resolve_permission_path(work_dir, work_dir);
+    if canonical.starts_with(&work_canonical) {
+        return None;
+    }
+    Some(if canonical.is_dir() {
+        canonical
+    } else {
+        canonical
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(canonical)
+    })
+}
+
+/// 从工具参数 JSON 中取字符串字段；解析失败或字段缺失返回 None。
+fn argument_str(arguments: &str, key: &str) -> Option<String> {
+    let args: Value = serde_json::from_str(arguments).ok()?;
+    args[key].as_str().map(str::to_string)
 }
 
 /// 工具 trait，所有可调用的工具都需要实现它
@@ -206,9 +160,17 @@ pub trait Tool: Send + Sync {
     }
 
     /// 从工具参数中提取权限检查所需的信息。
-    /// 返回 None 表示不需要权限检查（即使 permission_category 返回了 Some）。
-    fn extract_permission(&self, _arguments: &str, _work_dir: &str) -> Option<PermissionRequest> {
-        None
+    ///
+    /// 返回有序请求列表：调用方依序评估，任一 Deny 短路拒绝，第一个 Ask
+    /// 弹窗，全部 Allow 才放行。空列表表示不需要权限检查（即使
+    /// permission_category 返回了 Some）。
+    ///
+    /// 多请求场景：一条 bash 命令可同时命中 bash 命令规则（如
+    /// `[permission.bash] "rm *" = "deny"`）与越界路径检查，列表中 bash
+    /// 请求在前、external_directory 请求在后——高优先级类别先评估，
+    /// deny 规则不会被越界请求短路。
+    fn extract_permission(&self, _arguments: &str, _work_dir: &str) -> Vec<PermissionRequest> {
+        Vec::new()
     }
 }
 
@@ -387,84 +349,16 @@ fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
-/// bash 中带文件路径语义的命令。
-/// 这些命令的路径参数会被解析并检查是否位于工作目录之内。
-const BASH_FILE_COMMANDS: &[&str] = &[
-    "cat",
-    "rm",
-    "cp",
-    "mv",
-    "mkdir",
-    "touch",
-    "chmod",
-    "chown",
-    // PowerShell 别名
-    "get-content",
-    "set-content",
-    "add-content",
-    "copy-item",
-    "move-item",
-    "remove-item",
-    "new-item",
-    "rename-item",
-];
-
-/// 解析 bash 命令中指向工作目录之外的文件路径。
-/// 命中则返回 external_directory 权限请求（默认询问），否则返回 None。
-fn bash_external_dir_request(command: &str, work_dir: &str) -> Option<PermissionRequest> {
-    let work_canonical = resolve_permission_path(work_dir, work_dir);
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-    let cmd = tokens.first()?.to_ascii_lowercase();
-    if !BASH_FILE_COMMANDS.contains(&cmd.as_str()) {
-        return None;
-    }
-    for arg in tokens.iter().skip(1) {
-        let raw = arg.trim_matches(['"', '\'']);
-        // 跳过标志位（-l）、chmod 模式（+x）、动态表达式（$var/$(...)/`...`）、glob
-        if raw.starts_with('-') || raw.starts_with('+') {
-            continue;
-        }
-        if raw.contains(['$', '(', '`']) {
-            continue;
-        }
-        if raw.contains(['*', '?', '[']) {
-            continue;
-        }
-        let expanded = if raw == "~" {
-            dirs::home_dir().map(|h| h.display().to_string())
-        } else if let Some(rest) = raw.strip_prefix("~/") {
-            dirs::home_dir().map(|h| format!("{}{}", h.display(), rest))
-        } else {
-            Some(raw.to_string())
-        };
-        let Some(expanded) = expanded else { continue };
-        let resolved = resolve_permission_path(&expanded, work_dir);
-        if resolved.starts_with(&work_canonical) {
-            continue;
-        }
-        let dir = if resolved.is_dir() {
-            resolved
-        } else {
-            resolved
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(resolved)
-        };
-        return Some(external_dir_request(
-            &dir,
-            format!(
-                "Command accesses path outside working directory: {}",
-                command
-            ),
-        ));
-    }
-    None
-}
-
 /// 从 bash 工具参数中提取 `command_string`。
 pub(crate) fn bash_command_from_arguments(arguments: &str) -> Option<String> {
     let args: Value = serde_json::from_str(arguments).ok()?;
     args["command_string"].as_str().map(str::to_string)
+}
+
+/// 从 bash 工具参数中提取可选的 `workdir`。
+fn bash_workdir_from_arguments(arguments: &str) -> Option<String> {
+    let args: Value = serde_json::from_str(arguments).ok()?;
+    args["workdir"].as_str().map(str::to_string)
 }
 
 /// plan 模式下的 bash 只读拦截：返回 `Some(拒绝原因)` 时禁止执行。
@@ -603,34 +497,45 @@ impl Tool for BashTool {
         Some("bash")
     }
 
-    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
-        let args: Value = serde_json::from_str(arguments).ok()?;
-        let command = args["command_string"].as_str()?.to_string();
+    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        let Some(command) = bash_command_from_arguments(arguments) else {
+            return Vec::new();
+        };
         if command.trim().is_empty() {
-            return None;
+            return Vec::new();
         }
         // 指定的 workdir 在项目目录之外 → 询问
-        if let Some(wd) = args["workdir"].as_str() {
-            let wd_canonical = resolve_permission_path(wd, work_dir);
+        if let Some(wd) = bash_workdir_from_arguments(arguments) {
+            let wd_canonical = resolve_permission_path(&wd, work_dir);
             let work_canonical = resolve_permission_path(work_dir, work_dir);
             if !wd_canonical.starts_with(&work_canonical) {
-                return Some(external_dir_request(
-                    &wd_canonical,
+                return vec![external_dir_request(
+                    &[wd_canonical],
                     format!("Run command outside working directory: {}", wd),
-                ));
+                )];
             }
         }
-        // 文件路径参数指向工作目录之外 → 询问
-        if let Some(req) = bash_external_dir_request(&command, work_dir) {
-            return Some(req);
-        }
         let (pattern, description) = extract_bash_pattern(&command);
-        Some(PermissionRequest {
+        // 静态扫描：执行原语 → force_ask；越界路径 → external_directory 请求。
+        // bash 请求在前：先评估命令规则（deny 优先），allow 后才轮到越界检查。
+        let scan = bash_scan::scan(&command, work_dir);
+        let mut requests = vec![PermissionRequest {
             permission: "bash".to_string(),
             patterns: vec![pattern.clone()],
             always_patterns: vec![pattern],
-            description,
-        })
+            description: description.clone(),
+            force_ask: scan.executor_hit,
+        }];
+        if !scan.external_dirs.is_empty() {
+            requests.push(external_dir_request(
+                &scan.external_dirs,
+                format!(
+                    "Command accesses path outside working directory: {}",
+                    description
+                ),
+            ));
+        }
+        requests
     }
 
     #[cfg(windows)]
@@ -932,37 +837,28 @@ impl Tool for ReadTool {
         Some("read")
     }
 
-    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
-        let args: Value = serde_json::from_str(arguments).ok()?;
-        let file_path = args["file_path"].as_str()?;
-
-        let canonical = resolve_permission_path(file_path, work_dir);
-        let work_canonical = resolve_permission_path(work_dir, work_dir);
+    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        let Some(file_path) = argument_str(arguments, "file_path") else {
+            return Vec::new();
+        };
+        let canonical = resolve_permission_path(&file_path, work_dir);
 
         // 工作目录之外 → external_directory 询问
-        if !canonical.starts_with(&work_canonical) {
-            let dir = if canonical.is_dir() {
-                canonical
-            } else {
-                canonical
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or(canonical)
-            };
-            return Some(external_dir_request(
-                &dir,
+        if let Some(dir) = external_dir_of(&file_path, work_dir) {
+            return vec![external_dir_request(
+                &[dir],
                 format!("Read outside working directory: {}", file_path),
-            ));
+            )];
         }
 
         // 工作目录内 → read 请求（默认放行；*.env 命中内置默认询问规则）
-        let path_str = canonical.display().to_string();
-        Some(PermissionRequest {
+        vec![PermissionRequest {
             permission: "read".to_string(),
-            patterns: vec![path_str.clone()],
+            patterns: vec![canonical.display().to_string()],
             always_patterns: vec!["*".to_string()],
             description: format!("Read file: {}", file_path),
-        })
+            force_ask: false,
+        }]
     }
 
     fn description(&self) -> &str {
@@ -1234,33 +1130,28 @@ impl Tool for EditTool {
         Some("edit")
     }
 
-    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
-        let args: Value = serde_json::from_str(arguments).ok()?;
-        let file_path = args["file_path"].as_str()?;
-
-        let canonical = resolve_permission_path(file_path, work_dir);
-        let work_canonical = resolve_permission_path(work_dir, work_dir);
+    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        let Some(file_path) = argument_str(arguments, "file_path") else {
+            return Vec::new();
+        };
+        let canonical = resolve_permission_path(&file_path, work_dir);
 
         // 工作目录之外 → external_directory 询问
-        if !canonical.starts_with(&work_canonical) {
-            let dir = canonical
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(canonical);
-            return Some(external_dir_request(
-                &dir,
+        if let Some(dir) = external_dir_of(&file_path, work_dir) {
+            return vec![external_dir_request(
+                &[dir],
                 format!("Edit outside working directory: {}", file_path),
-            ));
+            )];
         }
 
         // 工作目录内 → edit 请求（默认放行，配置规则仍可 deny）
-        let path_str = canonical.display().to_string();
-        Some(PermissionRequest {
+        vec![PermissionRequest {
             permission: "edit".to_string(),
-            patterns: vec![path_str.clone()],
+            patterns: vec![canonical.display().to_string()],
             always_patterns: vec!["*".to_string()],
             description: format!("Edit {}", file_path),
-        })
+            force_ask: false,
+        }]
     }
 
     fn description(&self) -> &str {
@@ -1400,33 +1291,28 @@ impl Tool for WriteTool {
         Some("write")
     }
 
-    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
-        let args: Value = serde_json::from_str(arguments).ok()?;
-        let file_path = args["file_path"].as_str()?;
-
-        let canonical = resolve_permission_path(file_path, work_dir);
-        let work_canonical = resolve_permission_path(work_dir, work_dir);
+    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        let Some(file_path) = argument_str(arguments, "file_path") else {
+            return Vec::new();
+        };
+        let canonical = resolve_permission_path(&file_path, work_dir);
 
         // 工作目录之外 → external_directory 询问
-        if !canonical.starts_with(&work_canonical) {
-            let dir = canonical
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(canonical);
-            return Some(external_dir_request(
-                &dir,
+        if let Some(dir) = external_dir_of(&file_path, work_dir) {
+            return vec![external_dir_request(
+                &[dir],
                 format!("Write outside working directory: {}", file_path),
-            ));
+            )];
         }
 
         // 工作目录内 → write 请求（默认放行，配置规则仍可 deny）
-        let path_str = canonical.display().to_string();
-        Some(PermissionRequest {
+        vec![PermissionRequest {
             permission: "write".to_string(),
-            patterns: vec![path_str.clone()],
+            patterns: vec![canonical.display().to_string()],
             always_patterns: vec!["*".to_string()],
             description: format!("Write {}", file_path),
-        })
+            force_ask: false,
+        }]
     }
 
     fn description(&self) -> &str {
@@ -1605,28 +1491,26 @@ impl Tool for GrepTool {
         Some("grep")
     }
 
-    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
-        let args: Value = serde_json::from_str(arguments).ok()?;
-        let path = args["path"].as_str().unwrap_or(".");
-        let canonical = resolve_permission_path(path, work_dir);
-        let work_canonical = resolve_permission_path(work_dir, work_dir);
+    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        let path = argument_str(arguments, "path").unwrap_or_else(|| ".".to_string());
+        let canonical = resolve_permission_path(&path, work_dir);
 
         // 搜索路径在工作目录之外 → external_directory 询问
-        if !canonical.starts_with(&work_canonical) {
-            return Some(external_dir_request(
-                &canonical,
+        if let Some(dir) = external_dir_of(&path, work_dir) {
+            return vec![external_dir_request(
+                &[dir],
                 format!("Search outside working directory: {}", path),
-            ));
+            )];
         }
 
         // 工作目录内 → grep 请求（默认放行，配置规则仍可 deny）
-        let path_str = canonical.display().to_string();
-        Some(PermissionRequest {
+        vec![PermissionRequest {
             permission: "grep".to_string(),
-            patterns: vec![path_str.clone()],
+            patterns: vec![canonical.display().to_string()],
             always_patterns: vec!["*".to_string()],
             description: format!("Search in: {}", path),
-        })
+            force_ask: false,
+        }]
     }
 
     fn description(&self) -> &str {
@@ -1786,28 +1670,26 @@ impl Tool for GlobTool {
         Some("glob")
     }
 
-    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Option<PermissionRequest> {
-        let args: Value = serde_json::from_str(arguments).ok()?;
-        let path = args["path"].as_str().unwrap_or(".");
-        let canonical = resolve_permission_path(path, work_dir);
-        let work_canonical = resolve_permission_path(work_dir, work_dir);
+    fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        let path = argument_str(arguments, "path").unwrap_or_else(|| ".".to_string());
+        let canonical = resolve_permission_path(&path, work_dir);
 
         // 搜索路径在工作目录之外 → external_directory 询问
-        if !canonical.starts_with(&work_canonical) {
-            return Some(external_dir_request(
-                &canonical,
+        if let Some(dir) = external_dir_of(&path, work_dir) {
+            return vec![external_dir_request(
+                &[dir],
                 format!("Search outside working directory: {}", path),
-            ));
+            )];
         }
 
         // 工作目录内 → glob 请求（默认放行，配置规则仍可 deny）
-        let path_str = canonical.display().to_string();
-        Some(PermissionRequest {
+        vec![PermissionRequest {
             permission: "glob".to_string(),
-            patterns: vec![path_str.clone()],
+            patterns: vec![canonical.display().to_string()],
             always_patterns: vec!["*".to_string()],
             description: format!("Search in: {}", path),
-        })
+            force_ask: false,
+        }]
     }
 
     fn description(&self) -> &str {
@@ -2070,6 +1952,7 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission::normalize_lexical;
 
     fn tmp_workdir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("hailux_perm_test_{}", name));
@@ -2229,43 +2112,82 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// BashTool::extract_permission 端到端语义（扫描细节见 bash_scan 模块测试）。
+    fn bash_extract(command: &str, work_dir: &str) -> Vec<PermissionRequest> {
+        BashTool.extract_permission(&json!({ "command_string": command }).to_string(), work_dir)
+    }
+
     #[test]
-    fn bash_inside_workdir_is_none() {
+    fn bash_inside_workdir_single_bash_request() {
         let wd = tmp_workdir("inside");
         let wd_str = wd.display().to_string();
-        // 普通命令 / 目录内文件 / 目录内写操作：均无需权限
-        assert!(bash_external_dir_request("ls -la", &wd_str).is_none());
-        assert!(bash_external_dir_request("git status", &wd_str).is_none());
-        assert!(bash_external_dir_request("cat src/main.rs", &wd_str).is_none());
-        assert!(bash_external_dir_request("rm -rf ./target", &wd_str).is_none());
-        assert!(bash_external_dir_request("mkdir -p build", &wd_str).is_none());
+        // 普通命令 / 目录内文件 / 目录内写操作：单个 bash 请求，无 force_ask
+        for cmd in ["ls -la", "git status", "cat src/main.rs", "rm -rf ./target"] {
+            let reqs = bash_extract(cmd, &wd_str);
+            assert_eq!(reqs.len(), 1, "expected single request for {cmd:?}");
+            assert_eq!(reqs[0].permission, "bash");
+            assert!(!reqs[0].force_ask, "expected no force_ask for {cmd:?}");
+        }
     }
 
     #[test]
-    fn bash_outside_workdir_requests_external_directory() {
+    fn bash_outside_appends_external_request_after_bash_request() {
         let wd = tmp_workdir("outside");
         let wd_str = wd.display().to_string();
-        let req = bash_external_dir_request("cat ../secrets.txt", &wd_str);
-        let req = req.expect("external path must be gated");
-        assert_eq!(req.permission, "external_directory");
+        let reqs = bash_extract("cat ../secrets.txt", &wd_str);
+        // bash 请求在前（命令规则先评估），external_directory 请求在后
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0].permission, "bash");
+        assert_eq!(reqs[1].permission, "external_directory");
         // 绝对路径外部文件
-        assert!(bash_external_dir_request("cat /etc/hosts", &wd_str).is_some());
+        assert_eq!(bash_extract("cat /etc/hosts", &wd_str).len(), 2);
         // 非文件命令不受文件路径检查影响（默认放行，走 bash 规则）
-        assert!(bash_external_dir_request("npm install", &wd_str).is_none());
-        assert!(bash_external_dir_request("curl https://example.com", &wd_str).is_none());
+        assert_eq!(bash_extract("npm install", &wd_str).len(), 1);
+        assert_eq!(bash_extract("curl https://example.com", &wd_str).len(), 1);
     }
 
     #[test]
-    fn bash_skips_flags_modes_and_dynamic_args() {
+    fn bash_executor_flags_force_ask() {
+        let wd = tmp_workdir("executor_flag");
+        let wd_str = wd.display().to_string();
+        // sudo / 解释器无法静态分析 → force_ask（内置默认放行不豁免）
+        for cmd in [
+            "sudo systemctl restart nginx",
+            "sh -c 'echo hi'",
+            "python script.py",
+        ] {
+            let reqs = bash_extract(cmd, &wd_str);
+            assert_eq!(reqs.len(), 1, "expected single request for {cmd:?}");
+            assert!(reqs[0].force_ask, "expected force_ask for {cmd:?}");
+        }
+    }
+
+    #[test]
+    fn bash_skips_flags_and_dynamic_args() {
         let wd = tmp_workdir("flags");
         let wd_str = wd.display().to_string();
-        // -l 标志、chmod +x 模式、$HOME 动态展开均跳过
-        assert!(bash_external_dir_request("cat -n /etc/hosts", &wd_str).is_some());
+        // -l 标志、chmod +x 模式跳过；已知变量（$HOME）展开后仍被检查
+        assert_eq!(bash_extract("cat -n /etc/hosts", &wd_str).len(), 2);
         // ls 不参与文件路径检查
-        assert!(bash_external_dir_request("ls -l /etc", &wd_str).is_none());
-        assert!(bash_external_dir_request("chmod +x script.sh", &wd_str).is_none());
-        assert!(bash_external_dir_request("cat $HOME/.ssh/id_rsa", &wd_str).is_none());
-        assert!(bash_external_dir_request("cat ~/.ssh/id_rsa", &wd_str).is_some());
+        assert_eq!(bash_extract("ls -l /etc", &wd_str).len(), 1);
+        assert_eq!(bash_extract("chmod +x script.sh", &wd_str).len(), 1);
+        assert_eq!(bash_extract("cat $HOME/.ssh/id_rsa", &wd_str).len(), 2);
+        assert_eq!(bash_extract("cat ~/.ssh/id_rsa", &wd_str).len(), 2);
+    }
+
+    #[test]
+    fn bash_workdir_param_outside_wins() {
+        let wd = tmp_workdir("wdparam");
+        let wd_str = wd.display().to_string();
+        let outside = wd.parent().unwrap().join("elsewhere");
+        let args = json!({
+            "command_string": "ls",
+            "workdir": outside.display().to_string()
+        })
+        .to_string();
+        let reqs = BashTool.extract_permission(&args, &wd_str);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].permission, "external_directory");
     }
 
     #[test]

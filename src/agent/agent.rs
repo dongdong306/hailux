@@ -6,7 +6,7 @@ use super::models::{
 use super::tools::ToolRegistry;
 use super::{media::Attachment, tools::ToolExecution};
 use crate::agent::event::{CompactUsage, CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
-use crate::permission::{PermissionManager, PermissionReply, PermissionResult};
+use crate::permission::{PermissionManager, PermissionReply, PermissionRequest, PermissionResult};
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -997,6 +997,67 @@ async fn push_partial_assistant(
     Ok(())
 }
 
+/// 依序评估一次工具调用的全部权限请求：任一 Deny → 短路拒绝；第一个
+/// Ask → 弹窗等待用户应答；全部 Allow → 放行（返回 None）。
+///
+/// 请求列表有序（如 bash：命令规则请求在前、越界路径请求在后），因此
+/// 高优先级类别的 deny/ask 规则不会被低优先级请求短路。用户选 Once 只
+/// 放行当前这一个请求，后续请求继续评估（Deny 依然生效）。
+async fn evaluate_permission_requests(
+    requests: &[PermissionRequest],
+    manager: &PermissionManager,
+    plan_mode: bool,
+    event_tx: &CoreEventTx,
+    cancel: &AtomicBool,
+) -> Option<String> {
+    for request in requests {
+        match manager.check(request, plan_mode) {
+            PermissionResult::Allowed => continue,
+            PermissionResult::Denied(reason) => return Some(reason),
+            PermissionResult::NeedsAsk(request) => {
+                let always_patterns = request.always_patterns.clone();
+                let (tx, rx) = oneshot::channel::<PermissionReply>();
+                if event_tx
+                    .try_send(CoreEvent::PermissionRequest {
+                        request: request.clone(),
+                        response_tx: tx,
+                        subagent_name: None,
+                    })
+                    .is_err()
+                {
+                    // 事件通道满或已关闭：无法向用户弹窗询问。
+                    // 回退为拒绝而非等待一个永不 resolve 的 rx（死锁）。
+                    return Some("Permission request channel unavailable".to_string());
+                }
+                tokio::select! {
+                    reply = rx => match reply {
+                        Ok(PermissionReply::Once) => continue,
+                        Ok(PermissionReply::Always) => {
+                            // 以请求自身的 permission 类别持久化（而非工具类别），
+                            // 保证 always 对同类别请求生效（如 external_directory）
+                            manager.add_session_rules(&request.permission, &always_patterns);
+                            continue;
+                        }
+                        Ok(PermissionReply::Deny) => {
+                            return Some("Permission denied by user".to_string());
+                        }
+                        Err(_) => {
+                            return Some("Permission request channel closed".to_string());
+                        }
+                    },
+                    // 等待期间用户取消（如 Ctrl+C）：中止本次询问，避免卡死在弹窗上
+                    _ = async {
+                        while !cancel.load(Ordering::Relaxed) {
+                            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+                        }
+                    } => return Some("Permission request cancelled".to_string()),
+                }
+            }
+        }
+    }
+    None
+}
+
 async fn finalize_cancelled(
     state: &mut AgentStreamState,
     event_tx: &CoreEventTx,
@@ -1118,11 +1179,11 @@ async fn handle_tool_calls_stream(
         let permission_denied: Option<String> = if let Some(ref tool) = tool_arc {
             let needs_check = tool.permission_category().is_some();
             if needs_check {
-                let (perm_req, perm_mgr, plan_mode) = {
-                    let req = tool.extract_permission(arguments, &state.work_dir);
+                let (perm_reqs, perm_mgr, plan_mode) = {
+                    let reqs = tool.extract_permission(arguments, &state.work_dir);
                     let pm = state.permission.clone();
                     let pm2 = state.plan_mode;
-                    (req, pm, pm2)
+                    (reqs, pm, pm2)
                 };
                 // plan 模式：bash 非只读命令直接拒绝（fail-closed，不弹窗），
                 // 与 plan 模式隐藏 edit/write 工具保持一致。
@@ -1133,53 +1194,9 @@ async fn handle_tool_calls_stream(
                 };
                 if let Some(reason) = plan_denial {
                     Some(reason)
-                } else if let Some(req) = perm_req {
-                    match perm_mgr.check(&req, plan_mode) {
-                        PermissionResult::Allowed => None,
-                        PermissionResult::Denied(reason) => Some(reason),
-                        PermissionResult::NeedsAsk(req) => {
-                            let always_patterns = req.always_patterns.clone();
-                            let (tx, rx) = oneshot::channel::<PermissionReply>();
-                            if event_tx
-                                .try_send(CoreEvent::PermissionRequest {
-                                    request: req,
-                                    response_tx: tx,
-                                    subagent_name: None,
-                                })
-                                .is_err()
-                            {
-                                // 事件通道满或已关闭：无法向用户弹窗询问。
-                                // 回退为拒绝而非等待一个永不 resolve 的 rx（死锁）。
-                                Some("Permission request channel unavailable".to_string())
-                            } else {
-                                tokio::select! {
-                                    reply = rx => match reply {
-                                        Ok(PermissionReply::Once) => None,
-                                        Ok(PermissionReply::Always) => {
-                                            let category =
-                                                tool.permission_category().unwrap_or("").to_string();
-                                            perm_mgr.add_session_rules(&category, &always_patterns);
-                                            None
-                                        }
-                                        Ok(PermissionReply::Deny) => {
-                                            Some("Permission denied by user".to_string())
-                                        }
-                                        Err(_) => {
-                                            Some("Permission request channel closed".to_string())
-                                        }
-                                    },
-                                    // 等待期间用户取消（如 Ctrl+C）：中止本次询问，避免卡死在弹窗上
-                                    _ = async {
-                                        while !cancel.load(Ordering::Relaxed) {
-                                            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
-                                        }
-                                    } => Some("Permission request cancelled".to_string()),
-                                }
-                            }
-                        }
-                    }
                 } else {
-                    None
+                    evaluate_permission_requests(&perm_reqs, &perm_mgr, plan_mode, event_tx, cancel)
+                        .await
                 }
             } else {
                 None

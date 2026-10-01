@@ -16,6 +16,7 @@ English | [中文](README.zh.md)
 - **MCP support** — Connect any MCP server to extend capabilities
 - **Skill system** — Define reusable workflows and knowledge bases via SKILL.md, at project or global level
 - **Plan mode** — Switch to read-only mode so the AI analyzes before executing, avoiding unintended changes
+- **Permission gating** — Out-of-workdir operations and `.env` reads ask for confirmation; bash commands that can't be statically analyzed (sudo, interpreters, eval, ...) ask on first use. This is convenience gating, not a sandbox — bash is arbitrary code execution by design.
 - **Subagents** — Delegate complex tasks to subagents running in parallel
 - **Session management** — Chat history saved automatically, switch between multiple sessions
 - **Multi-model support** — DeepSeek, Zhipu AI and more built in; custom API providers supported
