@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1](https://github.com/dongdong306/hailux/compare/v0.10.0...v0.10.1) (2026-10-14)
+
+
+### Bugfixes
+
+* **permission:** evaluate bash command rules before external-directory gate ([f0ee923](https://github.com/dongdong306/hailux/commit/f0ee92319382394f4c50387d6d90c611223da6be))
+* **tools:** resolve tool paths against session work_dir, not process cwd ([4f74621](https://github.com/dongdong306/hailux/commit/4f74621a5de51137fc740aa759469ff25bfa2f3c))
+* **tui:** match English tool output for edit/write done summary ([7bbb3f3](https://github.com/dongdong306/hailux/commit/7bbb3f395f1b0a738356d26a321ad9a7f90bb5b7))
+* **web:** require nested skill path to prevent deleting skills root ([4c58eed](https://github.com/dongdong306/hailux/commit/4c58eed5f03fb9589bf2aca4900a44f6e914ea8e))
+* **windows:** isolate bash shell in hidden console to protect TUI ([584ff2c](https://github.com/dongdong306/hailux/commit/584ff2cd91fbb979268a3e06af52a0395aa7f976))
+
+
+### Performance
+
+* **grep:** stop traversal at match cap and move walk to blocking pool ([84170fa](https://github.com/dongdong306/hailux/commit/84170fa178b19056bbda8beb1f32f4da6115eb40))
+
+
+### CI
+
+* build Linux release binaries with musl for glibc independence ([6e030da](https://github.com/dongdong306/hailux/commit/6e030dab065ecdc5ccaa66548ea3c3f3b41e6ba6))
+
 ## [0.10.0](https://github.com/dongdong306/hailux/compare/v0.9.0...v0.10.0) (2026-09-07)
 
 
