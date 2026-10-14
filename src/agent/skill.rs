@@ -370,6 +370,7 @@ impl Tool for SkillTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        _work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).unwrap_or_default();
@@ -502,7 +503,7 @@ mod tests {
 
         let skills = discover_skills(&tmp).unwrap();
         let tool = SkillTool::new(skills);
-        let out = tool.execute_async(r#"{"name":"wf"}"#).await.unwrap();
+        let out = tool.execute_async(r#"{"name":"wf"}"#, ".").await.unwrap();
         assert!(out.contains("Base directory for this skill:"));
         assert!(out.contains("run scripts/x.sh"));
         assert!(out.contains("<skill_content name=\"wf\">"));
@@ -533,7 +534,7 @@ mod tests {
 
         let skills = discover_skills(&tmp).unwrap();
         let tool = SkillTool::new(skills);
-        let out = tool.execute_async(r#"{"name":"tree"}"#).await.unwrap();
+        let out = tool.execute_async(r#"{"name":"tree"}"#, ".").await.unwrap();
         assert!(out.contains("Files in this skill's directory:"));
         assert!(out.contains("scripts/\n  deploy.ps1"));
         assert!(out.contains("reference/\n  api/\n    endpoints.md"));
