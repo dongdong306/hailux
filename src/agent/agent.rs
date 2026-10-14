@@ -1218,9 +1218,11 @@ async fn handle_tool_calls_stream(
         let execution: ToolExecution = if let Some(deny_reason) = permission_denied {
             ToolExecution::text(deny_reason)
         } else if let Some(tool) = tool_arc {
+            // work_dir 克隆到局部，避免执行 future 持有对 state 的借用
+            let work_dir = state.work_dir.clone();
             if tool.cancellable() {
                 let cancel_clone = cancel.clone();
-                let execute_fut = tool.execute_async_with_display(arguments);
+                let execute_fut = tool.execute_async_with_display(arguments, &work_dir);
                 tokio::pin!(execute_fut);
                 tokio::select! {
                     r = &mut execute_fut => {
@@ -1235,7 +1237,7 @@ async fn handle_tool_calls_stream(
                     }
                 }
             } else {
-                tool.execute_async_with_display(arguments)
+                tool.execute_async_with_display(arguments, &work_dir)
                     .await
                     .unwrap_or_else(|err| ToolExecution::text(err.message))
             }
@@ -1541,6 +1543,7 @@ mod tests {
         fn execute_async<'a>(
             &'a self,
             _arguments: &'a str,
+            _work_dir: &'a str,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<String, ToolExecuteError>> + Send + 'a>,
         > {
@@ -1549,6 +1552,7 @@ mod tests {
         fn execute_async_with_display<'a>(
             &'a self,
             _arguments: &'a str,
+            _work_dir: &'a str,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = Result<ToolExecution, ToolExecuteError>>

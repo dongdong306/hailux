@@ -695,7 +695,7 @@ impl App {
                     status: TaskRunStatus::Running,
                 });
 
-                let result = task_tool.execute_async(&args).await;
+                let result = task_tool.execute_async(&args, &self.work_dir).await;
                 let task_status = if result.is_ok() {
                     TaskRunStatus::Completed
                 } else {

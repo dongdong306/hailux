@@ -113,6 +113,46 @@ fn argument_str(arguments: &str, key: &str) -> Option<String> {
     args[key].as_str().map(str::to_string)
 }
 
+/// 工具执行路径解析：绝对路径原样返回；相对路径按会话工作目录拼接。
+/// 纯词法拼接（不 canonicalize），write/edit 的目标文件尚不存在时也能解析。
+/// 与权限检查 `resolve_permission_path` 同基准——修复 Web 模式下选中工作
+/// 目录 ≠ 服务进程启动目录时，`.` 与相对路径错误落到启动目录的问题。
+fn resolve_tool_path(path: &str, work_dir: &str) -> String {
+    if is_absoluteish(path) {
+        return path.to_string();
+    }
+    // components() 归一化：去掉 `.` 组件与重复分隔符，统一平台分隔符
+    Path::new(work_dir)
+        .join(path)
+        .components()
+        .collect::<std::path::PathBuf>()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// 视为"不按 work_dir 拼接"的路径：常规绝对路径；Windows 下另含盘符相对
+/// 路径（如 `D:foo`，指向 D 盘当前目录，拼接 work_dir 反而错误）。
+#[cfg(windows)]
+fn is_absoluteish(path: &str) -> bool {
+    Path::new(path).is_absolute() || (path.len() >= 2 && path.as_bytes()[1] == b':')
+}
+
+#[cfg(not(windows))]
+fn is_absoluteish(path: &str) -> bool {
+    Path::new(path).is_absolute()
+}
+
+/// 展示用规范化路径：canonicalize 后剥离 Windows `\\?\` verbatim 前缀。
+fn display_canonical(path: &Path) -> String {
+    match path.canonicalize() {
+        Ok(c) => {
+            let s = c.to_string_lossy().to_string();
+            s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+        }
+        Err(_) => path.to_string_lossy().to_string(),
+    }
+}
+
 /// 工具 trait，所有可调用的工具都需要实现它
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -121,16 +161,25 @@ pub trait Tool: Send + Sync {
 
     /// 异步执行工具。所有工具都必须实现真正的异步执行，
     /// 避免在 executor 线程上做阻塞 I/O 或绕过 timeout。
+    ///
+    /// `work_dir` 为当前会话的工作目录（由 agent 派发层注入，与
+    /// `extract_permission` 同源）：工具内的相对路径参数一律按它解析，
+    /// 不得依赖进程 cwd —— Web 模式下两者并不一致。
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>>;
 
     /// 异步执行并返回用于 UI 展示的额外数据（如 diff）与媒体附件。
     /// 默认委托给 `execute_async`，display 返回 `None`、attachments 为空。
     /// 需要提供 UI 专用展示信息的工具（如 edit/write）或媒体附件的工具（如 read）覆写此方法。
-    fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
-        let fut = self.execute_async(arguments);
+    fn execute_async_with_display<'a>(
+        &'a self,
+        arguments: &'a str,
+        work_dir: &'a str,
+    ) -> ToolFuture<'a> {
+        let fut = self.execute_async(arguments, work_dir);
         Box::pin(async move {
             let content = fut.await?;
             Ok(ToolExecution {
@@ -242,6 +291,7 @@ impl Tool for AskTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        _work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
@@ -576,6 +626,7 @@ impl Tool for BashTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         let args: Value = match serde_json::from_str(arguments) {
             Ok(v) => v,
@@ -596,10 +647,13 @@ impl Tool for BashTool {
         let workdir = args["workdir"].as_str().map(|s| s.to_string());
         let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
         let cmd_args = windows_shell_command_args(&command);
+        // 未指定 workdir 时也会得到会话工作目录，命令不再依赖进程 cwd
+        let resolved_workdir =
+            Some(workdir.map_or_else(|| work_dir.to_string(), |w| resolve_tool_path(&w, work_dir)));
         Box::pin(run_shell_command(
             windows_shell_program(),
             cmd_args,
-            workdir,
+            resolved_workdir,
             timeout_secs,
         ))
     }
@@ -608,6 +662,7 @@ impl Tool for BashTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         let args: Value = match serde_json::from_str(arguments) {
             Ok(v) => v,
@@ -627,10 +682,12 @@ impl Tool for BashTool {
         };
         let workdir = args["workdir"].as_str().map(|s| s.to_string());
         let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
+        let resolved_workdir =
+            Some(workdir.map_or_else(|| work_dir.to_string(), |w| resolve_tool_path(&w, work_dir)));
         Box::pin(run_shell_command(
             "bash",
             vec!["-c".to_string(), command],
-            workdir,
+            resolved_workdir,
             timeout_secs,
         ))
     }
@@ -889,14 +946,19 @@ impl Tool for ReadTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
-            let exec = self.execute_async_with_display(arguments).await?;
+            let exec = self.execute_async_with_display(arguments, work_dir).await?;
             Ok(exec.content)
         })
     }
 
-    fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
+    fn execute_async_with_display<'a>(
+        &'a self,
+        arguments: &'a str,
+        work_dir: &'a str,
+    ) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
                 message: format!("Invalid JSON parameter: {e}"),
@@ -921,7 +983,8 @@ impl Tool for ReadTool {
                 .try_into()
                 .unwrap_or(2000);
 
-            let path = Path::new(file_path);
+            let resolved_path = resolve_tool_path(file_path, work_dir);
+            let path = Path::new(&resolved_path);
             if path.is_dir() {
                 let entries = fs::read_dir(path)?;
                 let mut result = String::new();
@@ -1186,14 +1249,19 @@ impl Tool for EditTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
-            let exec = self.execute_async_with_display(arguments).await?;
+            let exec = self.execute_async_with_display(arguments, work_dir).await?;
             Ok(exec.content)
         })
     }
 
-    fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
+    fn execute_async_with_display<'a>(
+        &'a self,
+        arguments: &'a str,
+        work_dir: &'a str,
+    ) -> ToolFuture<'a> {
         let args: Value = match serde_json::from_str(arguments) {
             Ok(v) => v,
             Err(e) => {
@@ -1203,7 +1271,7 @@ impl Tool for EditTool {
             }
         };
         let file_path = match args["file_path"].as_str() {
-            Some(p) => p.to_string(),
+            Some(p) => resolve_tool_path(p, work_dir),
             None => {
                 return Box::pin(std::future::ready(Err(ToolExecuteError {
                     message: "file_path is empty".to_string(),
@@ -1339,14 +1407,19 @@ impl Tool for WriteTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
-            let exec = self.execute_async_with_display(arguments).await?;
+            let exec = self.execute_async_with_display(arguments, work_dir).await?;
             Ok(exec.content)
         })
     }
 
-    fn execute_async_with_display<'a>(&'a self, arguments: &'a str) -> ToolFuture<'a> {
+    fn execute_async_with_display<'a>(
+        &'a self,
+        arguments: &'a str,
+        work_dir: &'a str,
+    ) -> ToolFuture<'a> {
         let args: Value = match serde_json::from_str(arguments) {
             Ok(v) => v,
             Err(e) => {
@@ -1356,7 +1429,7 @@ impl Tool for WriteTool {
             }
         };
         let file_path = match args["file_path"].as_str() {
-            Some(p) => p.to_string(),
+            Some(p) => resolve_tool_path(p, work_dir),
             None => {
                 return Box::pin(std::future::ready(Err(ToolExecuteError {
                     message: "file_path is empty".to_string(),
@@ -1446,6 +1519,7 @@ impl Tool for WebFetchTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        _work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         let args: Value = match serde_json::from_str(arguments) {
             Ok(v) => v,
@@ -1541,6 +1615,7 @@ impl Tool for GrepTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
@@ -1559,7 +1634,9 @@ impl Tool for GrepTool {
                     message: "Regex pattern too long (max 500 characters)".to_string(),
                 });
             }
-            let path = args["path"].as_str().unwrap_or(".").to_string();
+            let path = args["path"]
+                .as_str()
+                .map_or_else(|| work_dir.to_string(), |p| resolve_tool_path(p, work_dir));
             let include = args["include"].as_str().map(str::to_string);
 
             // 遍历 + 文件扫描是纯阻塞 I/O，放 blocking 线程池执行：不占用 reactor
@@ -1631,7 +1708,7 @@ impl Tool for GrepTool {
                     }
 
                     if !file_lines.is_empty() {
-                        results.push_str(&format!("{}:\n", file_path.canonicalize()?.display()));
+                        results.push_str(&format!("{}:\n", display_canonical(&file_path)));
                         results.push_str(&file_lines.join(""));
                     }
                 }
@@ -1716,6 +1793,7 @@ impl Tool for GlobTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
@@ -1729,7 +1807,9 @@ impl Tool for GlobTool {
                     });
                 }
             };
-            let path = args["path"].as_str().unwrap_or(".").to_string();
+            let path = args["path"]
+                .as_str()
+                .map_or_else(|| work_dir.to_string(), |p| resolve_tool_path(p, work_dir));
 
             // 与 grep 同理：目录遍历是阻塞 I/O，放 blocking 线程池执行
             let task = tokio::task::spawn_blocking(move || -> Result<String, ToolExecuteError> {
@@ -1762,10 +1842,8 @@ impl Tool for GlobTool {
                     }
                     if glob_matcher.is_match(entry.path()) {
                         total_count += 1;
-                        if file_count < MAX_FILES
-                            && let Ok(canonical) = entry.path().canonicalize()
-                        {
-                            results.push_str(&format!("{}\n", canonical.display()));
+                        if file_count < MAX_FILES {
+                            results.push_str(&format!("{}\n", display_canonical(entry.path())));
                             file_count += 1;
                         }
                         if total_count >= MAX_FILES * 5 {
@@ -1858,6 +1936,7 @@ impl Tool for TodoWriteTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        _work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         Box::pin(async move {
             let args: Value = serde_json::from_str(arguments).map_err(|e| ToolExecuteError {
@@ -2048,7 +2127,11 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
 
         let args = json!({ "file_path": path.display().to_string() }).to_string();
-        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        let wd = dir.display().to_string();
+        let exec = ReadTool
+            .execute_async_with_display(&args, &wd)
+            .await
+            .unwrap();
         assert_eq!(exec.attachments.len(), 1);
         assert_eq!(exec.attachments[0].mime, "image/png");
         assert!(
@@ -2060,7 +2143,7 @@ mod tests {
         assert!(exec.content.contains("<type>image</type>"));
 
         // execute_async 通道只回文本（附件经 execute_async_with_display 流转）
-        let text = ReadTool.execute_async(&args).await.unwrap();
+        let text = ReadTool.execute_async(&args, &wd).await.unwrap();
         assert!(text.contains("Image read successfully"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -2073,7 +2156,10 @@ mod tests {
         fs::write(&path, "hello\nworld\n").unwrap();
 
         let args = json!({ "file_path": path.display().to_string() }).to_string();
-        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        let exec = ReadTool
+            .execute_async_with_display(&args, &dir.display().to_string())
+            .await
+            .unwrap();
         assert!(exec.attachments.is_empty());
         assert!(exec.content.contains("hello"));
 
@@ -2088,7 +2174,10 @@ mod tests {
         fs::write(&path, "just text").unwrap();
 
         let args = json!({ "file_path": path.display().to_string() }).to_string();
-        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        let exec = ReadTool
+            .execute_async_with_display(&args, &dir.display().to_string())
+            .await
+            .unwrap();
         assert!(exec.attachments.is_empty());
         assert!(exec.content.contains("just text"));
 
@@ -2104,7 +2193,10 @@ mod tests {
         fs::write(&path, &data).unwrap();
 
         let args = json!({ "file_path": path.display().to_string() }).to_string();
-        let exec = ReadTool.execute_async_with_display(&args).await.unwrap();
+        let exec = ReadTool
+            .execute_async_with_display(&args, &dir.display().to_string())
+            .await
+            .unwrap();
         assert!(exec.attachments.is_empty());
         assert!(exec.content.contains("too large"));
         assert!(exec.content.contains("10.0 MB"));
@@ -2503,7 +2595,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_rejects_invalid_json() {
-        let err = BashTool.execute_async("not json").await.unwrap_err();
+        let err = BashTool.execute_async("not json", ".").await.unwrap_err();
         assert!(
             err.message.contains("Invalid JSON parameter"),
             "unexpected error: {}",
@@ -2513,7 +2605,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_rejects_missing_command() {
-        let err = BashTool.execute_async("{}").await.unwrap_err();
+        let err = BashTool.execute_async("{}", ".").await.unwrap_err();
         assert!(
             err.message.contains("Missing 'command_string'"),
             "unexpected error: {}",
@@ -2528,9 +2620,39 @@ mod tests {
         let arguments = r#"{"command_string":"Write-Output 'tool-e2e'","timeout":30}"#.to_string();
         #[cfg(not(windows))]
         let arguments = r#"{"command_string":"echo tool-e2e","timeout":30}"#.to_string();
-        let out = BashTool.execute_async(&arguments).await.expect("e2e run");
+        let out = BashTool
+            .execute_async(&arguments, ".")
+            .await
+            .expect("e2e run");
         assert!(out.contains("tool-e2e"), "missing output: {out}");
         assert!(!out.contains("timed out"), "unexpected marker: {out}");
+    }
+
+    #[tokio::test]
+    async fn bash_tool_defaults_to_work_dir_without_workdir_arg() {
+        // 未传 workdir 时命令必须落在会话工作目录，而不是进程 cwd
+        let dir = test_tmp_dir("hailux_bash_workdir_default");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let wd = dir.display().to_string();
+        #[cfg(windows)]
+        let arguments = r#"{"command_string":"Write-Output (Get-Location).Path"}"#.to_string();
+        #[cfg(not(windows))]
+        let arguments = r#"{"command_string":"pwd"}"#.to_string();
+        let out = BashTool
+            .execute_async(&arguments, &wd)
+            .await
+            .expect("bash run");
+        // 验证输出路径位于工作目录下（Windows canonicalize 可能带 \\?\ 前缀，宽松匹配）
+        let tail = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert!(
+            !tail.is_empty() && out.contains(&tail),
+            "cwd mismatch: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2544,7 +2666,10 @@ mod tests {
         let arguments =
             serde_json::json!({ "pattern": "needle", "path": dir.display().to_string() })
                 .to_string();
-        let out = GrepTool.execute_async(&arguments).await.expect("grep run");
+        let out = GrepTool
+            .execute_async(&arguments, &dir.display().to_string())
+            .await
+            .expect("grep run");
         let match_lines = out
             .lines()
             .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
@@ -2563,8 +2688,27 @@ mod tests {
         let arguments =
             serde_json::json!({ "pattern": "zzz_not_there", "path": dir.display().to_string() })
                 .to_string();
-        let out = GrepTool.execute_async(&arguments).await.expect("grep run");
+        let out = GrepTool
+            .execute_async(&arguments, &dir.display().to_string())
+            .await
+            .expect("grep run");
         assert_eq!(out, "No matches found");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn grep_tool_defaults_to_work_dir() {
+        // 缺省 path（"."）→ 按会话工作目录搜索，而非进程 cwd
+        let dir = test_tmp_dir("hailux_grep_default_path");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("marker.txt"), "unique_marker_xyz\n").expect("write file");
+        let arguments = serde_json::json!({ "pattern": "unique_marker_xyz" }).to_string();
+        let out = GrepTool
+            .execute_async(&arguments, &dir.display().to_string())
+            .await
+            .expect("grep run");
+        assert!(out.contains("marker.txt"), "missing match: {out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2577,10 +2721,58 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "text\n").expect("write file");
         let arguments =
             serde_json::json!({ "pattern": "*.rs", "path": dir.display().to_string() }).to_string();
-        let out = GlobTool.execute_async(&arguments).await.expect("glob run");
+        let out = GlobTool
+            .execute_async(&arguments, &dir.display().to_string())
+            .await
+            .expect("glob run");
         assert!(out.contains("a.rs"), "missing match: {out}");
         assert!(!out.contains("b.txt"), "unexpected match: {out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn glob_tool_defaults_to_work_dir() {
+        // 缺省 path（"."）→ 按会话工作目录搜索，而非进程 cwd
+        let dir = test_tmp_dir("hailux_glob_default_path");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("only_here.rs"), "fn x() {}\n").expect("write file");
+        let arguments = serde_json::json!({ "pattern": "*.rs" }).to_string();
+        let out = GlobTool
+            .execute_async(&arguments, &dir.display().to_string())
+            .await
+            .expect("glob run");
+        assert!(out.contains("only_here.rs"), "missing match: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_tool_path_resolves_relative_against_work_dir() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                resolve_tool_path("src/main.rs", r"D:\proj"),
+                r"D:\proj\src\main.rs"
+            );
+            assert_eq!(resolve_tool_path(".", r"D:\proj"), r"D:\proj");
+            assert_eq!(
+                resolve_tool_path(r"D:\other\a.rs", r"D:\proj"),
+                r"D:\other\a.rs"
+            );
+            // 盘符相对路径（D:foo）不拼接，避免产生错误组合
+            assert_eq!(resolve_tool_path(r"D:foo", r"D:\proj"), r"D:foo");
+            // 实际运行时 work_dir 为 canonicalize 结果，带 \\?\ verbatim 前缀
+            assert_eq!(resolve_tool_path("src", r"\\?\D:\proj"), r"\\?\D:\proj\src");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                resolve_tool_path("src/main.rs", "/proj"),
+                "/proj/src/main.rs"
+            );
+            assert_eq!(resolve_tool_path(".", "/proj"), "/proj");
+            assert_eq!(resolve_tool_path("/other/a.rs", "/proj"), "/other/a.rs");
+        }
     }
 
     /// 测试临时目录：放在 target/ 下（沙箱/受限环境常禁写 %TEMP%，target 必可写）

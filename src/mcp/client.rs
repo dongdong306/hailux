@@ -406,6 +406,7 @@ impl Tool for McpTool {
     fn execute_async<'a>(
         &'a self,
         arguments: &'a str,
+        _work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
         let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
         let mut params = CallToolRequestParams::new(self.tool_name.clone());
