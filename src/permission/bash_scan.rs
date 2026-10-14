@@ -475,10 +475,21 @@ mod tests {
         assert!(!result.external_dirs.is_empty());
 
         // PowerShell 短别名与补齐的路径命令同样受检
+        // （Windows 盘符路径仅在 Windows 上是"外部路径"，Linux 下反斜杠
+        // 属于文件名字符，会被解析为界内相对路径）
+        #[cfg(windows)]
         for cmd in [
             "gc C:\\Windows\\win.ini",
             "gci C:\\Windows",
             "ni C:\\Users\\evil.txt",
+        ] {
+            let result = scan(cmd, &wd_str);
+            assert!(
+                !result.external_dirs.is_empty(),
+                "expected external hit for {cmd:?}"
+            );
+        }
+        for cmd in [
             "install -m 644 /etc/hosts .",
             "rsync -a /etc/ .",
             "scp /etc/hosts backup/",
@@ -568,12 +579,15 @@ mod tests {
     fn cd_updates_resolution_base() {
         let wd = tmp_workdir("cd_base");
         let wd_str = wd.display().to_string();
-        // cd 出界后的相对路径访问按新基准解析 → 命中，目录为实际访问位置
+        // cd 出界后的相对路径访问按新基准解析 → 命中，目录为实际访问位置。
+        // 期望值同样经 resolve_permission_path 规范化：CI 的 TEMP 环境变量
+        // 可能含 8.3 短名（RUNNER~1），canonicalize 后是长名，两边必须同构。
         let result = scan("cd .. && cat secret.txt", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
+        let expected_parent =
+            resolve_permission_path(wd.parent().unwrap().to_string_lossy().as_ref(), &wd_str);
         assert_eq!(
-            result.external_dirs[0],
-            wd.parent().unwrap(),
+            result.external_dirs[0], expected_parent,
             "hit dir must be the cd target, not a blanket out-of-workdir mark"
         );
         // 链式 cd：基准逐段更新
