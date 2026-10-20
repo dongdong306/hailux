@@ -97,6 +97,19 @@ pub enum CoreEvent {
         response_tx: oneshot::Sender<PermissionReply>,
         subagent_name: Option<String>,
     },
+    /// 一次 LLM 请求失败，即将自动重试。
+    /// UI 语义：丢弃末尾正在流式渲染的内容（失败尝试的部分输出不会进入
+    /// 上下文），显示重试提示；重试成功后新内容从头流式输出。
+    AgentRetry {
+        /// 即将进行的重试序号（1 起始）
+        attempt: u32,
+        /// 重试次数上限（RetryConfig.max_retries）
+        max_retries: u32,
+        /// 重试前退避等待（ms）
+        delay_ms: u64,
+        /// 失败原因摘要
+        reason: String,
+    },
     CompactChunk(String),
     CompactComplete {
         summary: String,

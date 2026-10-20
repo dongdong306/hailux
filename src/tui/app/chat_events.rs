@@ -101,6 +101,27 @@ impl App {
                     self.scroll_offset = 0;
                 }
             }
+            CoreEvent::AgentRetry {
+                attempt,
+                max_retries,
+                delay_ms,
+                reason,
+            } => {
+                // 失败尝试的部分输出不进入上下文：末尾流式渲染同步清除
+                while matches!(
+                    self.messages.last(),
+                    Some(Message::AgentStreaming(_)) | Some(Message::AgentThinking { .. })
+                ) {
+                    self.messages.pop();
+                }
+                let secs = delay_ms as f64 / 1000.0;
+                self.messages.push(Message::Agent(format!(
+                    "[请求失败，{secs:.1}s 后进行第 {attempt}/{max_retries} 次重试：{reason}]"
+                )));
+                if self.should_auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
             CoreEvent::AgentComplete {
                 messages: final_messages,
                 usages,

@@ -3,6 +3,7 @@ use super::models::{
     CompatibleCreateChatCompletionRequestArgs, CompatibleCreateChatCompletionStreamResponse,
     SharedMessage, ThinkingConfig,
 };
+use super::retry::{self, RetryConfig};
 use super::tools::ToolRegistry;
 use super::{media::Attachment, tools::ToolExecution};
 use crate::agent::event::{CompactUsage, CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
@@ -10,6 +11,7 @@ use crate::permission::{PermissionManager, PermissionReply, PermissionRequest, P
 use async_openai::{
     Client,
     config::OpenAIConfig,
+    error::OpenAIError,
     types::chat::{
         ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
@@ -226,9 +228,12 @@ pub struct Agent {
     permission: PermissionManager,
     work_dir: String,
     event_hub: super::event::EventHub,
+    /// 瞬态错误（网络/429/5xx/流中断）自动重试策略
+    retry: RetryConfig,
 }
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: OpenAIConfig,
         model: &str,
@@ -237,6 +242,7 @@ impl Agent {
         supports_vision: bool,
         permission: PermissionManager,
         work_dir: &str,
+        retry: RetryConfig,
     ) -> Self {
         Self {
             client: Client::with_config(config),
@@ -251,6 +257,7 @@ impl Agent {
             permission,
             work_dir: work_dir.to_string(),
             event_hub: super::event::EventHub::new(),
+            retry,
         }
     }
 
@@ -374,6 +381,7 @@ impl Agent {
             plan_mode: self.plan_mode,
             permission,
             work_dir,
+            retry: self.retry.clone(),
         };
 
         let tx_clone = event_tx.clone();
@@ -488,6 +496,7 @@ impl Agent {
         // 确保流式对话进行中不会触发压缩，反之亦然。
         self.cancel.store(false, Ordering::Relaxed);
         let cancel = self.cancel.clone();
+        let retry_cfg = self.retry.clone();
         tokio::spawn(async move {
             let mut builder = {
                 let mut b = CompatibleCreateChatCompletionRequestArgs::default();
@@ -499,68 +508,108 @@ impl Agent {
                 b
             };
 
-            let request = match builder.build() {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.try_send(CoreEvent::CompactError(e.to_string()));
-                    return;
-                }
-            };
+            // 压缩请求静默重试（无 UI 重置语义）：失败尝试的部分摘要丢弃，
+            // 全部用尽才上报 CompactError
+            let mut retry_no: u32 = 0;
+            let outcome: Result<(String, Option<CompactUsage>), String> = loop {
+                let request = match builder.build() {
+                    Ok(r) => r,
+                    Err(e) => break Err(e.to_string()),
+                };
 
-            let mut stream = match client
-                .chat()
-                .create_stream_byot::<_, CompatibleCreateChatCompletionStreamResponse>(request)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.try_send(CoreEvent::CompactError(e.to_string()));
-                    return;
-                }
-            };
+                let mut stream = match client
+                    .chat()
+                    .create_stream_byot::<_, CompatibleCreateChatCompletionStreamResponse>(request)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => match compact_retry(&retry_cfg, &mut retry_no, e, &cancel).await {
+                        Some(msg) => break Err(msg),
+                        None => continue,
+                    },
+                };
 
-            let mut summary = String::new();
-            let mut last_usage: Option<CompactUsage> = None;
-            while let Some(chunk_result) = stream.next().await {
-                if cancel.load(Ordering::Relaxed) {
-                    let _ = tx.try_send(CoreEvent::CompactError("压缩已取消".to_string()));
-                    return;
-                }
-                match chunk_result {
-                    Ok(chunk) => {
-                        if let Some(usage) = &chunk.usage {
-                            last_usage = Some(CompactUsage {
-                                prompt_tokens: usage.prompt_tokens,
-                                completion_tokens: usage.completion_tokens,
-                            });
-                        }
-                        for choice in chunk.choices {
-                            if let Some(content) = choice.delta.base.content {
-                                let _ = tx.try_send(CoreEvent::CompactChunk(content.clone()));
-                                summary.push_str(&content);
+                let mut summary = String::new();
+                let mut last_usage: Option<CompactUsage> = None;
+                let mut stream_err: Option<OpenAIError> = None;
+                let mut cancelled = false;
+                while let Some(chunk_result) = stream.next().await {
+                    if cancel.load(Ordering::Relaxed) {
+                        cancelled = true;
+                        break;
+                    }
+                    match chunk_result {
+                        Ok(chunk) => {
+                            if let Some(usage) = &chunk.usage {
+                                last_usage = Some(CompactUsage {
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                });
+                            }
+                            for choice in chunk.choices {
+                                if let Some(content) = choice.delta.base.content {
+                                    let _ = tx.try_send(CoreEvent::CompactChunk(content.clone()));
+                                    summary.push_str(&content);
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        let _ = tx.try_send(CoreEvent::CompactError(e.to_string()));
-                        return;
+                        Err(e) => {
+                            stream_err = Some(e);
+                            break;
+                        }
                     }
                 }
-            }
+                if cancelled {
+                    break Err("压缩已取消".to_string());
+                }
+                if let Some(e) = stream_err {
+                    match compact_retry(&retry_cfg, &mut retry_no, e, &cancel).await {
+                        Some(msg) => break Err(msg),
+                        None => continue,
+                    }
+                }
+                break Ok((summary, last_usage));
+            };
 
-            if summary.trim().is_empty() {
-                let _ = tx.try_send(CoreEvent::CompactError("压缩结果为空".to_string()));
-            } else {
-                let _ = tx.try_send(CoreEvent::CompactComplete {
-                    summary,
-                    session_id,
-                    usage: last_usage,
-                });
+            match outcome {
+                Ok((summary, usage)) => {
+                    if summary.trim().is_empty() {
+                        let _ = tx.try_send(CoreEvent::CompactError("压缩结果为空".to_string()));
+                    } else {
+                        let _ = tx.try_send(CoreEvent::CompactComplete {
+                            summary,
+                            session_id,
+                            usage,
+                        });
+                    }
+                }
+                Err(msg) => {
+                    let _ = tx.try_send(CoreEvent::CompactError(msg));
+                }
             }
         });
 
         Ok(())
     }
+}
+
+/// 压缩请求的瞬态错误重试：可重试且未超限时退避等待后返回 `None`
+/// （调用方 `continue` 重发）；否则返回错误消息（不可重试 / 次数用尽 / 取消）。
+async fn compact_retry(
+    cfg: &RetryConfig,
+    retry_no: &mut u32,
+    err: OpenAIError,
+    cancel: &AtomicBool,
+) -> Option<String> {
+    if !retry::is_retryable(&err) || *retry_no >= cfg.max_retries {
+        return Some(err.to_string());
+    }
+    *retry_no += 1;
+    let delay = retry::backoff_delay(cfg, *retry_no);
+    if !retry::sleep_cancellable(delay, cancel).await {
+        return Some("压缩已取消".to_string());
+    }
+    None
 }
 
 /// 流式处理过程中的 Agent 状态，用于在独立 tokio task 中运行
@@ -577,6 +626,8 @@ struct AgentStreamState {
     plan_mode: bool,
     permission: PermissionManager,
     work_dir: String,
+    /// 瞬态错误自动重试策略（chat_stream 启动时的快照）
+    retry: RetryConfig,
 }
 
 impl AgentStreamState {
@@ -682,6 +733,137 @@ fn finalize_messages(
     });
 }
 
+/// 单次 LLM 请求（连接 + 流消费）的累积输出
+#[derive(Default)]
+struct StreamOutput {
+    ai_message: String,
+    ai_reasoning: String,
+    tool_calls_map: BTreeMap<u32, PartialToolCall>,
+    is_tool_call: bool,
+    last_usage: Option<MessageUsage>,
+}
+
+/// 单次 LLM 请求尝试的结果
+enum AttemptOutcome {
+    /// 流正常结束（完整输出）
+    Done(StreamOutput),
+    /// 用户取消（携带已收到的部分输出，供中断收尾保留）
+    Cancelled(StreamOutput),
+    /// 瞬态错误（部分输出直接丢弃，不进入上下文）
+    Retryable(OpenAIError),
+    /// 不可重试错误
+    Fatal(OpenAIError),
+}
+
+/// 按可重试性归类请求错误
+fn classify_stream_error(e: OpenAIError) -> AttemptOutcome {
+    if retry::is_retryable(&e) {
+        AttemptOutcome::Retryable(e)
+    } else {
+        AttemptOutcome::Fatal(e)
+    }
+}
+
+/// 执行一次 LLM 请求：建立流连接并消费完毕，累积输出。
+/// 任何失败都不修改 `state.messages` —— 重试或报错由调用方决定；
+/// 失败尝试的部分输出只存在于本函数返回值与 UI 流式缓冲中。
+async fn attempt_once(
+    state: &AgentStreamState,
+    cancel: &AtomicBool,
+    event_tx: &CoreEventTx,
+) -> Result<AttemptOutcome, Box<dyn Error + Send + Sync>> {
+    let request = state.build_request()?.build()?;
+    let client = state.client.clone();
+
+    let mut stream = {
+        let chat = client.chat();
+        let fut =
+            chat.create_stream_byot::<_, CompatibleCreateChatCompletionStreamResponse>(request);
+        tokio::pin!(fut);
+        let result_stream;
+        loop {
+            tokio::select! {
+                result = &mut fut => {
+                    result_stream = result;
+                    break;
+                }
+                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
+                    if cancel.load(Ordering::Relaxed) {
+                        // 连接阶段取消：尚无任何输出
+                        return Ok(AttemptOutcome::Cancelled(StreamOutput::default()));
+                    }
+                }
+            }
+        }
+        match result_stream {
+            Ok(s) => s,
+            Err(e) => return Ok(classify_stream_error(e)),
+        }
+    };
+
+    let mut out = StreamOutput::default();
+    loop {
+        tokio::select! {
+            chunk = stream.next() => {
+                match chunk {
+                    None => break,
+                    Some(Ok(chunk)) => {
+                        if let Some(usage) = &chunk.usage {
+                            out.last_usage = Some(MessageUsage {
+                                prompt_tokens: usage.prompt_tokens,
+                                completion_tokens: usage.completion_tokens,
+                                cached_tokens: usage.cached_tokens(),
+                            });
+                        }
+                        for choice in chunk.choices {
+                            if let Some(content) = choice.delta.base.content {
+                                let _ = event_tx.try_send(CoreEvent::AgentChunk(content.clone()));
+                                out.ai_message.push_str(&content);
+                            }
+
+                            if let Some(reasoning) = choice.delta.reasoning_content {
+                                let _ = event_tx.try_send(CoreEvent::AgentReasoningChunk(reasoning.clone()));
+                                out.ai_reasoning.push_str(&reasoning);
+                            }
+
+                            if let Some(tool_calls) = choice.delta.base.tool_calls {
+                                out.is_tool_call = true;
+                                for tc in tool_calls {
+                                    let entry = out.tool_calls_map
+                                        .entry(tc.index)
+                                        .or_default();
+                                    if let Some(id) = tc.id {
+                                        entry.id = id;
+                                    }
+                                    if let Some(func) = tc.function {
+                                        if let Some(name) = func.name {
+                                            entry.name = Some(name);
+                                        }
+                                        if let Some(args) = func.arguments {
+                                            entry.arguments.push_str(&args);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(FinishReason::ToolCalls) = choice.finish_reason {
+                                out.is_tool_call = true;
+                            }
+                        }
+                    }
+                    Some(Err(e)) => return Ok(classify_stream_error(e)),
+                }
+            }
+            _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(AttemptOutcome::Cancelled(out));
+                }
+            }
+        }
+    }
+    Ok(AttemptOutcome::Done(out))
+}
+
 async fn run_stream_loop(
     state: &mut AgentStreamState,
     cancel: Arc<AtomicBool>,
@@ -694,109 +876,55 @@ async fn run_stream_loop(
             return Ok(());
         }
 
-        let request = state.build_request()?.build()?;
-
-        let client = state.client.clone();
-
-        let mut stream = {
-            let chat = client.chat();
-            let fut =
-                chat.create_stream_byot::<_, CompatibleCreateChatCompletionStreamResponse>(request);
-            tokio::pin!(fut);
-            let result_stream;
-            loop {
-                tokio::select! {
-                    result = &mut fut => {
-                        result_stream = result;
-                        break;
-                    }
-                    _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
-                        if cancel.load(Ordering::Relaxed) {
-                            let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
-                            finalize_cancelled(state, event_tx, all_usages).await?;
-                            return Ok(());
-                        }
+        // ── 单次 LLM 请求（连接 + 流消费），瞬态错误自动重试 ──
+        // 失败尝试的部分输出不进入消息上下文、不落库；仅通过 AgentRetry
+        // 事件通知 UI 丢弃已流式渲染的内容后重新生成。
+        let mut retry_no: u32 = 0;
+        let output = loop {
+            match attempt_once(state, &cancel, event_tx).await? {
+                AttemptOutcome::Done(out) => break out,
+                AttemptOutcome::Cancelled(partial) => {
+                    let _ = event_tx
+                        .try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
+                    push_partial_assistant(
+                        state,
+                        &partial.ai_message,
+                        &partial.ai_reasoning,
+                        &partial.tool_calls_map,
+                        event_tx,
+                    )
+                    .await?;
+                    finalize_cancelled(state, event_tx, all_usages).await?;
+                    return Ok(());
+                }
+                AttemptOutcome::Retryable(err) if retry_no < state.retry.max_retries => {
+                    retry_no += 1;
+                    let delay = retry::backoff_delay(&state.retry, retry_no);
+                    let _ = event_tx.try_send(CoreEvent::AgentRetry {
+                        attempt: retry_no,
+                        max_retries: state.retry.max_retries,
+                        delay_ms: delay.as_millis() as u64,
+                        reason: err.to_string(),
+                    });
+                    // 退避等待期间用户取消：中止重试，走中断收尾
+                    if !retry::sleep_cancellable(delay, &cancel).await {
+                        finalize_cancelled(state, event_tx, all_usages).await?;
+                        return Ok(());
                     }
                 }
+                AttemptOutcome::Retryable(err) | AttemptOutcome::Fatal(err) => {
+                    return Err(Box::new(err));
+                }
             }
-            result_stream?
         };
 
-        let mut ai_message = String::new();
-        let mut ai_reasoning = String::new();
-        let mut tool_calls_map: BTreeMap<u32, PartialToolCall> = BTreeMap::new();
-        let mut is_tool_call = false;
-        let mut stream_cancelled = false;
-        let mut last_usage: Option<MessageUsage> = None;
-
-        loop {
-            tokio::select! {
-                chunk = stream.next() => {
-                    match chunk {
-                        None => break,
-                        Some(Ok(chunk)) => {
-                            if let Some(usage) = &chunk.usage {
-                                last_usage = Some(MessageUsage {
-                                    prompt_tokens: usage.prompt_tokens,
-                                    completion_tokens: usage.completion_tokens,
-                                    cached_tokens: usage.cached_tokens(),
-                                });
-                            }
-                            for choice in chunk.choices {
-                                if let Some(content) = choice.delta.base.content {
-                                    let _ = event_tx.try_send(CoreEvent::AgentChunk(content.clone()));
-                                    ai_message.push_str(&content);
-                                }
-
-                                if let Some(reasoning) = choice.delta.reasoning_content {
-                                    let _ = event_tx.try_send(CoreEvent::AgentReasoningChunk(reasoning.clone()));
-                                    ai_reasoning.push_str(&reasoning);
-                                }
-
-                                if let Some(tool_calls) = choice.delta.base.tool_calls {
-                                    is_tool_call = true;
-                                    for tc in tool_calls {
-                                        let entry = tool_calls_map
-                                            .entry(tc.index)
-                                            .or_default();
-                                        if let Some(id) = tc.id {
-                                            entry.id = id;
-                                        }
-                                        if let Some(func) = tc.function {
-                                            if let Some(name) = func.name {
-                                                entry.name = Some(name);
-                                            }
-                                            if let Some(args) = func.arguments {
-                                                entry.arguments.push_str(&args);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if let Some(FinishReason::ToolCalls) = choice.finish_reason {
-                                    is_tool_call = true;
-                                }
-                            }
-                        }
-                        Some(Err(e)) => return Err(Box::new(e)),
-                    }
-                }
-                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
-                    if cancel.load(Ordering::Relaxed) {
-                        stream_cancelled = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if stream_cancelled {
-            let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
-            push_partial_assistant(state, &ai_message, &ai_reasoning, &tool_calls_map, event_tx)
-                .await?;
-            finalize_cancelled(state, event_tx, all_usages).await?;
-            return Ok(());
-        }
+        let StreamOutput {
+            ai_message,
+            ai_reasoning,
+            tool_calls_map,
+            is_tool_call,
+            last_usage,
+        } = output;
 
         if is_tool_call && !tool_calls_map.is_empty() {
             let full_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls_map
@@ -1325,6 +1453,7 @@ mod tests {
             false,
             pm,
             ".",
+            RetryConfig::default(),
         )
     }
 
@@ -1597,6 +1726,7 @@ mod tests {
                 vec![],
             ),
             work_dir: ".".to_string(),
+            retry: RetryConfig::default(),
         }
     }
 

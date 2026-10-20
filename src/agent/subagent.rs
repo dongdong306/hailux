@@ -433,6 +433,7 @@ impl SharedTaskCtx {
             agent_supports_vision,
             self.permission.clone(),
             &self.work_dir,
+            app_config.retry_config(),
         );
 
         // 注册内建工具（不包含 task 和 ask_user）
@@ -832,6 +833,11 @@ async fn run_subagent_task_inner(
         match event {
             CoreEvent::AgentChunk(chunk) => {
                 final_text.push_str(&chunk);
+            }
+            CoreEvent::AgentRetry { .. } => {
+                // 失败尝试的部分输出作废：清空累积，防止「通道提前关闭」
+                // 场景把两次生成的文本拼在一起返回
+                final_text.clear();
             }
             CoreEvent::AgentComplete { messages, .. } => {
                 // 从最终消息中提取最后一条 assistant 消息的文本

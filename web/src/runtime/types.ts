@@ -40,6 +40,18 @@ export type ServerEvent =
       questions: QuestionInfo[];
     }
   | { type: "Notice"; text: string }
+  | {
+      /** 一次 LLM 请求失败，即将自动重试（前端丢弃末尾流式内容并提示） */
+      type: "AgentRetry";
+      /** 即将进行的重试序号（1 起始） */
+      attempt: number;
+      /** 重试次数上限 */
+      max_retries: number;
+      /** 重试前退避等待（ms） */
+      delay_ms: number;
+      /** 失败原因摘要 */
+      reason: string;
+    }
   | { type: "CompactStart"; text: string }
   | {
       type: "CompactComplete";

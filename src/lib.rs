@@ -91,6 +91,7 @@ pub fn build_agent_base(
         resolved.supports_vision,
         pm,
         &work_dir.display().to_string(),
+        cfg.retry_config(),
     );
     #[cfg(windows)]
     crate::agent::prewarm_shell_description();
@@ -262,6 +263,17 @@ pub async fn run_non_interactive(
             agent::event::CoreEvent::AgentChunk(text) => {
                 print!("{}", text);
                 let _ = std::io::stdout().flush();
+            }
+            agent::event::CoreEvent::AgentRetry {
+                attempt,
+                max_retries,
+                delay_ms,
+                reason,
+            } => {
+                // stdout 无法回退已打印的部分输出，仅在 stderr 提示重试
+                eprintln!(
+                    "\n[请求失败，{delay_ms}ms 后进行第 {attempt}/{max_retries} 次重试：{reason}]"
+                );
             }
             agent::event::CoreEvent::AgentReasoningChunk(text) => {
                 if !in_reasoning {

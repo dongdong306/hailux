@@ -8,6 +8,7 @@ pub mod command_def;
 pub mod event;
 pub mod media;
 pub mod models;
+pub mod retry;
 pub mod skill;
 pub mod subagent;
 mod tools;
