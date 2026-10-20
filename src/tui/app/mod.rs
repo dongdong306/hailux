@@ -479,7 +479,12 @@ impl App {
 
             if !self.paste_burst.is_active() {
                 if self.render.force_clear {
-                    terminal.clear()?;
+                    // 不能用 Terminal::clear()：ratatui 0.30 的 clear 为保留光标会先发 CPR
+                    // 查询（ESC[6n）读光标位置，Unix 上回复可能被 EventStream 的 stdin
+                    // 读取抢走，2s 超时导致整个应用报错退出（Windows 走 Win32 API 无此
+                    // 问题）。resize 到当前尺寸同样清屏并重置 back buffer（下一帧全量
+                    // 重绘），且不做任何输入查询，各平台行为一致。
+                    terminal.resize(terminal.size()?.into())?;
                     self.render.force_clear = false;
                 }
                 terminal.draw(|f| self.render(f))?;
