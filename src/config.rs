@@ -123,6 +123,78 @@ pub struct PermissionConfig {
     pub external_directory: BTreeMap<String, String>,
 }
 
+/// config.toml `[retry]` 段：LLM 请求瞬态错误的自动重试策略。
+/// 缺省字段取 [`crate::agent::retry::RetryConfig`] 的默认值。
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetryConfigToml {
+    /// 额外重试次数上限（总尝试次数 = 1 + max_retries；0 = 禁用重试）
+    #[serde(default = "default_retry_max_retries")]
+    pub max_retries: u32,
+    /// 首次重试前的退避等待（ms）
+    #[serde(default = "default_retry_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+    /// 退避等待上限（ms）
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+    /// 指数退避倍率
+    #[serde(default = "default_retry_multiplier")]
+    pub multiplier: f64,
+}
+
+impl Default for RetryConfigToml {
+    fn default() -> Self {
+        Self {
+            max_retries: default_retry_max_retries(),
+            initial_delay_ms: default_retry_initial_delay_ms(),
+            max_delay_ms: default_retry_max_delay_ms(),
+            multiplier: default_retry_multiplier(),
+        }
+    }
+}
+
+fn default_retry_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_initial_delay_ms() -> u64 {
+    1000
+}
+
+fn default_retry_max_delay_ms() -> u64 {
+    20_000
+}
+
+fn default_retry_multiplier() -> f64 {
+    2.0
+}
+
+impl RetryConfigToml {
+    /// 是否全字段等于默认值（save 时决定是否写入 `[retry]` 段）
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl PartialEq for RetryConfigToml {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_retries == other.max_retries
+            && self.initial_delay_ms == other.initial_delay_ms
+            && self.max_delay_ms == other.max_delay_ms
+            && self.multiplier == other.multiplier
+    }
+}
+
+impl From<&RetryConfigToml> for crate::agent::retry::RetryConfig {
+    fn from(t: &RetryConfigToml) -> Self {
+        Self {
+            max_retries: t.max_retries,
+            initial_delay: std::time::Duration::from_millis(t.initial_delay_ms),
+            max_delay: std::time::Duration::from_millis(t.max_delay_ms),
+            multiplier: t.multiplier,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -135,6 +207,9 @@ pub struct Config {
     /// 权限配置
     #[serde(default)]
     pub permission: PermissionConfig,
+    /// LLM 请求瞬态错误重试策略
+    #[serde(default)]
+    pub retry: RetryConfigToml,
 }
 
 impl Default for Config {
@@ -144,6 +219,7 @@ impl Default for Config {
             providers: BTreeMap::new(),
             compact_threshold: default_compact_threshold(),
             permission: PermissionConfig::default(),
+            retry: RetryConfigToml::default(),
         }
     }
 }
@@ -387,6 +463,11 @@ impl Config {
             return Err(color_eyre::eyre::eyre!("未配置模型，请通过设置添加"));
         }
         self.resolve(&self.main_model)
+    }
+
+    /// LLM 请求重试策略（运行时形态）
+    pub fn retry_config(&self) -> crate::agent::retry::RetryConfig {
+        crate::agent::retry::RetryConfig::from(&self.retry)
     }
 }
 
@@ -807,6 +888,28 @@ pub fn save_config(config: &Config) -> Result<()> {
         "compact_threshold".into(),
         toml::Value::Float(config.compact_threshold as f64),
     );
+
+    // 重试策略：与默认值一致时不写入，保持配置文件最小化
+    if !config.retry.is_default() {
+        let mut retry_table = toml::map::Map::new();
+        retry_table.insert(
+            "max_retries".into(),
+            toml::Value::Integer(config.retry.max_retries as i64),
+        );
+        retry_table.insert(
+            "initial_delay_ms".into(),
+            toml::Value::Integer(config.retry.initial_delay_ms as i64),
+        );
+        retry_table.insert(
+            "max_delay_ms".into(),
+            toml::Value::Integer(config.retry.max_delay_ms as i64),
+        );
+        retry_table.insert(
+            "multiplier".into(),
+            toml::Value::Float(config.retry.multiplier),
+        );
+        root.insert("retry".into(), toml::Value::Table(retry_table));
+    }
 
     // 权限配置
     let mut perm_table = toml::map::Map::new();
@@ -1256,5 +1359,66 @@ mod tests {
         let mut cfg = Config::default();
         cfg.add_predefined_provider("deepseek", "sk-test");
         assert!(!cfg.migrate_predefined_vision_flags());
+    }
+
+    // ── 重试配置 ─────────────────────────────────────────
+
+    #[test]
+    fn retry_defaults_applied() {
+        let cfg = Config::default();
+        let retry = cfg.retry_config();
+        assert_eq!(retry.max_retries, 3);
+        assert_eq!(retry.initial_delay, std::time::Duration::from_millis(1000));
+        assert_eq!(retry.max_delay, std::time::Duration::from_millis(20_000));
+        assert_eq!(retry.multiplier, 2.0);
+    }
+
+    #[test]
+    fn retry_section_parsed_and_converted() {
+        let content = r#"
+main_model = "deepseek/deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "sk-test"
+
+[retry]
+max_retries = 5
+initial_delay_ms = 500
+max_delay_ms = 30000
+multiplier = 1.5
+"#;
+        let cfg: Config = toml::from_str(content).unwrap();
+        let retry = cfg.retry_config();
+        assert_eq!(retry.max_retries, 5);
+        assert_eq!(retry.initial_delay, std::time::Duration::from_millis(500));
+        assert_eq!(retry.max_delay, std::time::Duration::from_millis(30_000));
+        assert_eq!(retry.multiplier, 1.5);
+    }
+
+    #[test]
+    fn retry_partial_section_uses_field_defaults() {
+        // 只覆盖部分字段，其余取默认
+        let content = r#"
+[providers.deepseek]
+api_key = "sk-test"
+
+[retry]
+max_retries = 0
+"#;
+        let cfg: Config = toml::from_str(content).unwrap();
+        assert_eq!(cfg.retry.max_retries, 0);
+        assert_eq!(cfg.retry.initial_delay_ms, 1000);
+        // max_retries=0 = 禁用重试，转换后直接生效
+        assert_eq!(cfg.retry_config().max_retries, 0);
+    }
+
+    #[test]
+    fn retry_default_detection_controls_save_section() {
+        // is_default 决定 save_config 是否写入 [retry] 段
+        // （save_config 直接写 ~/.hailux/config.toml，此处只测判定逻辑）
+        let mut cfg = Config::default();
+        assert!(cfg.retry.is_default(), "默认配置不应写入 [retry]");
+        cfg.retry.max_retries = 7;
+        assert!(!cfg.retry.is_default(), "非默认值应写入 [retry]");
     }
 }

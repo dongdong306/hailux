@@ -196,6 +196,20 @@ pub async fn chat_handler(
                     thinking_started.get_or_insert_with(Instant::now);
                     yield sse_event(&ServerEvent::AgentReasoningChunk { text });
                 }
+                CoreEvent::AgentRetry {
+                    attempt,
+                    max_retries,
+                    delay_ms,
+                    reason,
+                } => {
+                    finalize_thinking(&mut thinking_started, &mut think_total_ms);
+                    yield sse_event(&ServerEvent::AgentRetry {
+                        attempt,
+                        max_retries,
+                        delay_ms,
+                        reason,
+                    });
+                }
                 CoreEvent::UsageUpdate { prompt_tokens, completion_tokens, cached_tokens } => {
                     last_prompt = prompt_tokens;
                     last_completion = completion_tokens;

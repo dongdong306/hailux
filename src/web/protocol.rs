@@ -64,6 +64,19 @@ pub enum ServerEvent {
     Notice {
         text: String,
     },
+    /// 一次 LLM 请求失败，即将自动重试。
+    /// 前端语义：丢弃末尾流式渲染内容（失败尝试的部分输出不进入上下文），
+    /// 显示重试提示；重试成功后新内容从头流式输出。
+    AgentRetry {
+        /// 即将进行的重试序号（1 起始）
+        attempt: u32,
+        /// 重试次数上限
+        max_retries: u32,
+        /// 重试前退避等待（ms）
+        delay_ms: u64,
+        /// 失败原因摘要
+        reason: String,
+    },
     /// 压缩开始（对应 TUI 的 CompactStreaming 状态行）
     CompactStart {
         text: String,

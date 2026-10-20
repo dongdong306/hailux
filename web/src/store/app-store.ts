@@ -879,6 +879,25 @@ export const useApp = create<AppState>((set, get) => ({
           }
           break;
         }
+        case "AgentRetry": {
+          // 失败尝试的部分输出不进入上下文：末尾流式 items 同步清除
+          //（对齐 TUI pop 语义），notice 结束当前 acc，重试内容另起新消息
+          const cur = [...items];
+          while (
+            cur.length > 0 &&
+            (cur[cur.length - 1]?.kind === "assistant-streaming" ||
+              cur[cur.length - 1]?.kind === "reasoning-streaming")
+          ) {
+            cur.pop();
+          }
+          const secs = (event.delay_ms / 1000).toFixed(1);
+          cur.push({
+            kind: "notice",
+            text: `请求失败，${secs}s 后进行第 ${event.attempt}/${event.max_retries} 次重试：${event.reason}`,
+          });
+          set({ items: cur });
+          break;
+        }
         case "ToolCallStart":
           freezeThinking();
           push({
