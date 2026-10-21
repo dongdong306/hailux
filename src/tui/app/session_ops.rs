@@ -48,6 +48,20 @@ impl App {
 
             match msg.role {
                 MessageRole::User => {
+                    // 工具图片合成消息（read 读取图片等，agent 层为注入模型上下文
+                    // 生成）：runtime_meta 带 {"format":"tool-attachment"} 标记，
+                    // 跳过不渲染（TUI 无法显示图片，提示文本对用户无价值）。
+                    // 无标记的旧数据保持原样展示（容忍）。
+                    let is_tool_attachment = msg
+                        .runtime_meta
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .is_some_and(|v| {
+                            v.get("format").and_then(|f| f.as_str()) == Some("tool-attachment")
+                        });
+                    if is_tool_attachment {
+                        continue;
+                    }
                     let plan_mode = msg
                         .runtime_meta
                         .as_deref()

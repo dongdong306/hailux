@@ -6,10 +6,15 @@
 use serde::{Deserialize, Serialize};
 
 /// 单张图片附件。`data_url` 约定为 `data:<mime>;base64,<data>`。
+///
+/// `name` 为可选来源标识（如 read 工具填图片文件名），仅用于 agent 层生成
+/// 给模型的提示文本；serde 兼容旧数据（缺省 None），序列化时省略。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     pub mime: String,
     pub data_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Attachment {
@@ -20,6 +25,7 @@ impl Attachment {
         Self {
             mime: mime.to_string(),
             data_url: format!("data:{mime};base64,{encoded}"),
+            name: None,
         }
     }
 
@@ -132,6 +138,7 @@ mod tests {
         let att = Attachment {
             mime: "image/png".to_string(),
             data_url: "data:image/png;base64,".to_string(),
+            name: None,
         };
         assert!(att.payload_is_empty());
     }

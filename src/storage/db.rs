@@ -1110,6 +1110,8 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
                             Some(crate::agent::media::Attachment {
                                 mime,
                                 data_url: img.image_url.url.clone(),
+                                // name 仅在 agent 内存态用于生成提示文本，不落库
+                                name: None,
                             })
                         }
                         _ => None,
