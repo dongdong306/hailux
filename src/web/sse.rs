@@ -202,7 +202,10 @@ pub async fn chat_handler(
                     delay_ms,
                     reason,
                 } => {
+                    // 失败尝试的思考时间随其内容一起丢弃（对齐 TUI：
+                    // pop 掉 AgentThinking cell 不结算 think_ms）
                     finalize_thinking(&mut thinking_started, &mut think_total_ms);
+                    think_total_ms = 0;
                     yield sse_event(&ServerEvent::AgentRetry {
                         attempt,
                         max_retries,

@@ -41,14 +41,18 @@ impl Default for RetryConfig {
 
 /// 判断错误是否为瞬态错误（值得重试）。
 ///
-/// - `Reqwest`：网络层错误（连接失败 / 超时 / DNS / TLS）
-/// - `StreamError`：SSE 流中途断开
+/// - `Reqwest`：网络层错误（连接失败 / 超时 / TLS 等），但排除 builder
+///   （本地请求构造非法，重试必然同样失败）与 redirect（循环重定向）；
+///   429 的 `Retry-After` 响应头因上游 `ApiErrorResponse` 不保留 headers
+///   而无法获取，退避策略不感知
+/// - `StreamError`：SSE 流中途断开（含连接被重置；chunk JSON 反序列化
+///   失败会以 `JSONDeserialize` 变体出现，走快速失败）
 /// - `ApiError`：仅限流（408/429）与服务端故障（5xx）；
 ///   其余 4xx（认证、参数、模型不存在等）重试必然同样失败
 /// - 其余（反序列化失败、参数非法等客户端问题）不重试
 pub fn is_retryable(err: &OpenAIError) -> bool {
     match err {
-        OpenAIError::Reqwest(_) => true,
+        OpenAIError::Reqwest(e) => !e.is_builder() && !e.is_redirect(),
         OpenAIError::StreamError(_) => true,
         OpenAIError::ApiError(resp) => matches!(resp.status_code.as_u16(), 408 | 429 | 500..=599),
         _ => false,
@@ -75,10 +79,14 @@ fn jitter_ms(base_ms: f64) -> u64 {
     (base_ms * factor).round().max(1.0) as u64
 }
 
+/// 单次退避等待的硬上限：防止极端 `max_delay_ms` 配置使
+/// `Instant + Duration` 溢出 panic（24h 已远超任何合理的退避场景）
+const MAX_SLEEP: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// 可取消的退避等待：以 [`CANCEL_POLL_INTERVAL`] 轮询 `cancel`。
 /// 返回 `false` = 等待期间用户取消（调用方走中断收尾，不再重试）。
 pub async fn sleep_cancellable(delay: Duration, cancel: &AtomicBool) -> bool {
-    let deadline = tokio::time::Instant::now() + delay;
+    let deadline = tokio::time::Instant::now() + delay.min(MAX_SLEEP);
     loop {
         if cancel.load(Ordering::Relaxed) {
             return false;
@@ -128,6 +136,14 @@ mod tests {
         );
         assert!(!is_retryable(&err));
         assert!(!is_retryable(&OpenAIError::InvalidArgument("bad".into())));
+    }
+
+    #[test]
+    fn reqwest_builder_error_not_retryable() {
+        // URL 解析失败 → reqwest builder 错误：本地请求构造非法，重试必然同样失败
+        let err = reqwest::Client::new().get("://").build().unwrap_err();
+        assert!(err.is_builder(), "应构造出 builder 错误");
+        assert!(!is_retryable(&OpenAIError::Reqwest(err)));
     }
 
     #[test]
