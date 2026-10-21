@@ -49,6 +49,21 @@ export interface ChatItem {
 /** localStorage：上次访问的项目目录 key */
 const LAST_WORKDIR_KEY = "hailux.lastWorkDir";
 
+/** 工具图片合成消息（read 读取图片等，agent 层为注入模型上下文生成）：
+ *  runtime_meta 带 {"format":"tool-attachment"} 标记，历史加载时跳过渲染。
+ *  无标记的旧数据不识别（保持原样展示）。 */
+function isToolAttachmentMessage(
+  msg: import("../runtime/types").StoredMessage,
+): boolean {
+  if (!msg.runtime_meta) return false;
+  try {
+    const v = JSON.parse(msg.runtime_meta) as { format?: string };
+    return v.format === "tool-attachment";
+  } catch {
+    return false;
+  }
+}
+
 /** 全局模式状态（GET /api/mode 及 yolo/plan-mode 设置响应体）。
  *  后端契约：src/web/protocol.rs 的 `ModeStatus` */
 export interface ModeStatus {
@@ -676,6 +691,13 @@ export const useApp = create<AppState>((set, get) => ({
         compactMarkerInserted = true;
       }
       if (msg.role === "User") {
+        // 工具图片合成消息（read 读取图片等）：runtime_meta 带
+        // {"format":"tool-attachment"} 标记，仅供模型上下文，跳过渲染。
+        // 无标记的旧数据保持原样展示（容忍）。
+        if (isToolAttachmentMessage(msg)) {
+          // 合成消息位于 assistant 回合中间，不重置 turnCtx（usage 归属不受影响）
+          continue;
+        }
         let images: ChatAttachment[] = [];
         if (msg.attachments) {
           try {

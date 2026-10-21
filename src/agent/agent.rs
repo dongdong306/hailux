@@ -70,6 +70,55 @@ fn image_content_part(att: &Attachment) -> ChatCompletionRequestUserMessageConte
     )
 }
 
+/// 兜底文本：附件全部无来源标识时使用。
+///
+/// 注意：合成 user 消息的提示文本仅供模型理解图片来源；展示层识别
+/// 一律走 runtime_meta 的 `{"format":"tool-attachment"}` 标记，不做文本匹配。
+const TOOL_ATTACHMENT_NOTE_FALLBACK: &str = "[Attached image(s) from tool result]";
+
+/// 生成合成 user 消息的提示文本，帮助模型把图片关联到来源工具：
+/// - 单工具：`[Image(s) attached from tool "read": a.png, b.png]`
+/// - 多工具：`[Image(s) attached from tool results: read -> a.png; web_fetch -> b.png]`
+/// - 无 name 的项以计数占位；全部无名退回兜底常量。
+fn tool_attachment_note(items: &[(String, Attachment)]) -> String {
+    if items.iter().all(|(_, a)| a.name.is_none()) {
+        return TOOL_ATTACHMENT_NOTE_FALLBACK.to_string();
+    }
+    // 按工具分组（保持首次出现顺序）
+    let mut groups: Vec<(&str, Vec<&Attachment>)> = Vec::new();
+    for (tool, att) in items {
+        match groups.iter_mut().find(|(t, _)| *t == tool.as_str()) {
+            Some((_, atts)) => atts.push(att),
+            None => groups.push((tool.as_str(), vec![att])),
+        }
+    }
+    let describe = |atts: &[&Attachment]| -> String {
+        let named: Vec<&str> = atts.iter().filter_map(|a| a.name.as_deref()).collect();
+        let unnamed = atts.len() - named.len();
+        let mut parts: Vec<String> = named.iter().map(|n| (*n).to_string()).collect();
+        if unnamed > 0 {
+            parts.push(format!("{unnamed} image(s)"));
+        }
+        parts.join(", ")
+    };
+    if groups.len() == 1 {
+        let (tool, atts) = &groups[0];
+        format!(
+            "[Image(s) attached from tool \"{tool}\": {}]",
+            describe(atts)
+        )
+    } else {
+        let segments: Vec<String> = groups
+            .iter()
+            .map(|(tool, atts)| format!("{tool} -> {}", describe(atts)))
+            .collect();
+        format!(
+            "[Image(s) attached from tool results: {}]",
+            segments.join("; ")
+        )
+    }
+}
+
 /// 构造用户消息：无附件 → 纯文本；有附件 → Text + ImageUrl content parts
 /// （文本为空时跳过 Text part——部分 OpenAI 兼容端点拒绝空 text part）。
 pub fn build_user_message(
@@ -1261,7 +1310,8 @@ async fn handle_tool_calls_stream(
     // 附件统一在循环结束后注入：合成 user 消息若插在连续 tool 消息中间，
     // 会破坏「tool 消息必须紧跟带 tool_calls 的 assistant 消息」的约束
     // （严格 Provider 直接 400），且已持久化的交错序列会污染后续每轮请求。
-    let mut pending_attachments: Vec<Attachment> = Vec::new();
+    // 元素为 (来源工具名, 附件)，用于生成带来源的提示文本。
+    let mut pending_attachments: Vec<(String, Attachment)> = Vec::new();
     for tool_call in tool_calls {
         if cancel.load(Ordering::Relaxed) {
             let _ = event_tx.try_send(CoreEvent::AgentChunk("\n\n[Task interrupted]".to_string()));
@@ -1411,16 +1461,20 @@ async fn handle_tool_calls_stream(
         // 只允许文本，媒体收集后在全部 tool 消息之后统一剥离为一条合成 user 消息
         //（保持 tool 消息连续以满足 Provider 校验）。
         if !attachments.is_empty() && !omit_images {
-            pending_attachments.extend(attachments);
+            pending_attachments.extend(attachments.into_iter().map(|a| (name.clone(), a)));
         }
     }
     if !pending_attachments.is_empty() {
         let mut parts = vec![ChatCompletionRequestUserMessageContentPart::Text(
             ChatCompletionRequestMessageContentPartText {
-                text: "[Attached image(s) from tool result]".to_string(),
+                text: tool_attachment_note(&pending_attachments),
             },
         )];
-        parts.extend(pending_attachments.iter().map(image_content_part));
+        parts.extend(
+            pending_attachments
+                .iter()
+                .map(|(_, att)| image_content_part(att)),
+        );
         let synth_msg: SharedMessage = Arc::new(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Array(parts),
@@ -1429,7 +1483,16 @@ async fn handle_tool_calls_stream(
             .into(),
         );
         state.messages.push(Arc::clone(&synth_msg));
-        emit_persist_message(event_tx, &synth_msg, None, &state.model_display, None);
+        // 展示层识别标记：经 PersistMessage 的 display 写入 runtime_meta
+        // （与 diff 展示的 {"format":"diff"} 惯例对齐）。Web/TUI 历史加载
+        // 据此跳过该合成消息，不渲染为用户消息；识别不依赖提示文本。
+        emit_persist_message(
+            event_tx,
+            &synth_msg,
+            None,
+            &state.model_display,
+            Some(r#"{"format":"tool-attachment"}"#.to_string()),
+        );
     }
     Ok(())
 }
@@ -1543,6 +1606,61 @@ mod tests {
         Attachment::from_bytes("image/png", &png_bytes)
     }
 
+    fn named_attachment(name: &str) -> Attachment {
+        Attachment {
+            name: Some(name.to_string()),
+            ..png_attachment()
+        }
+    }
+
+    // ── 工具附件合成消息的提示文本 ─────────────────────────
+
+    #[test]
+    fn tool_attachment_note_single_tool_lists_names() {
+        let items = vec![
+            ("read".to_string(), named_attachment("a.png")),
+            ("read".to_string(), named_attachment("b.png")),
+        ];
+        assert_eq!(
+            tool_attachment_note(&items),
+            "[Image(s) attached from tool \"read\": a.png, b.png]"
+        );
+    }
+
+    #[test]
+    fn tool_attachment_note_multiple_tools_grouped() {
+        let items = vec![
+            ("read".to_string(), named_attachment("a.png")),
+            ("web_fetch".to_string(), named_attachment("b.jpg")),
+            ("read".to_string(), named_attachment("c.png")),
+        ];
+        assert_eq!(
+            tool_attachment_note(&items),
+            "[Image(s) attached from tool results: read -> a.png, c.png; web_fetch -> b.jpg]"
+        );
+    }
+
+    #[test]
+    fn tool_attachment_note_unnamed_counted_and_fallback() {
+        let items = vec![
+            ("read".to_string(), named_attachment("a.png")),
+            ("read".to_string(), png_attachment()),
+        ];
+        assert_eq!(
+            tool_attachment_note(&items),
+            "[Image(s) attached from tool \"read\": a.png, 1 image(s)]"
+        );
+
+        let all_unnamed = vec![
+            ("read".to_string(), png_attachment()),
+            ("read".to_string(), png_attachment()),
+        ];
+        assert_eq!(
+            tool_attachment_note(&all_unnamed),
+            TOOL_ATTACHMENT_NOTE_FALLBACK
+        );
+    }
+
     #[test]
     fn build_user_message_with_attachments_uses_array_content() {
         let msg = build_user_message("看这张图", &[png_attachment()]);
@@ -1618,6 +1736,7 @@ mod tests {
         let corrupted = Attachment {
             mime: "image/png".to_string(),
             data_url: "data:image/png;base64,".to_string(),
+            name: None,
         };
         let msgs = vec![Arc::new(build_user_message("空图", &[corrupted]))];
         let sanitized = sanitize_messages_for_request(&msgs, true);

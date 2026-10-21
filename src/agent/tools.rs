@@ -1062,10 +1062,17 @@ impl Tool for ReadTool {
                 result.push_str(
                     "Image read successfully. The image content is attached for visual analysis.",
                 );
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file_path.to_string());
                 return Ok(ToolExecution {
                     content: result,
                     display: None,
-                    attachments: vec![Attachment::from_bytes(mime, &bytes)],
+                    attachments: vec![Attachment {
+                        name: Some(file_name),
+                        ..Attachment::from_bytes(mime, &bytes)
+                    }],
                 });
             }
 
@@ -2134,6 +2141,7 @@ mod tests {
             .unwrap();
         assert_eq!(exec.attachments.len(), 1);
         assert_eq!(exec.attachments[0].mime, "image/png");
+        assert_eq!(exec.attachments[0].name.as_deref(), Some("pic.png"));
         assert!(
             exec.attachments[0]
                 .data_url
