@@ -1353,6 +1353,20 @@ async fn set_yolo(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<YoloRequest>,
 ) -> Response {
+    // 持久化到 config.toml（下次启动 / 新建会话保持当前模式；空串 = Normal，
+    // save 时不写该字段，保持文件最小化）。配置写锁串行化读-改-写，
+    // 防止并发请求互相覆盖（对齐 switch_model）。保存失败不切换内存模式。
+    let _guard = state.config_write_lock.lock().await;
+    let mut cfg = state.manager.cfg();
+    cfg.permission.mode = if req.enabled {
+        "yolo".to_string()
+    } else {
+        String::new()
+    };
+    if let Err(e) = cfg.save() {
+        return err500(e);
+    }
+    state.manager.set_cfg(cfg);
     state.manager.set_global_yolo(req.enabled);
     Json(mode_status(&state)).into_response()
 }

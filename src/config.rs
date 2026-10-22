@@ -842,13 +842,8 @@ pub fn load() -> Result<LoadResult> {
     Ok(LoadResult::Ready(Box::new(config)))
 }
 
-pub fn save_config(config: &Config) -> Result<()> {
-    let dir = config_dir()?;
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .wrap_err_with(|| format!("无法创建配置目录: {}", dir.display()))?;
-    }
-
+/// 将配置序列化为 TOML 字符串（不落盘，供 save_config 与单测复用）
+fn config_to_toml(config: &Config) -> Result<String> {
     let mut providers_toml = toml::map::Map::new();
     for (pid, entry) in &config.providers {
         let mut table = toml::map::Map::new();
@@ -939,8 +934,18 @@ pub fn save_config(config: &Config) -> Result<()> {
         root.insert("permission".into(), toml::Value::Table(perm_table));
     }
 
+    toml::to_string_pretty(&toml::Value::Table(root)).wrap_err("无法序列化配置")
+}
+
+pub fn save_config(config: &Config) -> Result<()> {
+    let dir = config_dir()?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .wrap_err_with(|| format!("无法创建配置目录: {}", dir.display()))?;
+    }
+
+    let toml_str = config_to_toml(config)?;
     let path = config_file_path()?;
-    let toml_str = toml::to_string_pretty(&toml::Value::Table(root)).wrap_err("无法序列化配置")?;
     // 原子写入：先写临时文件，再重命名
     let tmp_path = path.with_extension("toml.tmp");
     std::fs::write(&tmp_path, &toml_str)
@@ -984,6 +989,21 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("已从预定义列表移除"), "实际报错: {msg}");
         assert!(msg.contains("/model"), "实际报错: {msg}");
+    }
+
+    #[test]
+    fn permission_mode_serialization() {
+        // YOLO 持久化：mode = "yolo" 写入序列化结果
+        let mut cfg = test_config();
+        cfg.permission.mode = "yolo".to_string();
+        let toml = config_to_toml(&cfg).unwrap();
+        assert!(toml.contains("mode = \"yolo\""));
+
+        // 关闭 YOLO：mode 清空则不写该字段（空 [permission] 表整体省略）
+        cfg.permission.mode.clear();
+        let toml = config_to_toml(&cfg).unwrap();
+        assert!(!toml.contains("mode ="));
+        assert!(!toml.contains("[permission]"));
     }
 
     #[test]

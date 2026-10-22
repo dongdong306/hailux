@@ -263,6 +263,30 @@ mod tests {
         (manager, dir_a, dir_b)
     }
 
+    /// 持久化闭环：config.toml `permission.mode = "yolo"` → 服务器启动即 YOLO
+    /// （`GET /api/mode` 据此返回，前端 syncMode 展示正确）。
+    #[tokio::test]
+    async fn manager_initializes_yolo_from_config() {
+        let storage = ChatStorage::new_in_memory().await.unwrap();
+        let resolved = config::ResolvedModel {
+            config: async_openai::config::OpenAIConfig::new(),
+            model_id: "test-model".to_string(),
+            max_tokens: 1024,
+            context_window: 8192,
+            display: "test/test-model".to_string(),
+            supports_vision: false,
+        };
+        let mut cfg = config::Config::default();
+        cfg.permission.mode = "yolo".to_string();
+        let manager = SessionManager::new(
+            resolved,
+            cfg,
+            storage,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        assert!(manager.global_yolo());
+    }
+
     /// 全局 YOLO：绕会话锁广播（持锁中切换不阻塞不死锁）、新建会话自动继承。
     #[tokio::test]
     async fn global_yolo_broadcasts_and_inherits() {

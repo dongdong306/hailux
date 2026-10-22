@@ -534,13 +534,25 @@ impl App {
                     }
                     command::Command::Yolo => {
                         let mode = self.agent.permission().toggle_yolo();
-                        let label = if mode == crate::permission::PermissionMode::Yolo {
-                            "YOLO"
-                        } else {
-                            "ASK"
-                        };
+                        let yolo_on = mode == crate::permission::PermissionMode::Yolo;
+                        let label = if yolo_on { "YOLO" } else { "ASK" };
                         self.messages
                             .push(Message::Agent(format!("Permission mode: {label}")));
+                        // 持久化到 config.toml，下次启动 / 新建会话保持当前模式
+                        // （空串 = Normal，save 时不写该字段，保持文件最小化）
+                        self.config.permission.mode = if yolo_on {
+                            "yolo".to_string()
+                        } else {
+                            String::new()
+                        };
+                        if let Err(e) = self.config.save() {
+                            self.messages
+                                .push(Message::Agent(format!("保存 YOLO 配置失败: {e}")));
+                        }
+                        // 同步到共享配置（TaskTool / subagent 可见）
+                        if let Ok(mut shared) = self.shared.config.lock() {
+                            *shared = self.config.clone();
+                        }
                     }
                     command::Command::Compact => {
                         self.compact_conversation(None).await?;
