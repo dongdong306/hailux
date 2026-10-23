@@ -55,7 +55,8 @@ subagent delegation, and custom slash commands.
   TUI mode has a single session entry; Web mode has one per work_dir. Storage / Config /
   MCP connections are global; skills / subagents / commands / system prompt are discovered
   per work_dir. Interrupt uses a per-work_dir `AtomicBool` cancel flag (not session locks).
-- `web/` — Web backend (feature `web`): `handlers.rs` (REST routes under `/api/*`),
+- `web/` — Web backend (feature `web`): `handlers/` (REST routes under `/api/*`,
+  `mod.rs::api_router()` + per-domain submodules: sessions/permissions/models/skills/mcp/misc),
   `sse.rs` (chat/compact streams), `protocol.rs` — **the frontend JSON contract**
   (`ServerEvent` with `#[serde(tag = "type")]`) mirrored by `web/src/runtime/types.ts`;
   change both together. `task_registry.rs` tracks pending permission/ask requests per
@@ -63,21 +64,25 @@ subagent delegation, and custom slash commands.
   Static assets embedded from `web/dist` via rust-embed, SPA fallback to index.html;
   index.html is `no-cache`, hashed assets immutable.
 - `agent/` — Core LLM interaction loop.
-  - `agent.rs` — Streaming chat loop, tool-call dispatch, plan-mode, cancellation.
+  - `agent/` — the agent core, split by data flow:
+    `mod.rs` (Agent struct, compaction), `stream.rs` (streaming chat loop, plan-mode,
+    cancellation, `AgentStreamState`), `dispatch.rs` (tool-call dispatch + permissions),
+    `messages.rs` (pure message construction/sanitizing).
     Context compaction: `apply_compaction()` swaps the message list for a summary message;
     `request_compaction()` drives it from the TUI on a cloned list (not stored directly).
   - `models.rs` — **DeepSeek-compatible message types**. `CompatibleChatCompletionRequestMessage`
     wraps standard async-openai types and adds `reasoning_content` to Assistant messages.
     Custom `Serialize` injects `thinking` config and `extra` fields into the request JSON.
     Requests go through async-openai's `create_stream_byot` (BYOT = bring your own
-    transport, called from `agent.rs`). Messages are stored as
+    transport, called from `agent/stream.rs`). Messages are stored as
     `SharedMessage = Arc<CompatibleChatCompletionRequestMessage>`:
     cloning a message list is O(n) pointer copies. In plan mode, `AgentStreamState::build_request()`
-    (in `agent.rs`) uses `Arc::make_mut` to inject the read-only prompt — deep-copies only
+    (in `agent/stream.rs`) uses `Arc::make_mut` to inject the read-only prompt — deep-copies only
     the modified message.
-  - `tools.rs` — `Tool` trait + built-in tools (`bash`, `read`, `edit`, `write`, `grep`,
-    `glob`, `web_fetch`, `todo_write`, `ask_user`). `ToolRegistry` converts tools to
-    OpenAI function-calling schema. `allowed_in_plan_mode()` gates write tools.
+  - `tools/` — per-tool modules (`bash.rs`, `read.rs`, `edit.rs`, `write.rs`, `grep.rs`,
+    `glob.rs`, `web_fetch.rs`, `todo.rs`, `ask.rs`, plus shared `diff.rs`). `mod.rs` holds
+    the `Tool` trait, `ToolRegistry` (converts tools to OpenAI function-calling schema),
+    and shared path/permission helpers. `allowed_in_plan_mode()` gates write tools.
     `execute_async_with_display()` returns optional UI display data (e.g. diff hunks,
     precomputed for TUI and Web).
   - `event.rs` — `AppEvent` / `CoreEvent` definitions shared by TUI and Web backends
@@ -85,7 +90,9 @@ subagent delegation, and custom slash commands.
   - `skill.rs` — Discovers `SKILL.md` files (YAML frontmatter `name`/`description`) from
     `~/.hailux/skills/` and `<work_dir>/.hailux/skills/`. Progressive loading: only summaries
     go into the system prompt; full content loaded via the `skill` tool.
-  - `subagent.rs` — **Subagent system**. Discovers `AGENTS.md` files (YAML frontmatter
+  - `subagent/` — **Subagent system**, split into `discovery.rs` (AGENTS.md parsing +
+    directory scan), `task_tool.rs` (spec parsing + `TaskTool`), `runner.rs` (isolated
+    session execution). Discovers `AGENTS.md` files (YAML frontmatter
     `name`/`description`/`tools`/`skills`/`mcp`/`model`) from `~/.hailux/agents/` and
     `<work_dir>/.hailux/agents/`. `TaskTool` launches subagents in isolated sessions with
     their own tool set, skill whitelist, MCP server filter, and model. Session resume via
@@ -104,13 +111,18 @@ subagent delegation, and custom slash commands.
   `tools/bash_windows.txt` vs `bash_unix.txt` selected via `cfg`.
 - `permission/` — Permission engine: rules (`mod.rs::default_rules()`), `bash_arity.rs`
   (command-arity parsing for file-path detection), `bash_readonly.rs` (plan-mode bash gate).
-- `config.rs` — Model/provider config in `~/.hailux/config.toml`. Predefined providers:
+- `config/` — Model/provider config in `~/.hailux/config.toml`, split into `mod.rs`
+  (Config + load/resolve), `providers.rs` (predefined provider/model tables), `types.rs`
+  (TOML structs), `toml_serde.rs` (serialization + atomic save). Predefined providers:
   `deepseek`, `zhipu-coding-plan`; custom supported. Selector format `provider/model`.
   `resolve()` returns `ResolvedModel`.
 - `mcp/` — MCP client via `rmcp`: `config.rs` reads `~/.hailux/mcp.toml` (stdio + http
   transports, auto-generates commented sample); `client.rs` connects in background and
   registers tools. `SharedMcpBackends` shared with `TaskTool` for subagent MCP access.
-- `storage/db.rs` — SQLite chat history at `~/.hailux/db/chat.db`. **Versioned migrations
+- `storage/db/` — SQLite chat history at `~/.hailux/db/chat.db`, split by data domain:
+  `mod.rs` (ChatStorage, migrations, rebuild), `models.rs` (DTOs), `sessions.rs` /
+  `messages.rs` / `usage.rs` (CRUD per domain), `convert.rs` (OpenAI ↔ storage mapping).
+  **Versioned migrations
   via `sqlx::migrate!`** (`migrations/*.sql`): new schema change = new migration file, no
   hand-written fallbacks (the pre-0.4.0 legacy bootstrap was removed; such DBs fail
   migration and get the rebuild prompt). Max pool connections = 1. Supports subsessions
@@ -121,15 +133,20 @@ subagent delegation, and custom slash commands.
   `.sha256` asset exists — otherwise verification is skipped with a warning; Windows swaps
   via a `.old` file cleaned up on next startup).
 - `tui/` — Ratatui UI. `app/` is a directory: `mod.rs` (main event loop / state machine),
-  `chat_events.rs` (CoreEvent handling), `chat_input.rs`, `session_ops.rs`, `app_render.rs`,
-  `overlay.rs` (picker/model/setup overlay events), `types.rs` (`AppState`). `ask_user.rs`
-  (question dialog + `ask_escape`), `history_cell.rs`
-  (history rendering units, incl. `parse_ask_user_pairs`), `event.rs` (async event channel),
+  `chat_events.rs` (CoreEvent handling), `chat_input.rs` (+ `paste.rs` — the PasteBurst
+  state machine, `attachments.rs` — image attach helpers), `session_ops.rs`, `app_render.rs`,
+  `overlay/` (picker/model/setup/stats/mcp/skills/tasks overlay events, dispatched from
+  `overlay/mod.rs`), `types.rs` (`AppState`). `ask_user.rs`
+  (question dialog + `ask_escape`), `history_cell/`
+  (history rendering units by cell type: message/tool/task/todo/diff/`ask_user_render.rs`
+  — incl. `parse_ask_user_pairs`), `event.rs` (async event channel),
   `input.rs` (paste detection), `command.rs` (slash commands), `terminal.rs` (init/restore +
   panic hook); other files render panels (pickers, viewers, setup, markdown).
 - `web/` (frontend dir at repo root) — React 19 + assistant-ui + zustand + Tailwind 4 +
   vite. `src/runtime/hailux-runtime.tsx` bridges SSE events into assistant-ui message parts;
-  `src/store/app-store.ts` holds app state; `src/components/` renders UI.
+  `src/store/` holds app state (`app-store.ts` main store, `types.ts` state contract,
+  `shared-events.ts` event helpers, `session-history.ts` pure history rebuild);
+  `src/components/` renders UI.
 
 ## Runtime File Locations (all under ~/.hailux/)
 
@@ -150,7 +167,7 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
 - **Platform**: Primarily developed on Windows. `BashTool` prefers `pwsh.exe` (PowerShell 7+)
   on Windows, falling back to `powershell.exe` (5.1); and `bash -c` on Unix; the `workdir`
   parameter only exists on non-Windows. Windows commands are wrapped with a UTF-8 prologue
-  (`WINDOWS_UTF8_PROLOGUE` in `agent/tools.rs`) to force UTF-8 on both pipe directions.
+  (`WINDOWS_UTF8_PROLOGUE` in `agent/tools/bash.rs`) to force UTF-8 on both pipe directions.
   Windows adds a `crossterm_winapi` dependency and different paste-detection timing constants.
   The Windows shell is spawned with `CREATE_NO_WINDOW` (own hidden console) and
   `stdin(null)`: GUI-subsystem grandchildren (e.g. headless Edge/Chrome) would otherwise
@@ -163,12 +180,13 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   read any local directory — exposing `0.0.0.0` is an explicit trust decision (documented in `web/mod.rs`).
 - **ask_user reply contract** (4 implementations must stay in lockstep): TUI submits
   `"question"="answer"` pairs, comma-joined, with `\` and `"` escaped
-  (`tui/ask_user.rs::ask_escape`); parsed back by `history_cell.rs::parse_ask_user_pairs`;
+  (`tui/ask_user.rs::ask_escape`); parsed back by
+  `tui/history_cell/ask_user_render.rs::parse_ask_user_pairs`;
   Web mirrors both (`web/src/components/dialogs.tsx::formatAskReply` and
   `web/src/components/assistant-ui/tool-fallback.tsx::parseAskUserPairs`). Magic strings:
   `"[User Cancelled]"` (sent as fallback by `tui/ask_user.rs` and `web/task_registry.rs`,
-  checked in `agent/tools.rs`) and `"Unanswered"` (default in `tui/ask_user.rs`, rendered
-  by `history_cell.rs`). A single question also routes through the Confirm tab — no
+  checked in `agent/tools/ask.rs`) and `"Unanswered"` (default in `tui/ask_user.rs`, rendered
+  by `tui/history_cell/ask_user_render.rs`). A single question also routes through the Confirm tab — no
   auto-submit on selection (TUI and Web aligned).
 - **Permission defaults**: In-workdir operations allowed by default via builtin lowest-priority
   rules in `permission/mod.rs::default_rules()`: `* allow`, `external_directory * ask`,
@@ -180,10 +198,11 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   Windows case-insensitive, `*`/`?`-wildcard matcher with literal special chars.
   `Tool::extract_permission` returns an **ordered** `Vec<PermissionRequest>`: bash puts its
   command-rule request first, external-directory second, so `[permission.bash] "rm *"="deny"`
-  short-circuits before the out-of-workdir ask (`agent/agent.rs::evaluate_permission_requests`
-  evaluates in order; Deny short-circuits, first Ask dialogs, `Once` only covers that one
-  request). Session "always" rules persist under the **request's** permission category, not the
-  tool category.
+  short-circuits before the out-of-workdir ask
+  (`agent/agent/dispatch.rs::evaluate_permission_requests`
+   evaluates in order; Deny short-circuits, first Ask dialogs, `Once` only covers that one
+   request). Session "always" rules persist under the **request's** permission category, not the
+   tool category.
 - **Bash static analysis** (`permission/bash_scan.rs`): best-effort gating, NOT a sandbox —
   documented in tool prompts and help skill. Splits sub-commands on top-level `&&`/`;`/`|`/`&`
   (quote-aware); classifies first tokens as FileOps (`cat`, `rm`, `ln`, `tee`, ... — all
@@ -205,8 +224,8 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   event channel; only the final text result returns to the main agent. Tool-call progress is
   forwarded to the main TUI (truncated to 2000 chars). `ask_user` and `task` tools are never
   registered for subagents. Tool/skill/MCP access filtered by `AGENTS.md` frontmatter.
-- **Paste detection**: `PasteBurst` in `tui/app/` (via `input.rs`) distinguishes typed vs
-  pasted input via timing heuristics. Complex state machine — be careful when modifying input handling.
+- **Paste detection**: `PasteBurst` in `tui/app/paste.rs` (fed via `input.rs`) distinguishes
+  typed vs pasted input via timing heuristics. Complex state machine — be careful when modifying input handling.
 - **CRLF handling**: `EditTool` normalizes line endings to match the file's style before
   string matching, so LLM-provided `\n` works on `\r\n` files. `.gitattributes` forces LF
   for `*.rs`/`*.sql`/`*.json`/`*.toml` (migration checksum safety); web `*.tsx/*.ts` fall
