@@ -1,352 +1,39 @@
 // 应用状态：会话/消息/权限请求/模式（Zustand）
-import { create, type StoreApi } from "zustand";
+import { create } from "zustand";
 import type {
-  ChatAttachment,
   ChatRequest,
   CommandInfo,
-  CreateModelInput,
   ModelInfo,
   ProviderOption,
-  QuestionInfo,
   ServerEvent,
   SessionInfo,
   StatsResponse,
 } from "../runtime/types";
-import { getJson, postJson, postSse, type SseSession } from "../runtime/sse-client";
-
-export interface ChatItem {
-  kind:
-    | "user"
-    | "assistant"
-    | "assistant-streaming"
-    | "reasoning"
-    | "reasoning-streaming"
-    | "tool-call"
-    | "tool-result"
-    | "notice"
-    | "compact-marker"
-    | "compacting"
-    | "done"
-    | "error";
-  text?: string;
-  name?: string; // tool 名称
-  arguments?: string;
-  result?: string;
-  display?: string; // 工具展示数据（如 diff）
-  subagent?: string;
-  subagentIndex?: number; // 来源任务在 tasks 数组中的下标（同名并发区分实例）
-  status?: string; // done 状态
-  totalMs?: number;
-  model?: string;
-  ctxPromptTokens?: number; // 本轮上下文占用快照（最后一次请求输入 token；done 行携带）
-  ctxCompletionTokens?: number; // 本轮上下文占用快照（最后一次请求输出 token）
-  thinkMs?: number; // 思考耗时（最终）
-  thinkStartedAt?: number; // 思考计时起点（进行中，epoch ms）
-  /** 用户消息的图片附件（data URL，用于气泡内缩略图） */
-  images?: ChatAttachment[];
-}
+import { getJson, postJson, postSse } from "../runtime/sse-client";
+import { rebuildSessionItems } from "./session-history";
+import { handleSharedEvent, itemOps, readError } from "./shared-events";
+import type {
+  AppState,
+  McpServerEntry,
+  ModeStatus,
+  SkillEntry,
+} from "./types";
 
 /** localStorage：上次访问的项目目录 key */
 const LAST_WORKDIR_KEY = "hailux.lastWorkDir";
 
-/** 工具图片合成消息（read 读取图片等，agent 层为注入模型上下文生成）：
- *  runtime_meta 带 {"format":"tool-attachment"} 标记，历史加载时跳过渲染。
- *  无标记的旧数据不识别（保持原样展示）。 */
-function isToolAttachmentMessage(
-  msg: import("../runtime/types").StoredMessage,
-): boolean {
-  if (!msg.runtime_meta) return false;
-  try {
-    const v = JSON.parse(msg.runtime_meta) as { format?: string };
-    return v.format === "tool-attachment";
-  } catch {
-    return false;
-  }
-}
-
-/** 全局模式状态（GET /api/mode 及 yolo/plan-mode 设置响应体）。
- *  后端契约：src/web/protocol.rs 的 `ModeStatus` */
-export interface ModeStatus {
-  yolo: boolean;
-  plan_mode: boolean;
-}
-
-/** 技能目录内文件条目 */
-export interface SkillFileEntry {
-  /** 相对技能目录的路径（`/` 分隔） */
-  path: string;
-  /** 字节大小 */
-  size: number;
-}
-
-/** 技能条目（GET /api/skills 返回结构） */
-export interface SkillEntry {
-  name: string;
-  description: string;
-  /** SKILL.md 绝对路径 */
-  location: string;
-  /** "global"（~/.hailux/skills）| "project"（<work_dir>/.hailux/skills） */
-  scope: "global" | "project";
-  /** SKILL.md 正文（frontmatter 之后） */
-  content: string;
-  /** 技能目录内全部文件（含 SKILL.md） */
-  files: SkillFileEntry[];
-}
-
-/** 主区域视图：聊天 / 技能管理 / MCP 管理 / 用量统计 / 设置 */
-export type ActiveView = "chat" | "skills" | "mcp" | "stats" | "settings";
-
-/** JSON Schema 片段（工具参数 schema / 子属性） */
-export interface JsonSchemaNode {
-  type?: string;
-  description?: string;
-  properties?: Record<string, JsonSchemaNode>;
-  required?: string[];
-  items?: JsonSchemaNode;
-  enum?: unknown[];
-  [key: string]: unknown;
-}
-
-/** MCP 工具条目（名称 + 描述 + 参数 schema） */
-export interface McpToolEntry {
-  name: string;
-  description: string;
-  schema?: JsonSchemaNode;
-}
-
-/** MCP 服务器条目（GET /api/mcp 返回结构）：配置 + 连接状态 */
-export interface McpServerEntry {
-  name: string;
-  connected: boolean;
-  tools: number;
-  /** "stdio" | "http" */
-  transport: string;
-  command?: string;
-  args: string[];
-  env: Record<string, string>;
-  url?: string;
-  headers: Record<string, string>;
-  error?: string;
-  tool_details: McpToolEntry[];
-}
-
-/** MCP 服务器表单字段（创建/更新共用） */
-export interface McpServerInput {
-  name: string;
-  transport: "stdio" | "http";
-  command?: string;
-  args: string[];
-  env: Record<string, string>;
-  url?: string;
-  headers: Record<string, string>;
-}
-
-/** 从错误响应提取可读文本 */
-async function readError(resp: Response): Promise<string> {
-  const text = await resp.text().catch(() => "");
-  return text || `HTTP ${resp.status}`;
-}
-
-/** 压缩完成标记文本（对齐 TUI CompactMarker：条数 + 耗时；历史恢复无耗时仅条数） */
-function compactMarkerText(count: number, totalMs?: number): string {
-  const secs =
-    totalMs !== undefined && totalMs > 0
-      ? ` · ${Math.max(1, Math.round(totalMs / 1000))}s`
-      : "";
-  return `已压缩 ${count} 条消息${secs}`;
-}
-
-/** 共享 items 操作：push 追加 / patchLast 原地替换末条 */
-function itemOps(
-  get: StoreApi<AppState>["getState"],
-  set: StoreApi<AppState>["setState"],
-) {
-  const items = get().items;
-  const push = (item: ChatItem) => set((s) => ({ items: [...s.items, item] }));
-  const patchLast = (patch: (item: ChatItem) => ChatItem) => {
-    if (items.length === 0) return;
-    set((s) => ({
-      items: [...s.items.slice(0, -1), patch(s.items[s.items.length - 1]!)],
-    }));
-  };
-  return { items, push, patchLast };
-}
-
-type ItemOps = ReturnType<typeof itemOps>;
-
-/** chat / compact 流共享事件分支（Notice / 压缩三事件）；返回 true 表示已消费 */
-function handleSharedEvent(
-  event: ServerEvent,
-  ops: ItemOps,
-  set: StoreApi<AppState>["setState"],
-): boolean {
-  switch (event.type) {
-    case "Notice":
-      ops.push({ kind: "notice", text: event.text });
-      return true;
-    case "CompactStart":
-      // 对齐 TUI：压缩中只保留一条状态行，摘要流不展示
-      ops.push({ kind: "compacting", text: event.text });
-      return true;
-    case "CompactComplete":
-      // 对齐 TUI：状态行整条替换为完成标记（条数 + 耗时）
-      ops.patchLast(() => ({
-        kind: "compact-marker",
-        text: compactMarkerText(event.compacted_count, event.total_ms),
-      }));
-      // 对齐 TUI set_session_usage(estimated, 0)：立即刷新上下文计量
-      // （仅上下文字段；顶栏累计口径不受压缩影响）
-      if (event.context_tokens != null) {
-        set({
-          contextPromptTokens: event.context_tokens,
-          contextCompletionTokens: 0,
-        });
-      }
-      return true;
-    case "Error": {
-      // 压缩中状态行原地替换为错误（对齐 TUI CompactError 替换语义），其余场景照常追加
-      const errItem: ChatItem = { kind: "error", text: event.message };
-      if (ops.items[ops.items.length - 1]?.kind === "compacting") {
-        ops.patchLast(() => errItem);
-      } else {
-        ops.push(errItem);
-      }
-      return true;
-    }
-    default:
-      return false;
-  }
-}
-
-interface AppState {
-  // 会话
-  sessions: SessionInfo[];
-  sessionId: string | null;
-  workDir: string;
-  // 项目目录列表（workdir picker 用）
-  workdirs: string[];
-  // 消息流
-  items: ChatItem[];
-  isRunning: boolean;
-  /** 本轮请求计时起点（epoch ms），完成后由 done 行展示后端耗时 */
-  runStartedAt: number | null;
-  /** 本会话累计输入 token（当前 session 全部 LLM 请求之和；顶栏展示） */
-  promptTokens: number;
-  /** 本会话累计输出 token */
-  completionTokens: number;
-  /** 本会话累计缓存命中 token（顶栏展示） */
-  cachedTokens: number;
-  /** 最后一次请求的输入 token（≈ 当前上下文大小；消息底部上下文计量用） */
-  contextPromptTokens: number;
-  /** 最后一次请求的输出 token */
-  contextCompletionTokens: number;
-  /** 模型上下文窗口大小（token）；0 = 未知 */
-  contextWindow: number;
-  // 模式
-  planMode: boolean;
-  yolo: boolean;
-  // 输入历史（光标在首行 ↑ 上一条）
-  inputHistory: string[];
-  // 弹窗
-  permission: {
-    requestId: string;
-    description: string;
-    patterns: string[];
-    subagent?: string;
-  } | null;
-  askUser: { requestId: string; questions: QuestionInfo[] } | null;
-  // 选择器
-  models: ModelInfo[];
-  /** provider 列表（含未配置的预定义 provider；添加模型表单用） */
-  providers: ProviderOption[];
-  /** 添加模型弹窗；打开时可带预设（provider 卡片 / 需配置模型入口） */
-  showAddModel: boolean;
-  addModelPreset: { provider: string; modelId?: string } | null;
-  /** 斜杠命令列表（随 workDir 变化刷新） */
-  commands: CommandInfo[];
-  showWorkdirPicker: boolean;
-  showModelPicker: boolean;
-  /** 主区域视图（技能/MCP 为内联面板，替换聊天区） */
-  activeView: ActiveView;
-  skills: SkillEntry[];
-  /** 技能列表加载失败信息（面板内展示 + 重试） */
-  skillsError: string | null;
-  mcpServers: McpServerEntry[];
-  /** MCP 列表加载失败信息（面板内展示 + 重试） */
-  mcpError: string | null;
-  // 用量统计
-  stats: StatsResponse | null;
-  /** 统计的项目筛选（"" = 全部项目） */
-  statsFilter: string;
-  /** 统计窗口天数 */
-  statsDays: number;
-  statsLoading: boolean;
-  statsError: string | null;
-  // 中断提示（双击 Esc 语义）
-  escHint: boolean;
-
-  sse: SseSession | null;
-
-  // actions
-  /** 启动初始化：确定初始项目目录（上次访问 > 服务器默认目录）并拉取会话 */
-  initWorkDir: () => Promise<void>;
-  loadSessions: () => Promise<void>;
-  loadModels: () => Promise<void>;
-  loadProviders: () => Promise<void>;
-  /** 添加自定义模型并自动切换到新模型 */
-  addModel: (input: CreateModelInput) => Promise<void>;
-  /** 删除自定义模型（删除当前模型时后端自动迁移） */
-  deleteModel: (selector: string) => Promise<void>;
-  /** 删除自定义 provider（整条含凭据与全部模型） */
-  deleteProvider: (providerId: string) => Promise<void>;
-  loadWorkdirs: () => Promise<void>;
-  loadCommands: () => Promise<void>;
-  /** 切换主区域视图；skills/mcp 进入时刷新列表 */
-  setView: (view: ActiveView) => void;
-  reloadSkills: () => Promise<void>;
-  createSkill: (input: {
-    name: string;
-    description: string;
-    content: string;
-    scope: "global" | "project";
-  }) => Promise<void>;
-  updateSkill: (input: {
-    location: string;
-    name: string;
-    description: string;
-    content: string;
-  }) => Promise<void>;
-  deleteSkill: (location: string) => Promise<void>;
-  reloadMcp: () => Promise<void>;
-  createMcpServer: (input: McpServerInput) => Promise<void>;
-  updateMcpServer: (name: string, input: McpServerInput) => Promise<void>;
-  deleteMcpServer: (name: string) => Promise<void>;
-  /** 拉取用量统计（statsFilter/statsDays 为当前筛选） */
-  loadStats: () => Promise<void>;
-  setStatsFilter: (dir: string) => void;
-  setStatsDays: (days: number) => void;
-  newSession: (workDir?: string) => Promise<void>;
-  switchSession: (id: string) => Promise<void>;
-  deleteSession: (id: string) => Promise<void>;
-  sendMessage: (message: string, attachments?: ChatAttachment[]) => Promise<void>;
-  /** 手动压缩当前会话上下文（POST /api/compact，SSE 响应） */
-  runCompact: () => Promise<void>;
-  interrupt: () => Promise<void>;
-  replyPermission: (allow: boolean, always: boolean) => Promise<void>;
-  replyAsk: (answer: string) => Promise<void>;
-  setPlanMode: (on: boolean) => Promise<void>;
-  setYolo: (on: boolean) => Promise<void>;
-  /** 从服务器对账全局模式（yolo / planMode），失败静默（下次时机重试） */
-  syncMode: () => Promise<void>;
-  switchModel: (selector: string) => Promise<void>;
-  /** show=true 打开添加模型弹窗；preset 为预填项（provider / 模型 id） */
-  setAddModel: (show: boolean, preset?: { provider: string; modelId?: string } | null) => void;
-  /** 切换项目目录：中断运行中的请求，重置会话上下文并拉取该项目会话列表 */
-  setWorkDir: (dir: string) => Promise<void>;
-  setWorkdirPicker: (show: boolean) => void;
-  setModelPicker: (show: boolean) => void;
-  setEscHint: (on: boolean) => void;
-}
+// 组件沿用 `../store/app-store` 导入路径；类型实际定义在 ./types
+export type {
+  ActiveView,
+  ChatItem,
+  JsonSchemaNode,
+  McpServerEntry,
+  McpServerInput,
+  McpToolEntry,
+  ModeStatus,
+  SkillEntry,
+  SkillFileEntry,
+} from "./types";
 
 export const useApp = create<AppState>((set, get) => ({
   sessions: [],
@@ -652,168 +339,23 @@ export const useApp = create<AppState>((set, get) => ({
       messages: import("../runtime/types").StoredMessage[];
       compact_summary?: string;
     }>(`/api/sessions/${id}`);
-    const items: ChatItem[] = [];
-    // 对齐 TUI load_session_messages：压缩摘要不展示，仅在 compacted/未 compacted
-    // 边界插入一条完成分隔线（全部已压缩时补在末尾）
-    const hasSummary = Boolean(detail.compact_summary);
-    let compactMarkerInserted = false;
-    // Tool 消息的 runtime_meta 仅识别新格式 diff 展示数据（format: "diff"）；
-    // 旧格式 {old,new} 存量数据显示 result 文本，计时 JSON（无 format 字段）同样排除
-    const toolResults = new Map<string, { result: string; display?: string }>();
-    // 本轮最近一次请求的 usage 快照（随 done 行落进消息底部操作栏）
-    let turnCtx: { prompt: number; completion: number } | null = null;
-    for (const msg of detail.messages) {
-      if (msg.role === "Tool" && msg.tool_call_id) {
-        let display: string | undefined;
-        if (msg.runtime_meta) {
-          try {
-            const v = JSON.parse(msg.runtime_meta) as { format?: string };
-            if (v.format === "diff") {
-              display = msg.runtime_meta;
-            }
-          } catch {
-            // 非 JSON，不作为 diff 展示
-          }
-        }
-        toolResults.set(msg.tool_call_id, { result: msg.content, display });
-      }
-    }
-    for (let idx = 0; idx < detail.messages.length; idx++) {
-      const msg = detail.messages[idx]!;
-      if (
-        !compactMarkerInserted &&
-        hasSummary &&
-        idx > 0 &&
-        detail.messages[idx - 1]!.compacted &&
-        !msg.compacted
-      ) {
-        items.push({ kind: "compact-marker", text: compactMarkerText(idx) });
-        compactMarkerInserted = true;
-      }
-      if (msg.role === "User") {
-        // 工具图片合成消息（read 读取图片等）：runtime_meta 带
-        // {"format":"tool-attachment"} 标记，仅供模型上下文，跳过渲染。
-        // 无标记的旧数据保持原样展示（容忍）。
-        if (isToolAttachmentMessage(msg)) {
-          // 合成消息位于 assistant 回合中间，不重置 turnCtx（usage 归属不受影响）
-          continue;
-        }
-        let images: ChatAttachment[] = [];
-        if (msg.attachments) {
-          try {
-            images = JSON.parse(msg.attachments) as ChatAttachment[];
-          } catch {
-            // 忽略解析失败
-          }
-        }
-        items.push({ kind: "user", text: msg.content, images });
-        turnCtx = null;
-      } else if (msg.role === "Assistant") {
-        if (msg.prompt_tokens !== null) {
-          turnCtx = {
-            prompt: msg.prompt_tokens,
-            completion: msg.completion_tokens ?? 0,
-          };
-        }
-        if (msg.reasoning_content) {
-          items.push({
-            kind: "reasoning",
-            text: msg.reasoning_content,
-            thinkMs: msg.think_ms ?? undefined,
-          });
-        }
-        if (msg.content) items.push({ kind: "assistant", text: msg.content });
-        if (msg.tool_calls) {
-          try {
-            const calls = JSON.parse(msg.tool_calls) as {
-              id: string;
-              function?: { name: string; arguments?: string };
-            }[];
-            for (const call of calls) {
-              items.push({
-                kind: "tool-call",
-                name: call.function?.name ?? "",
-                arguments: call.function?.arguments ?? "",
-              });
-              const tr = toolResults.get(call.id);
-              if (tr !== undefined) {
-                items.push({
-                  kind: "tool-result",
-                  name: call.function?.name ?? "",
-                  result: tr.result,
-                  display: tr.display,
-                });
-              }
-            }
-          } catch {
-            // 忽略解析失败
-          }
-        }
-        // runtime_meta（含本轮耗时/模型/状态）→ 完成标记行
-        if (msg.runtime_meta) {
-          try {
-            const meta = JSON.parse(msg.runtime_meta) as {
-              total_ms?: number;
-              model?: string;
-              status?: string;
-            };
-            if (typeof meta.total_ms === "number") {
-              items.push({
-                kind: "done",
-                status: meta.status ?? "completed",
-                totalMs: meta.total_ms,
-                model: meta.model ?? "",
-                ctxPromptTokens: turnCtx?.prompt,
-                ctxCompletionTokens: turnCtx?.completion,
-              });
-            }
-          } catch {
-            // 忽略解析失败
-          }
-        }
-      }
-    }
-    // 全部消息已压缩（压缩后未再对话）：对齐 TUI，末尾补插分隔线
-    if (
-      !compactMarkerInserted &&
-      hasSummary &&
-      detail.messages.length > 0 &&
-      detail.messages.every((m) => m.compacted)
-    ) {
-      items.push({
-        kind: "compact-marker",
-        text: compactMarkerText(detail.messages.length),
-      });
-    }
+    const rebuilt = rebuildSessionItems(
+      detail.messages,
+      Boolean(detail.compact_summary),
+    );
     // 会话携带其所属工作目录 —— 切换会话即切换目录上下文
     const target = get().sessions.find((s) => s.id === id);
-    // 恢复“本会话累计”口径：全部带 usage 的 assistant 行求和（顶栏展示）
-    // 同时记录最后一条带 usage 的行，作为上下文占用的近似（最后请求的输入+输出）
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let cachedTokens = 0;
-    let contextPromptTokens = 0;
-    let contextCompletionTokens = 0;
-    for (const m of detail.messages) {
-      if (m.prompt_tokens !== null) {
-        promptTokens += m.prompt_tokens;
-        completionTokens += m.completion_tokens ?? 0;
-        cachedTokens += m.cached_tokens ?? 0;
-        contextPromptTokens = m.prompt_tokens;
-        contextCompletionTokens = m.completion_tokens ?? 0;
-      }
-    }
     set({
       sessionId: id,
-      items,
+      items: rebuilt.items,
       isRunning: false,
       runStartedAt: null,
       workDir: target?.work_dir ?? get().workDir,
-      promptTokens,
-      completionTokens,
-      cachedTokens,
-      contextPromptTokens,
-      contextCompletionTokens,
+      promptTokens: rebuilt.promptTokens,
+      completionTokens: rebuilt.completionTokens,
+      cachedTokens: rebuilt.cachedTokens,
+      contextPromptTokens: rebuilt.contextPromptTokens,
+      contextCompletionTokens: rebuilt.contextCompletionTokens,
     });
   },
 

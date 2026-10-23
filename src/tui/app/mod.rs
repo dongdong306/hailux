@@ -1,14 +1,16 @@
 mod app_render;
+mod attachments;
 mod chat_events;
 mod chat_input;
 mod overlay;
+mod paste;
 mod session_ops;
 pub(crate) mod types;
 
 pub(crate) use types::AppState;
 pub use types::{AppSharedState, Message};
 
-use chat_input::PasteBurst;
+use paste::PasteBurst;
 
 use color_eyre::Result;
 #[allow(unused_imports)]

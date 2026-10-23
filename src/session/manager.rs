@@ -278,12 +278,7 @@ mod tests {
         };
         let mut cfg = config::Config::default();
         cfg.permission.mode = "yolo".to_string();
-        let manager = SessionManager::new(
-            resolved,
-            cfg,
-            storage,
-            Arc::new(Mutex::new(Vec::new())),
-        );
+        let manager = SessionManager::new(resolved, cfg, storage, Arc::new(Mutex::new(Vec::new())));
         assert!(manager.global_yolo());
     }
 
