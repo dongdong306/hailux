@@ -722,6 +722,41 @@ async fn glob_tool_defaults_to_work_dir() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn glob_tool_matches_relative_subdir_pattern() {
+    // 回归：`src/tui/*.rs` 等带相对目录前缀的 pattern 之前永远匹配不上绝对
+    // entry 路径（前缀无法消耗），必须同时按遍历根的相对路径匹配
+    let dir = test_tmp_dir("hailux_glob_relative_pattern");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/tui")).expect("create dirs");
+    std::fs::write(dir.join("src/tui/mod.rs"), "fn t() {}\n").expect("write file");
+    std::fs::write(dir.join("src/main.rs"), "fn m() {}\n").expect("write file");
+    let args = |pattern: &str| {
+        serde_json::json!({ "pattern": pattern, "path": dir.display().to_string() }).to_string()
+    };
+    let out = GlobTool
+        .execute_async(&args("src/tui/*.rs"), &dir.display().to_string())
+        .await
+        .expect("glob run");
+    assert!(out.contains("mod.rs"), "missing match: {out}");
+    assert!(!out.contains("main.rs"), "unexpected match: {out}");
+
+    let out = GlobTool
+        .execute_async(&args("src/**/*.rs"), &dir.display().to_string())
+        .await
+        .expect("glob run");
+    assert!(out.contains("mod.rs"), "missing match: {out}");
+    assert!(out.contains("main.rs"), "missing match: {out}");
+
+    // 子目录作为遍历根时，相对 pattern 同样以根为基准
+    let out = GlobTool
+        .execute_async(&args("*.rs"), &dir.join("src/tui").display().to_string())
+        .await
+        .expect("glob run");
+    assert!(out.contains("mod.rs"), "missing match: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn resolve_tool_path_resolves_relative_against_work_dir() {
     #[cfg(windows)]
