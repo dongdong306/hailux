@@ -105,6 +105,11 @@ impl Tool for GlobTool {
 
                 const MAX_FILES: usize = 100;
 
+                // 双路匹配：pattern 既可匹配完整路径（绝对 pattern、`*.rs` 等
+                // 头部通配形态），也可匹配相对于遍历根的路径（`src/tui/*.rs`
+                // 等带相对目录前缀的形态——单匹配绝对路径时永远吃不掉前缀）。
+                let root = std::path::PathBuf::from(&path);
+
                 let mut results = String::new();
                 let mut file_count = 0usize;
                 let mut total_count = 0usize;
@@ -116,7 +121,13 @@ impl Tool for GlobTool {
                     if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                         continue;
                     }
-                    if glob_matcher.is_match(entry.path()) {
+                    let matched = glob_matcher.is_match(entry.path())
+                        || entry
+                            .path()
+                            .strip_prefix(&root)
+                            .map(|rel| glob_matcher.is_match(rel))
+                            .unwrap_or(false);
+                    if matched {
                         total_count += 1;
                         if file_count < MAX_FILES {
                             results.push_str(&format!("{}\n", display_canonical(entry.path())));
