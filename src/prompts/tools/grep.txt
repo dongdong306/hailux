@@ -2,3 +2,4 @@
 - Uses regular expressions to search file contents; supports full regex syntax (e.g., `"log.*Error"`, `"function\s+\w+"`)
 - Returns file paths and line numbers of at least one match, sorted by modification time
 - Use this tool when you need to find files containing a specific pattern
+- Env-type files (*.env, *.env.* except *.env.example) are permission-gated: skipped during directory searches (noted in output); pass the file path explicitly via `path` to search them (asks for approval)

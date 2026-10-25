@@ -673,6 +673,91 @@ async fn grep_tool_no_matches_returns_marker() {
 }
 
 #[tokio::test]
+async fn grep_skips_env_files_in_directory_search() {
+    // 回归：目录级搜索曾把 *.env.* 内容无询问直接返回（绕过 read 门禁）
+    let dir = test_tmp_dir("hailux_grep_env_skip");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for name in ["a.rs", "k.env", "b.env.local", ".env.example"] {
+        std::fs::write(dir.join(name), "probe_secret\n").expect("write file");
+    }
+    let arguments = serde_json::json!({
+        "pattern": "probe_secret",
+        "path": dir.display().to_string()
+    })
+    .to_string();
+    let out = GrepTool
+        .execute_async(&arguments, &dir.display().to_string())
+        .await
+        .expect("grep run");
+    assert!(out.contains("a.rs"), "missing normal match: {out}");
+    assert!(
+        out.contains(".env.example"),
+        "example file must stay searchable: {out}"
+    );
+    assert!(!out.contains("k.env:"), "env file must be skipped: {out}");
+    assert!(
+        !out.contains("b.env.local"),
+        "env file must be skipped: {out}"
+    );
+    assert!(out.contains("skipped 2 env-type"), "missing note: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn grep_explicit_env_path_searches_root_file() {
+    // path 直指 env 文件 = 显式目标（extract_permission 已补发 read 询问），
+    // 执行层不得跳过遍历根本身
+    let dir = test_tmp_dir("hailux_grep_env_explicit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let env = dir.join("k.env");
+    std::fs::write(&env, "probe_secret\n").expect("write file");
+    let arguments = serde_json::json!({
+        "pattern": "probe_secret",
+        "path": env.display().to_string()
+    })
+    .to_string();
+    let out = GrepTool
+        .execute_async(&arguments, &dir.display().to_string())
+        .await
+        .expect("grep run");
+    assert!(
+        out.contains("probe_secret"),
+        "root env file must be searched: {out}"
+    );
+    assert!(!out.contains("skipped"), "unexpected skip note: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn grep_extract_permission_adds_read_gate_for_env_file() {
+    let wd = tmp_workdir("grep_env_perm");
+    let wd_str = wd.display().to_string();
+    // 目录搜索：仅 grep 请求
+    let reqs = GrepTool.extract_permission(
+        &serde_json::json!({ "pattern": "x", "path": "src" }).to_string(),
+        &wd_str,
+    );
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].permission, "grep");
+    // 显式 env 文件：追加 read 请求（命中内置 *.env 询问规则）
+    let reqs = GrepTool.extract_permission(
+        &serde_json::json!({ "pattern": "x", "path": ".env" }).to_string(),
+        &wd_str,
+    );
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[1].permission, "read");
+    assert!(reqs[1].patterns[0].ends_with(".env"));
+    // 豁免文件不追加
+    let reqs = GrepTool.extract_permission(
+        &serde_json::json!({ "pattern": "x", "path": ".env.example" }).to_string(),
+        &wd_str,
+    );
+    assert_eq!(reqs.len(), 1);
+}
+
+#[tokio::test]
 async fn grep_tool_defaults_to_work_dir() {
     // 缺省 path（"."）→ 按会话工作目录搜索，而非进程 cwd
     let dir = test_tmp_dir("hailux_grep_default_path");
