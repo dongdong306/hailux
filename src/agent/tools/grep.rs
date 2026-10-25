@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
 use grep::regex::RegexMatcher;
@@ -13,6 +14,7 @@ use super::{
 };
 use crate::agent::utils::compare_mtime;
 use crate::permission::PermissionRequest;
+use crate::permission::is_env_gated_file_name;
 use crate::permission::resolve_permission_path;
 
 pub struct GrepTool;
@@ -39,13 +41,31 @@ impl Tool for GrepTool {
         }
 
         // 工作目录内 → grep 请求（默认放行，配置规则仍可 deny）
-        vec![PermissionRequest {
+        let mut requests = vec![PermissionRequest {
             permission: "grep".to_string(),
             patterns: vec![canonical.display().to_string()],
             always_patterns: vec!["*".to_string()],
             description: format!("Search in: {}", path),
             force_ask: false,
-        }]
+        }];
+
+        // path 显式指向 env 敏感文件 → 追加 read 请求，命中内置 *.env 询问
+        // 门槛（目录级搜索的 env 文件由执行层跳过，见 execute）
+        let file_name = Path::new(&canonical)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if is_env_gated_file_name(&file_name) {
+            requests.push(PermissionRequest {
+                permission: "read".to_string(),
+                patterns: vec![canonical.display().to_string()],
+                // Always 只授权该具体文件（read 类别），不整体放开 env 读取
+                always_patterns: vec![canonical.display().to_string()],
+                description: format!("Search env file: {}", path),
+                force_ask: false,
+            });
+        }
+        requests
     }
 
     fn description(&self) -> &str {
@@ -128,6 +148,7 @@ impl Tool for GrepTool {
                 let mut searcher = Searcher::new();
                 let mut results = String::new();
                 let mut match_count = 0u64;
+                let mut env_skipped = 0u64;
                 const MAX_MATCHES: u64 = 100;
 
                 for entry in walk_builder.build() {
@@ -139,6 +160,16 @@ impl Tool for GrepTool {
                         message: e.to_string(),
                     })?;
                     if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                        continue;
+                    }
+
+                    // env 敏感文件与 read 门禁对齐：目录级搜索跳过；遍历根
+                    // 本身是显式目标（extract_permission 已补发 read 询问），
+                    // depth == 0 不跳过
+                    if entry.depth() > 0
+                        && is_env_gated_file_name(&entry.file_name().to_string_lossy())
+                    {
+                        env_skipped += 1;
                         continue;
                     }
 
@@ -174,15 +205,31 @@ impl Tool for GrepTool {
                     }
                 }
 
+                let skip_note = if env_skipped > 0 {
+                    format!(
+                        "\n(skipped {} env-type file(s) (*.env, *.env.*): permission-gated; \
+pass the file path explicitly to search them)",
+                        env_skipped
+                    )
+                } else {
+                    String::new()
+                };
+
                 if results.is_empty() {
-                    Ok("No matches found".to_string())
+                    if skip_note.is_empty() {
+                        Ok("No matches found".to_string())
+                    } else {
+                        Ok(format!("No matches found{skip_note}"))
+                    }
                 } else if match_count >= MAX_MATCHES {
                     results.push_str(&format!(
                         "\n... Too many results, truncated (showing at most {} matches)",
                         MAX_MATCHES
                     ));
+                    results.push_str(&skip_note);
                     Ok(results)
                 } else {
+                    results.push_str(&skip_note);
                     Ok(results)
                 }
             });

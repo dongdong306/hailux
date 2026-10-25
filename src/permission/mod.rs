@@ -514,6 +514,14 @@ pub fn default_rules() -> Vec<PermissionRule> {
     ]
 }
 
+/// 判断文件名是否属于 env 敏感文件（与内置 read 门禁规则同语义）：
+/// 命中 `*.env` / `*.env.*` 且不命中豁免规则 `*.env.example`。
+/// 供 grep 等批量读取内容的工具对齐 read 的 .env 询问门槛。
+pub fn is_env_gated_file_name(file_name: &str) -> bool {
+    wildcard_match(file_name, "*.env")
+        || (wildcard_match(file_name, "*.env.*") && !wildcard_match(file_name, "*.env.example"))
+}
+
 /// 从多个规则集中查找第一条匹配规则，无匹配时默认 Ask。
 /// rulesets 顺序即优先级：越靠前优先级越高。
 fn evaluate(permission: &str, pattern: &str, rulesets: &[&[PermissionRule]]) -> PermissionAction {
@@ -757,6 +765,19 @@ mod tests {
             pm.check(&req("C:\\proj\\src\\main.rs"), false),
             PermissionResult::Allowed
         ));
+    }
+
+    #[test]
+    fn test_env_gated_file_name() {
+        // 与内置 read 规则同语义：*.env / *.env.* 命中，.env.example 豁免
+        assert!(is_env_gated_file_name(".env"));
+        assert!(is_env_gated_file_name("k.env"));
+        assert!(is_env_gated_file_name(".env.local"));
+        assert!(is_env_gated_file_name("prod.env.json"));
+        assert!(!is_env_gated_file_name(".env.example"));
+        assert!(!is_env_gated_file_name("example.env.example"));
+        assert!(!is_env_gated_file_name("main.rs"));
+        assert!(!is_env_gated_file_name("env.txt"));
     }
 
     #[test]

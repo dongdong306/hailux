@@ -190,7 +190,10 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   auto-submit on selection (TUI and Web aligned).
 - **Permission defaults**: In-workdir operations allowed by default via builtin lowest-priority
   rules in `permission/mod.rs::default_rules()`: `* allow`, `external_directory * ask`,
-  `read *.env` / `*.env.* ask` (`.env.example allow`), `mcp * ask`. Tools issue
+  `read *.env` / `*.env.* ask` (`.env.example allow`), `mcp * ask`. Grep aligns with the env
+  gate: directory searches skip env-type files (skip note appended to output), and a `path`
+  pointing directly at one appends a `read` request (`permission::is_env_gated_file_name`).
+  Tools issue
   `external_directory` requests when a path resolves outside the workdir — read/edit/write/
   grep/glob path args plus the bash `workdir` param. `[permission.xxx]` config rules
   (session > config > builtin defaults) override the defaults; `read` in-workdir requests use
