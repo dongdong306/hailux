@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/dongdong306/hailux/compare/v0.10.1...v0.11.0) (2026-10-25)
+
+
+### Improvements
+
+* **agent:** auto-retry transient LLM request errors ([973e60b](https://github.com/dongdong306/hailux/commit/973e60b788ff50a14ba3a7b609ebbd327afa6b49))
+* **agent:** tag tool-image synthetic messages with source tool ([eff83bd](https://github.com/dongdong306/hailux/commit/eff83bdabe5c647de7ab25fe8920a094f36e769d))
+* **permission:** gate grep access to env-type files ([b992b97](https://github.com/dongdong306/hailux/commit/b992b975f4c7c38f07d853650b73d4bd528056cf))
+* **permission:** persist YOLO mode to config.toml ([9ba7154](https://github.com/dongdong306/hailux/commit/9ba71543db920d6739a3a0d6f40abacbe8842590))
+
+
+### Bugfixes
+
+* **agent:** align retry edge cases after review ([632336c](https://github.com/dongdong306/hailux/commit/632336c03ac99fa4e4988b6850710e151f0268e1))
+* **tools:** match glob patterns relative to the search root ([29ac492](https://github.com/dongdong306/hailux/commit/29ac492107356ae664b24267f9f65940e25adbcc))
+* **tui:** replace Terminal::clear with resize to avoid Linux crash ([3787395](https://github.com/dongdong306/hailux/commit/37873950a6ee4923548f781743a3a948fd5decfc))
+
+
+### Refactor
+
+* split oversized modules into per-domain submodules ([2b3b14e](https://github.com/dongdong306/hailux/commit/2b3b14e9180ecca2221d652f0df5b4cda21b5eb8))
+
 ## [0.10.1](https://github.com/dongdong306/hailux/compare/v0.10.0...v0.10.1) (2026-10-14)
 
 

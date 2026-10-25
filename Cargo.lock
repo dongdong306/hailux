@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "hailux"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "async-openai",
  "async-stream",
