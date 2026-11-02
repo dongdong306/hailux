@@ -34,6 +34,8 @@ pub struct SessionManager {
     global_yolo: AtomicBool,
     /// Web 全局规划模式（所有 work_dir 共享；新建会话继承）
     global_plan: AtomicBool,
+    /// Web 全局思考强度（所有 work_dir 共享；新建会话继承）
+    global_effort: RwLock<crate::agent::ReasoningEffort>,
 }
 
 impl SessionManager {
@@ -46,6 +48,7 @@ impl SessionManager {
         // 初始 YOLO 取配置默认（对齐 TUI 启动语义），plan 恒为 false
         let global_yolo =
             AtomicBool::new(PermissionMode::from_str(&cfg.permission.mode) == PermissionMode::Yolo);
+        let initial_effort = cfg.reasoning_effort;
         Self {
             sessions: RwLock::new(HashMap::new()),
             cancel_flags: RwLock::new(HashMap::new()),
@@ -56,6 +59,7 @@ impl SessionManager {
             mcp_backends,
             global_yolo,
             global_plan: AtomicBool::new(false),
+            global_effort: RwLock::new(initial_effort),
         }
     }
 
@@ -113,6 +117,7 @@ impl SessionManager {
         // 继承全局模式（Web 切换项目后保持 YOLO/Plan 状态）
         session.set_yolo(self.global_yolo.load(Ordering::Relaxed));
         session.set_plan_mode(self.global_plan.load(Ordering::Relaxed));
+        session.set_reasoning_effort(self.global_effort());
         let perm = session.permission_manager();
         let arc: SessionEntry = Arc::new(tokio::sync::Mutex::new(session));
         let cancel = arc.lock().await.cancel_flag();
@@ -190,6 +195,27 @@ impl SessionManager {
         }
     }
 
+    /// 当前全局思考强度
+    pub fn global_effort(&self) -> crate::agent::ReasoningEffort {
+        *self
+            .global_effort
+            .read()
+            .expect("global_effort lock poisoned")
+    }
+
+    /// 设置全局思考强度。语义对齐 `set_global_plan`：持锁中的会话跳过，
+    /// 由 chat 入口同步兜底（effort 快照在每次请求构建时读取，天然生效）。
+    pub fn set_global_effort(&self, effort: crate::agent::ReasoningEffort) {
+        if let Ok(mut guard) = self.global_effort.write() {
+            *guard = effort;
+        }
+        for entry in self.all_sessions() {
+            if let Ok(mut session) = entry.try_lock() {
+                session.set_reasoning_effort(effort);
+            }
+        }
+    }
+
     /// 取指定目录已构建的会话条目（未构建返回 None；键归一化同 `get_or_create`）
     pub fn get(&self, work_dir: &Path) -> Option<SessionEntry> {
         let key = normalize_key(work_dir);
@@ -249,6 +275,7 @@ mod tests {
             context_window: 8192,
             display: "test/test-model".to_string(),
             supports_vision: false,
+            native_reasoning: false,
         };
         let manager = SessionManager::new(
             resolved,
@@ -275,6 +302,7 @@ mod tests {
             context_window: 8192,
             display: "test/test-model".to_string(),
             supports_vision: false,
+            native_reasoning: false,
         };
         let mut cfg = config::Config::default();
         cfg.permission.mode = "yolo".to_string();

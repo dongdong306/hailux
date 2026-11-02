@@ -277,6 +277,127 @@ pub fn render_model_picker(
     paragraph.render(inner, buf);
 }
 
+/// 渲染思考强度二级菜单（/effort）。三档 + 当前档位标记 + 描述，样式对齐模型选择器
+pub fn render_effort_picker(
+    area: Rect,
+    buf: &mut Buffer,
+    selected_index: usize,
+    current: crate::agent::ReasoningEffort,
+) {
+    let dialog_width = (area.width as usize).min(44);
+    let dialog_height = 10u16;
+    let dialog_x = (area.width as usize).saturating_sub(dialog_width) / 2;
+    let dialog_y = (area.height as usize).saturating_sub(dialog_height as usize) / 2;
+
+    let dialog_area = Rect::new(
+        dialog_x as u16,
+        dialog_y as u16,
+        dialog_width as u16,
+        dialog_height,
+    );
+
+    Clear.render(dialog_area, buf);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " 思考强度 ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center);
+
+    let inner = block.inner(dialog_area);
+    block.render(dialog_area, buf);
+
+    const LEVELS: [(crate::agent::ReasoningEffort, &str, &str); 3] = [
+        (
+            crate::agent::ReasoningEffort::Low,
+            "LOW",
+            "轻量推理，更快响应",
+        ),
+        (
+            crate::agent::ReasoningEffort::High,
+            "HIGH",
+            "均衡模式（默认）",
+        ),
+        (
+            crate::agent::ReasoningEffort::Max,
+            "MAX",
+            "深度推理，更强但更慢",
+        ),
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (i, (effort, label, desc)) in LEVELS.iter().enumerate() {
+        let is_current = *effort == current;
+        let is_selected = i == selected_index;
+        let fill_bg = if is_selected {
+            Color::Cyan
+        } else {
+            Color::Reset
+        };
+
+        let spans = vec![
+            Span::styled("  ".to_string(), Style::default().bg(fill_bg)),
+            Span::styled(
+                if is_current { "● " } else { "  " },
+                if is_selected {
+                    Style::default().fg(Color::Green).bg(Color::Cyan)
+                } else if is_current {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                format!("{label:<5}"),
+                if is_selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_current {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            ),
+            Span::styled(
+                format!("  {desc}"),
+                if is_selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                " ".repeat(inner.width as usize),
+                Style::default().bg(fill_bg),
+            ),
+        ];
+        // 行宽超出时裁掉尾部填充 span 之外的字符（窄终端兜底）
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+    let help_text = "↑↓选择 Enter确认 Esc关闭";
+    let help_pad = (inner.width as usize).saturating_sub(UnicodeWidthStr::width(help_text)) / 2;
+    lines.push(Line::from(Span::styled(
+        format!("{}{}", " ".repeat(help_pad), help_text),
+        Style::default().fg(Color::Gray),
+    )));
+
+    Paragraph::new(lines).render(inner, buf);
+}
+
 /// 渲染添加模型表单，返回光标位置
 pub fn render_add_model(area: Rect, buf: &mut Buffer, form: &AddModelForm) -> (u16, u16) {
     let dialog_width = (area.width as usize).min(58);

@@ -326,7 +326,18 @@ impl ChatSession {
             &resolved.display,
             resolved.max_tokens,
             resolved.supports_vision,
+            resolved.native_reasoning,
         );
+    }
+
+    /// 设置思考强度（下一次 LLM 请求生效；广播入口）
+    pub fn set_reasoning_effort(&mut self, effort: crate::agent::ReasoningEffort) {
+        self.agent.set_reasoning_effort(effort);
+    }
+
+    /// 当前思考强度
+    pub fn reasoning_effort(&self) -> crate::agent::ReasoningEffort {
+        self.agent.reasoning_effort()
     }
 
     // ── 压缩 ─────────────────────────────────────────────
@@ -374,6 +385,7 @@ mod tests {
             context_window: 8192,
             display: "test/test-model".to_string(),
             supports_vision: false,
+            native_reasoning: false,
         };
         let session = ChatSession::new(
             &resolved,

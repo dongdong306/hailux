@@ -212,6 +212,7 @@ impl App {
                                     &resolved.display,
                                     resolved.max_tokens,
                                     resolved.supports_vision,
+                                    resolved.native_reasoning,
                                 );
                                 self.resolved = resolved;
                                 self.state = AppState::Chat;
@@ -237,6 +238,7 @@ impl App {
                                 &resolved.display,
                                 resolved.max_tokens,
                                 resolved.supports_vision,
+                                resolved.native_reasoning,
                             );
                             self.resolved = resolved;
                             self.config = cfg;

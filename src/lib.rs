@@ -89,6 +89,8 @@ pub fn build_agent_base(
         &resolved.display,
         resolved.max_tokens,
         resolved.supports_vision,
+        resolved.native_reasoning,
+        cfg.reasoning_effort,
         pm,
         &work_dir.display().to_string(),
         cfg.retry_config(),
@@ -458,6 +460,7 @@ pub async fn run_tui_setup(work_dir: &Path) -> Result<()> {
         context_window: 131072,
         display: String::new(),
         supports_vision: false,
+        native_reasoning: false,
     };
 
     let (event_tx, event_rx) = tui::event::create_event_channel();

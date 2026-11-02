@@ -17,6 +17,48 @@ use std::sync::Arc;
 /// 共享消息类型：Arc 包裹的 Compatible 消息，使得 Vec 克隆变为 O(n) 指针拷贝。
 pub type SharedMessage = Arc<CompatibleChatCompletionRequestMessage>;
 
+/// 思考强度档位（请求体顶层 `reasoning_effort` 字段）。
+/// DeepSeek V4 / GLM-5.3 官方支持 low/high/max 三档，默认 high；OpenAI 侧
+/// 值域随模型演进（none/minimal/low/medium/high/xhigh/max，model-dependent），
+/// 但 low/high/max 三值均在其中，可直接透传。
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    #[default]
+    High,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    /// 大小写不敏感解析（TUI /effort 参数用）
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "high" => Some(Self::High),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    /// 循环切换：low → high → max → low
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Low => Self::High,
+            Self::High => Self::Max,
+            Self::Max => Self::Low,
+        }
+    }
+}
+
 /// 思考模式配置
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ThinkingConfig {
@@ -317,6 +359,71 @@ pub struct CompatibleChatChoiceStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_effort_serde_roundtrip() {
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"low\"").unwrap(),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
+            ReasoningEffort::Max
+        );
+        assert_eq!(
+            serde_json::to_value(ReasoningEffort::High).unwrap(),
+            serde_json::json!("high")
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_parse_case_insensitive() {
+        assert_eq!(ReasoningEffort::parse("LOW"), Some(ReasoningEffort::Low));
+        assert_eq!(
+            ReasoningEffort::parse(" High "),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(ReasoningEffort::parse("Max"), Some(ReasoningEffort::Max));
+        assert_eq!(ReasoningEffort::parse("medium"), None);
+        assert_eq!(ReasoningEffort::parse(""), None);
+    }
+
+    #[test]
+    fn reasoning_effort_next_cycles() {
+        assert_eq!(ReasoningEffort::Low.next(), ReasoningEffort::High);
+        assert_eq!(ReasoningEffort::High.next(), ReasoningEffort::Max);
+        assert_eq!(ReasoningEffort::Max.next(), ReasoningEffort::Low);
+    }
+
+    #[test]
+    fn reasoning_effort_values_in_openai_domain() {
+        // low/high/max 均为 OpenAI reasoning_effort 的合法值（GPT-5.6+ 全量支持），
+        // 直传即可，无需映射
+        assert_eq!(ReasoningEffort::Low.as_str(), "low");
+        assert_eq!(ReasoningEffort::High.as_str(), "high");
+        assert_eq!(ReasoningEffort::Max.as_str(), "max");
+    }
+
+    #[test]
+    fn request_serializes_reasoning_effort() {
+        // 全链路：builder extra 字段 → 自定义序列化 → 请求 JSON
+        let mut builder = CompatibleCreateChatCompletionRequestArgs::default();
+        builder
+            .model("test-model")
+            .stream(true)
+            .thinking(ThinkingConfig::enabled())
+            .extra(
+                "reasoning_effort",
+                serde_json::json!(ReasoningEffort::Max.as_str()),
+            );
+        let req = builder.build().unwrap();
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json.get("reasoning_effort").and_then(Value::as_str),
+            Some("max")
+        );
+        assert_eq!(json["thinking"]["type"], "enabled");
+    }
 
     #[test]
     fn usage_deepseek_cache_fields() {

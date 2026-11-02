@@ -8,7 +8,7 @@
 //! 是同步阻塞语义（agent task 等待用户答复）。无 UI 的消费者（非交互模式、
 //! Web 断连兜底）必须保证最终回复，否则 agent task 永久挂起。
 
-use crate::agent::models::SharedMessage;
+use crate::agent::models::{ReasoningEffort, SharedMessage};
 use crate::permission::{PermissionReply, PermissionRequest};
 use tokio::sync::{mpsc, oneshot};
 
@@ -56,6 +56,9 @@ pub enum CoreEvent {
         /// 本轮实际使用的模型 display（chat_stream 启动时的快照；
         /// 轮次进行中切换模型不影响事件携带的值）
         model: String,
+        /// 本轮请求使用的思考强度（流式启动时的快照，同 model 语义；
+        /// 供 runtime_meta 落库做后续分析）
+        reasoning_effort: ReasoningEffort,
         status: TaskStatus,
     },
     UsageUpdate {

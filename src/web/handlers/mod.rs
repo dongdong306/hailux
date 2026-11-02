@@ -70,6 +70,7 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         )
         .route("/api/plan-mode", post(misc::set_plan_mode))
         .route("/api/yolo", post(misc::set_yolo))
+        .route("/api/reasoning-effort", post(misc::set_effort))
         .route("/api/mode", get(misc::get_mode))
         .route("/api/commands", get(misc::list_commands))
         .route("/api/stats", get(misc::get_stats))

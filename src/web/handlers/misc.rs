@@ -5,7 +5,9 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::super::protocol::{CommandInfoDto, ModeStatus, PlanModeRequest, YoloRequest};
+use super::super::protocol::{
+    CommandInfoDto, EffortRequest, ModeStatus, PlanModeRequest, YoloRequest,
+};
 use super::super::state::WebServerState;
 use super::{err500, resolve_dir, strip_verbatim};
 
@@ -13,6 +15,7 @@ fn mode_status(state: &WebServerState) -> ModeStatus {
     ModeStatus {
         yolo: state.manager.global_yolo(),
         plan_mode: state.manager.global_plan(),
+        reasoning_effort: state.manager.global_effort(),
     }
 }
 
@@ -53,6 +56,23 @@ pub(super) async fn set_yolo(
     }
     state.manager.set_cfg(cfg);
     state.manager.set_global_yolo(req.enabled);
+    Json(mode_status(&state)).into_response()
+}
+
+/// 设置思考强度（服务器级全局）：写 config.toml + 广播所有已构建会话。
+/// 持锁中的会话跳过，由 chat 入口同步兜底（对齐 set_global_plan）。
+pub(super) async fn set_effort(
+    State(state): State<Arc<WebServerState>>,
+    Json(req): Json<EffortRequest>,
+) -> Response {
+    let _guard = state.config_write_lock.lock().await;
+    let mut cfg = state.manager.cfg();
+    cfg.reasoning_effort = req.effort;
+    if let Err(e) = cfg.save() {
+        return err500(e);
+    }
+    state.manager.set_cfg(cfg);
+    state.manager.set_global_effort(req.effort);
     Json(mode_status(&state)).into_response()
 }
 

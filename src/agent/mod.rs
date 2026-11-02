@@ -19,6 +19,7 @@ pub use agent::build_user_message;
 pub use command_def::{CommandRegistry, parse_slash_input};
 pub use event::{CoreEvent, CoreEventRx, CoreEventTx, create_core_event_channel};
 pub use media::Attachment;
+pub use models::ReasoningEffort;
 pub use skill::SkillTool;
 #[allow(unused_imports)]
 pub use subagent::{SubagentConfig, TaskTool};

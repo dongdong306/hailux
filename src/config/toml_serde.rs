@@ -3,6 +3,7 @@
 use color_eyre::{Result, eyre::Context};
 
 use super::{Config, config_dir, config_file_path};
+use crate::agent::ReasoningEffort;
 
 /// 将配置序列化为 TOML 字符串（不落盘，供 save_config 与单测复用）
 pub(super) fn config_to_toml(config: &Config) -> Result<String> {
@@ -45,6 +46,14 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         "compact_threshold".into(),
         toml::Value::Float(config.compact_threshold as f64),
     );
+
+    // 思考强度：与默认值一致时不写入，保持配置文件最小化
+    if config.reasoning_effort != ReasoningEffort::default() {
+        root.insert(
+            "reasoning_effort".into(),
+            toml::Value::String(config.reasoning_effort.as_str().to_string()),
+        );
+    }
 
     // 重试策略：与默认值一致时不写入，保持配置文件最小化
     if !config.retry.is_default() {

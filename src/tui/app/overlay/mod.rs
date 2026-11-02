@@ -8,6 +8,7 @@ use crate::config::ModelEntry;
 use crate::storage::SessionSummary;
 use crate::tui::event::AppEvent;
 
+mod effort;
 mod mcp;
 mod model;
 mod setup;
@@ -204,6 +205,7 @@ impl App {
             &resolved.display,
             resolved.max_tokens,
             resolved.supports_vision,
+            resolved.native_reasoning,
         );
         self.resolved = resolved;
         self.config.main_model = entry.display.clone();

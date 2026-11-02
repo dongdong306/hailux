@@ -236,6 +236,7 @@ impl App {
                             &resolved.display,
                             resolved.max_tokens,
                             resolved.supports_vision,
+                            resolved.native_reasoning,
                         );
                         self.resolved = resolved;
                         self.config.main_model = display;

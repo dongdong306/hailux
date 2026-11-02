@@ -45,24 +45,31 @@ impl SharedTaskCtx {
             })?;
             guard.clone()
         };
-        let (agent_config, agent_model, agent_display, agent_max_tokens, agent_supports_vision) =
-            app_config
-                .resolve(model_selector)
-                .map(|resolved| {
-                    (
-                        resolved.config,
-                        resolved.model_id,
-                        resolved.display,
-                        resolved.max_tokens,
-                        resolved.supports_vision,
-                    )
-                })
-                .map_err(|e| ToolExecuteError {
-                    message: format!(
-                        "Failed to resolve model \"{}\" for subagent \"{}\": {e}",
-                        model_selector, config.name
-                    ),
-                })?;
+        let (
+            agent_config,
+            agent_model,
+            agent_display,
+            agent_max_tokens,
+            agent_supports_vision,
+            agent_native_reasoning,
+        ) = app_config
+            .resolve(model_selector)
+            .map(|resolved| {
+                (
+                    resolved.config,
+                    resolved.model_id,
+                    resolved.display,
+                    resolved.max_tokens,
+                    resolved.supports_vision,
+                    resolved.native_reasoning,
+                )
+            })
+            .map_err(|e| ToolExecuteError {
+                message: format!(
+                    "Failed to resolve model \"{}\" for subagent \"{}\": {e}",
+                    model_selector, config.name
+                ),
+            })?;
 
         let mut agent = Agent::new(
             agent_config,
@@ -70,6 +77,8 @@ impl SharedTaskCtx {
             &agent_display,
             agent_max_tokens,
             agent_supports_vision,
+            agent_native_reasoning,
+            app_config.reasoning_effort,
             self.permission.clone(),
             &self.work_dir,
             app_config.retry_config(),
