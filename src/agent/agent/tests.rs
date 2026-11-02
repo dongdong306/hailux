@@ -31,6 +31,8 @@ fn make_test_agent() -> Agent {
         "test/test-model",
         4096,
         false,
+        true,
+        crate::agent::models::ReasoningEffort::default(),
         pm,
         ".",
         RetryConfig::default(),
@@ -343,6 +345,10 @@ fn tool_call(id: &str, name: &str) -> ChatCompletionMessageToolCalls {
 }
 
 fn test_stream_state(supports_vision: bool) -> AgentStreamState {
+    test_stream_state_with(supports_vision, true)
+}
+
+fn test_stream_state_with(supports_vision: bool, native_reasoning: bool) -> AgentStreamState {
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(AttachmentTool));
     AgentStreamState {
@@ -353,6 +359,8 @@ fn test_stream_state(supports_vision: bool) -> AgentStreamState {
         model_display: "test/test-model".to_string(),
         max_tokens: 4096,
         supports_vision,
+        native_reasoning,
+        reasoning_effort: crate::agent::models::ReasoningEffort::default(),
         plan_mode: false,
         permission: crate::permission::PermissionManager::new(
             crate::permission::PermissionMode::Yolo,
@@ -361,6 +369,30 @@ fn test_stream_state(supports_vision: bool) -> AgentStreamState {
         work_dir: ".".to_string(),
         retry: RetryConfig::default(),
     }
+}
+
+#[test]
+fn build_request_native_sends_thinking_and_raw_effort() {
+    let mut state = test_stream_state_with(false, true);
+    state.reasoning_effort = crate::agent::models::ReasoningEffort::Max;
+    let req = state.build_request().unwrap().build().unwrap();
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["thinking"]["type"], "enabled");
+    assert_eq!(json["reasoning_effort"], "max");
+}
+
+#[test]
+fn build_request_openai_passthrough_effort_and_drops_thinking() {
+    let mut state = test_stream_state_with(false, false);
+    state.reasoning_effort = crate::agent::models::ReasoningEffort::Max;
+    let req = state.build_request().unwrap().build().unwrap();
+    let json = serde_json::to_value(&req).unwrap();
+    // thinking 是 DeepSeek/GLM 私有约定，OpenAI 兼容链路不发送；
+    // reasoning_effort 三档直传（low/high/max 均在 OpenAI 值域内）
+    assert!(json.get("thinking").is_none());
+    assert_eq!(json["reasoning_effort"], "max");
+    // stream_options 对所有 provider 通用
+    assert_eq!(json["stream_options"]["include_usage"], true);
 }
 
 #[tokio::test]

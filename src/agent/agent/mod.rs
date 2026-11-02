@@ -18,7 +18,7 @@ use super::event::{CompactUsage, CoreEvent, CoreEventTx, TaskStatus};
 use super::media::Attachment;
 use super::models::{
     CompatibleChatCompletionRequestMessage, CompatibleCreateChatCompletionRequestArgs,
-    CompatibleCreateChatCompletionStreamResponse, SharedMessage,
+    CompatibleCreateChatCompletionStreamResponse, ReasoningEffort, SharedMessage,
 };
 use super::retry::{self, RetryConfig};
 use super::tools::ToolRegistry;
@@ -50,6 +50,11 @@ pub struct Agent {
     max_tokens: u32,
     /// 当前模型是否支持视觉（图片）输入；不支持时附件在请求组装层降级为提示文本
     supports_vision: bool,
+    /// 是否为 DeepSeek/GLM 原生推理接口（决定是否发送私有 `thinking`
+    /// 开关；切换模型时随 resolved 更新）
+    native_reasoning: bool,
+    /// 思考强度（请求体顶层 reasoning_effort；跨模型切换保留用户偏好）
+    reasoning_effort: ReasoningEffort,
     plan_mode: bool,
     cancel: Arc<AtomicBool>,
     permission: crate::permission::PermissionManager,
@@ -67,6 +72,8 @@ impl Agent {
         model_display: &str,
         max_tokens: u32,
         supports_vision: bool,
+        native_reasoning: bool,
+        reasoning_effort: ReasoningEffort,
         permission: crate::permission::PermissionManager,
         work_dir: &str,
         retry: RetryConfig,
@@ -79,6 +86,8 @@ impl Agent {
             model_display: model_display.to_string(),
             max_tokens,
             supports_vision,
+            native_reasoning,
+            reasoning_effort,
             plan_mode: false,
             cancel: Arc::new(AtomicBool::new(false)),
             permission,
@@ -120,12 +129,24 @@ impl Agent {
         model_display: &str,
         max_tokens: u32,
         supports_vision: bool,
+        native_reasoning: bool,
     ) {
         self.client = Client::with_config(config);
         self.model = model.to_string();
         self.model_display = model_display.to_string();
         self.max_tokens = max_tokens;
         self.supports_vision = supports_vision;
+        self.native_reasoning = native_reasoning;
+    }
+
+    /// 设置思考强度（下一次 LLM 请求生效）
+    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.reasoning_effort = effort;
+    }
+
+    /// 当前思考强度
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
+        self.reasoning_effort
     }
 
     pub fn permission(&self) -> &crate::permission::PermissionManager {
@@ -205,6 +226,8 @@ impl Agent {
             model_display: self.model_display.clone(),
             max_tokens: self.max_tokens,
             supports_vision: self.supports_vision,
+            native_reasoning: self.native_reasoning,
+            reasoning_effort: self.reasoning_effort,
             plan_mode: self.plan_mode,
             permission,
             work_dir,
@@ -223,6 +246,7 @@ impl Agent {
                     &tx_clone,
                     Vec::new(),
                     &state.model_display,
+                    state.reasoning_effort,
                     TaskStatus::Error,
                 );
             }

@@ -79,6 +79,10 @@ pub(crate) enum AppState {
         models: Vec<ModelEntry>,
         selected_index: usize,
     },
+    /// 思考强度二级菜单（/effort 无参数时打开）
+    EffortPicker {
+        selected_index: usize,
+    },
     AddModel(AddModelForm),
     Setup(SetupForm),
     Skills {

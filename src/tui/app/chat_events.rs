@@ -126,13 +126,14 @@ impl App {
                 messages: final_messages,
                 usages,
                 model: turn_model,
+                reasoning_effort,
                 status,
             } => {
                 // 计算最终耗时
                 self.finalize_thinking_ms();
                 self.timing.finish(Instant::now());
-                // 将耗时和模型名写入 runtime_meta（含 status）；
-                // model 为流式快照值，轮次中途切换模型不影响
+                // 将耗时和模型名写入 runtime_meta（含 status、思考强度，供后续分析）；
+                // model / reasoning_effort 均为流式快照值，轮次中途切换不影响
                 if let Some(session_id) = &self.current_session_id
                     && let Some(total_ms) = self.timing.last_total_ms
                 {
@@ -145,6 +146,7 @@ impl App {
                         "total_ms": total_ms,
                         "model": turn_model,
                         "status": status_str,
+                        "reasoning_effort": reasoning_effort.as_str(),
                     })
                     .to_string();
                     if let Err(e) = self
@@ -498,7 +500,7 @@ impl App {
 
     pub(super) async fn handle_command(&mut self, matched: command::MatchedCommand) -> Result<()> {
         match matched {
-            command::MatchedCommand::Ui(cmd) => {
+            command::MatchedCommand::Ui { cmd, args } => {
                 self.input.clear();
                 // 清空输入框的同时清掉 pending 状态，避免残留附件附着到
                 // 后续无关消息（元素已随 clear 一起消失）
@@ -557,6 +559,9 @@ impl App {
                     command::Command::Compact => {
                         self.compact_conversation(None).await?;
                     }
+                    command::Command::Effort => {
+                        self.handle_effort_command(&args);
+                    }
                     command::Command::Exit => {
                         self.should_quit = true;
                     }
@@ -590,6 +595,56 @@ impl App {
     pub(super) fn toggle_plan_mode(&mut self) {
         self.plan_mode = !self.plan_mode;
         self.agent.set_plan_mode(self.plan_mode);
+    }
+
+    /// /effort 命令：无参数打开二级菜单，`low|high|max` 直接设置（大小写不敏感）。
+    /// 生效范围对齐 YOLO：当前 Agent 即时生效 + 持久化 config.toml + 同步共享配置
+    /// （subagent 新建时跟随），下一次 LLM 请求生效。
+    pub(super) fn handle_effort_command(&mut self, args: &str) {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            self.open_effort_picker();
+            return;
+        }
+
+        match crate::agent::models::ReasoningEffort::parse(trimmed) {
+            Some(effort) => self.apply_effort(effort),
+            None => {
+                self.messages.push(Message::Agent(format!(
+                    "无效的思考强度: {trimmed}，可选值 low / high / max"
+                )));
+                self.render.dirty = true;
+            }
+        }
+    }
+
+    /// 打开思考强度二级菜单（默认选中当前档位）
+    pub(super) fn open_effort_picker(&mut self) {
+        let selected_index = match self.agent.reasoning_effort() {
+            crate::agent::models::ReasoningEffort::Low => 0,
+            crate::agent::models::ReasoningEffort::High => 1,
+            crate::agent::models::ReasoningEffort::Max => 2,
+        };
+        self.state = AppState::EffortPicker { selected_index };
+    }
+
+    /// 应用思考强度（Agent 即时生效 + config 持久化 + 共享配置同步 + 回显）
+    pub(super) fn apply_effort(&mut self, effort: crate::agent::models::ReasoningEffort) {
+        self.agent.set_reasoning_effort(effort);
+        self.config.reasoning_effort = effort;
+        if let Err(e) = self.config.save() {
+            self.messages
+                .push(Message::Agent(format!("保存思考强度配置失败: {e}")));
+        }
+        // 同步到共享配置（subagent 新建时可见）
+        if let Ok(mut shared) = self.shared.config.lock() {
+            shared.reasoning_effort = effort;
+        }
+        self.messages.push(Message::Agent(format!(
+            "Thinking effort: {}",
+            effort.as_str().to_uppercase()
+        )));
+        self.render.dirty = true;
     }
 
     /// 从思考阶段过渡到输出阶段时，冻结当前思考块的耗时。

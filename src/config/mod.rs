@@ -18,6 +18,8 @@ pub use types::{
     CustomModelEntry, ModelEntry, PermissionConfig, ProviderEntry, RemoveError, RetryConfigToml,
 };
 
+use crate::agent::ReasoningEffort;
+
 const CONFIG_DIR_NAME: &str = ".hailux";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -41,6 +43,9 @@ pub struct Config {
     /// LLM 请求瞬态错误重试策略
     #[serde(default)]
     pub retry: RetryConfigToml,
+    /// 思考强度（请求体顶层 reasoning_effort，low/high/max；默认 high）
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl Default for Config {
@@ -51,6 +56,7 @@ impl Default for Config {
             compact_threshold: default_compact_threshold(),
             permission: PermissionConfig::default(),
             retry: RetryConfigToml::default(),
+            reasoning_effort: ReasoningEffort::default(),
         }
     }
 }
@@ -203,6 +209,12 @@ impl Config {
             .or_else(|| providers::predefined_vision_flag(provider_id, model_id))
             .unwrap_or(false);
 
+        // 推理接口分流：预定义 provider 按声明（DeepSeek/GLM 原生，发送私有
+        // thinking 开关），自定义 provider 一律按 OpenAI 标准接口（不带 thinking）
+        let native_reasoning = providers::find_provider_def(provider_id)
+            .map(|d| d.native_reasoning)
+            .unwrap_or(false);
+
         let config = OpenAIConfig::new()
             .with_api_key(&entry.api_key)
             .with_api_base(&base_url);
@@ -214,6 +226,7 @@ impl Config {
             context_window,
             display: format!("{}/{}", provider_id, model_id),
             supports_vision,
+            native_reasoning,
         })
     }
 
@@ -494,6 +507,9 @@ pub struct ResolvedModel {
     pub display: String,
     /// 模型是否支持视觉（图片）输入；不支持时附件在请求组装层降级为提示文本
     pub supports_vision: bool,
+    /// 是否为 DeepSeek/GLM 原生推理接口（决定是否发送私有 `thinking`
+    /// 开关；reasoning_effort 三档值两边生态通用，恒直传）
+    pub native_reasoning: bool,
 }
 
 // ── 配置文件 I/O ─────────────────────────────────────────────

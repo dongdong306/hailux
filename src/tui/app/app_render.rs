@@ -8,7 +8,7 @@ use crate::tui::ask_user;
 use crate::tui::chat_widget::ChatWidget;
 use crate::tui::history_cell::{self, HistoryCell, SessionHeaderCell, TooltipCell};
 use crate::tui::mcp_viewer::{self, render_mcp_viewer};
-use crate::tui::model_picker::{render_add_model, render_model_picker};
+use crate::tui::model_picker::{render_add_model, render_effort_picker, render_model_picker};
 use crate::tui::session_picker::SessionPicker;
 use crate::tui::setup::render_setup;
 use crate::tui::skills_viewer::{self, render_skills_viewer};
@@ -149,6 +149,7 @@ impl App {
             AppState::Chat => !self.is_processing,
             AppState::SessionPicker { .. }
             | AppState::ModelPicker { .. }
+            | AppState::EffortPicker { .. }
             | AppState::Skills { .. }
             | AppState::SkillDetail { .. }
             | AppState::Mcp { .. }
@@ -209,6 +210,15 @@ impl App {
                 models,
                 *selected_index,
                 &self.resolved.display,
+            );
+        }
+
+        if let AppState::EffortPicker { selected_index } = &self.state {
+            render_effort_picker(
+                area,
+                frame.buffer_mut(),
+                *selected_index,
+                self.agent.reasoning_effort(),
             );
         }
 

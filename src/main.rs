@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
                     context_window: 131072,
                     display: String::new(),
                     supports_vision: false,
+                    native_reasoning: false,
                 }
             } else {
                 cfg.resolve_default()?

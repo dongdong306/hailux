@@ -43,12 +43,16 @@ export interface ChatItem {
   images?: ChatAttachment[];
 }
 
-/** 全局模式状态（GET /api/mode 及 yolo/plan-mode 设置响应体）。
+/** 全局模式状态（GET /api/mode 及 yolo/plan-mode/reasoning-effort 设置响应体）。
  *  后端契约：src/web/protocol.rs 的 `ModeStatus` */
 export interface ModeStatus {
   yolo: boolean;
   plan_mode: boolean;
+  reasoning_effort: ReasoningEffort;
 }
+
+/** 思考强度档位（请求体顶层 reasoning_effort；后端契约 ReasoningEffort 枚举） */
+export type ReasoningEffort = "low" | "high" | "max";
 
 /** 技能目录内文件条目 */
 export interface SkillFileEntry {
@@ -147,6 +151,8 @@ export interface AppState {
   // 模式
   planMode: boolean;
   yolo: boolean;
+  /** 思考强度（服务器级全局，syncMode 对账） */
+  effort: ReasoningEffort;
   // 输入历史（光标在首行 ↑ 上一条）
   inputHistory: string[];
   // 弹窗
@@ -238,7 +244,9 @@ export interface AppState {
   replyAsk: (answer: string) => Promise<void>;
   setPlanMode: (on: boolean) => Promise<void>;
   setYolo: (on: boolean) => Promise<void>;
-  /** 从服务器对账全局模式（yolo / planMode），失败静默（下次时机重试） */
+  /** 设置思考强度（POST /api/reasoning-effort，失败回滚 + syncMode 对账） */
+  setEffort: (effort: ReasoningEffort) => Promise<void>;
+  /** 从服务器对账全局模式（yolo / planMode / effort），失败静默（下次时机重试） */
   syncMode: () => Promise<void>;
   switchModel: (selector: string) => Promise<void>;
   /** show=true 打开添加模型弹窗；preset 为预填项（provider / 模型 id） */

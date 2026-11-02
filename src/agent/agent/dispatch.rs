@@ -141,6 +141,7 @@ pub(super) async fn finalize_cancelled(
         event_tx,
         usages,
         &state.model_display,
+        state.reasoning_effort,
         TaskStatus::Interrupted,
     );
     Ok(())

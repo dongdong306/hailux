@@ -24,6 +24,49 @@ import { McpManager } from "./components/mcp-manager";
 import { StatsView } from "./components/stats-view";
 import { cn, fmtTokens } from "./lib/utils";
 
+/** 上下文占用环形指示（16px）：底环 muted + 进度环 accent，中心不留字（数值在旁边） */
+function ContextRing({ pct }: { pct: number | null }) {
+  const r = 6;
+  const c = 2 * Math.PI * r;
+  const ratio = pct === null ? 0 : Math.min(pct, 1);
+  const color =
+    pct === null
+      ? "text-muted-foreground/40"
+      : ratio >= 0.9
+        ? "text-destructive"
+        : ratio >= 0.8
+          ? "text-warning"
+          : "text-meter-cache";
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={cn("size-4 shrink-0 -rotate-90", color)}
+      aria-hidden="true"
+    >
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        strokeWidth="2.5"
+        className="stroke-muted-foreground/20"
+      />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        stroke="currentColor"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - ratio)}
+        style={{ transition: "stroke-dashoffset 0.6s ease" }}
+      />
+    </svg>
+  );
+}
+
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const initWorkDir = useApp((s) => s.initWorkDir);
@@ -32,6 +75,13 @@ export default function App() {
   const promptTokens = useApp((s) => s.promptTokens);
   const completionTokens = useApp((s) => s.completionTokens);
   const cachedTokens = useApp((s) => s.cachedTokens);
+  // 上下文占用（最后请求的输入+输出 ≈ 当前上下文大小；右上角环形指示用）
+  const contextPromptTokens = useApp((s) => s.contextPromptTokens);
+  const contextCompletionTokens = useApp((s) => s.contextCompletionTokens);
+  const contextWindow = useApp((s) => s.contextWindow);
+  const contextUsed = contextPromptTokens + contextCompletionTokens;
+  const contextPct =
+    contextWindow > 0 ? Math.min(contextUsed / contextWindow, 1) : null;
   // 提问 requestId 变化时通过 key 强制重挂载 AskUserDialog，内部状态零残留
   const askRequestId = useApp((s) => s.askUser?.requestId);
   // 本次对话累计的缓存命中率
@@ -114,7 +164,7 @@ export default function App() {
               hailux
             </span>
 
-            {/* token 用量（右上角）——本会话累计；图标用计量三色，数值保持灰阶 */}
+            {/* 右上角：token 用量 + 上下文占用环——本会话累计；图标用计量三色，数值保持灰阶 */}
             <span className="ml-auto flex items-center gap-2.5 pr-1 text-xs tabular-nums text-muted-foreground/60">
               <span
                 className="flex items-center gap-0.5"
@@ -139,6 +189,12 @@ export default function App() {
               >
                 <ArrowDownToLine className="size-3 text-meter-out/80" />
                 {fmtTokens(completionTokens)}
+              </span>
+              <span
+                className="flex cursor-default items-center"
+                title={`上下文占用 ${fmtTokens(contextUsed)}${contextWindow > 0 ? ` / ${fmtTokens(contextWindow)} · ${Math.round((contextPct ?? 0) * 100)}%` : ""}`}
+              >
+                <ContextRing pct={contextPct} />
               </span>
             </span>
           </div>

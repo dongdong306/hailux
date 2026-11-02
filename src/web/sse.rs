@@ -110,11 +110,12 @@ pub async fn chat_handler(
         let mut session = session_arc.lock().await;
         session.bind_event_channel(core_tx.clone());
 
-        // 模式对账：YOLO/Plan 为服务器级全局状态，广播时持锁中的会话会被
-        // 跳过（见 SessionManager::set_global_plan），每次请求入口同步兜底，
-        // 同时覆盖 invalidate 重建、历史漂移等场景。
+        // 模式对账：YOLO/Plan/思考强度为服务器级全局状态，广播时持锁中的
+        // 会话会被跳过（见 SessionManager::set_global_plan），每次请求入口
+        // 同步兜底，同时覆盖 invalidate 重建、历史漂移等场景。
         session.set_yolo(state.manager.global_yolo());
         session.set_plan_mode(state.manager.global_plan());
+        session.set_reasoning_effort(state.manager.global_effort());
 
         // ── prompt 型斜杠命令展开（/init、自定义命令）────────
         // UI 型命令（/compact 等）由前端拦截，不经过此接口。
@@ -281,17 +282,17 @@ pub async fn chat_handler(
                     guard.track_ask(request_id.clone(), response_tx);
                     yield sse_event(&ServerEvent::AskUser { request_id, questions });
                 }
-                CoreEvent::AgentComplete { messages, status, model, .. } => {
+                CoreEvent::AgentComplete { messages, status, model, reasoning_effort, .. } => {
                     // 同步 in-memory 上下文（对齐 TUI AgentComplete 处理）
                     if !messages.is_empty() {
                         session.sync_messages(messages);
                     }
                     let total_ms = started.elapsed().as_millis() as u64;
-                    // runtime_meta 用事件携带的快照模型（轮次中途切换不影响）
+                    // runtime_meta 用事件携带的快照模型/挡位（轮次中途切换不影响）
                     let _ = session.storage()
                         .update_last_assistant_runtime_meta(
                             &session_id,
-                            &runtime_meta_json(total_ms, &model, protocol::status_str(&status)),
+                            &runtime_meta_json(total_ms, &model, reasoning_effort.as_str(), protocol::status_str(&status)),
                         )
                         .await;
                     let _ = session.storage().touch_session(&session_id).await;
@@ -573,10 +574,11 @@ async fn persist_user_message(
         .map_err(|e| e.to_string())
 }
 
-fn runtime_meta_json(total_ms: u64, model: &str, status: &str) -> String {
+fn runtime_meta_json(total_ms: u64, model: &str, reasoning_effort: &str, status: &str) -> String {
     serde_json::json!({
         "total_ms": total_ms,
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "status": status,
     })
     .to_string()

@@ -178,12 +178,19 @@ pub struct YoloRequest {
     pub enabled: bool,
 }
 
-/// 全局模式状态（`GET /api/mode` 及 yolo/plan-mode 设置响应体）。
-/// 前端契约：`web/src/store/app-store.ts` 的 `ModeStatus` 接口。
+/// 全局模式状态（`GET /api/mode` 及 yolo/plan-mode/reasoning-effort 设置响应体）。
+/// 前端契约：`web/src/runtime/types.ts` 的 `ModeStatus` 接口。
 #[derive(Debug, Serialize)]
 pub struct ModeStatus {
     pub yolo: bool,
     pub plan_mode: bool,
+    pub reasoning_effort: crate::agent::ReasoningEffort,
+}
+
+/// 设置思考强度（POST /api/reasoning-effort）
+#[derive(Debug, Deserialize)]
+pub struct EffortRequest {
+    pub effort: crate::agent::ReasoningEffort,
 }
 
 #[derive(Debug, Deserialize)]

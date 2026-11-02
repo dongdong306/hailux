@@ -485,6 +485,55 @@ fn retry_default_detection_controls_save_section() {
     assert!(!cfg.retry.is_default(), "非默认值应写入 [retry]");
 }
 
+// ── 思考强度 ─────────────────────────────────────────
+
+#[test]
+fn native_reasoning_predefined_true_custom_false() {
+    let cfg = test_config();
+    // 预定义 DeepSeek/GLM：原生推理接口
+    let resolved = cfg.resolve("deepseek/deepseek-v4-pro").unwrap();
+    assert!(resolved.native_reasoning);
+    // 自定义 provider：按 OpenAI 标准接口（不带 thinking、reasoning_effort 直传）
+    let resolved = cfg.resolve("ollama/qwen3").unwrap();
+    assert!(!resolved.native_reasoning);
+}
+
+#[test]
+fn reasoning_effort_default_and_toml_minimization() {
+    // 默认 high：不写入序列化结果（保持文件最小化）
+    let cfg = test_config();
+    assert_eq!(cfg.reasoning_effort, crate::agent::ReasoningEffort::High);
+    let toml = config_to_toml(&cfg).unwrap();
+    assert!(!toml.contains("reasoning_effort"));
+
+    // 非默认值写入
+    let mut cfg = test_config();
+    cfg.reasoning_effort = crate::agent::ReasoningEffort::Max;
+    let toml = config_to_toml(&cfg).unwrap();
+    assert!(toml.contains("reasoning_effort = \"max\""));
+}
+
+#[test]
+fn reasoning_effort_toml_roundtrip() {
+    // root 键须位于表头之前
+    let content = r#"
+reasoning_effort = "low"
+
+[providers.deepseek]
+api_key = "sk-test"
+"#;
+    let cfg: Config = toml::from_str(content).unwrap();
+    assert_eq!(cfg.reasoning_effort, crate::agent::ReasoningEffort::Low);
+
+    // 缺省字段回退默认 high
+    let cfg: Config = toml::from_str(
+        r#"[providers.deepseek]
+api_key = "sk-test""#,
+    )
+    .unwrap();
+    assert_eq!(cfg.reasoning_effort, crate::agent::ReasoningEffort::High);
+}
+
 // 引用默认常量，防止未使用告警（它们在 types/providers 中被引用）
 #[test]
 fn default_constants() {

@@ -540,7 +540,8 @@ impl App {
             if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
                 eprintln!("[warn] repair_orphaned_tool_calls: {e}");
             }
-            // 写入 interrupted runtime_meta
+            // 写入 interrupted runtime_meta（思考强度取当前 Agent 值：
+            // 中断时流式快照已不可得，正常轮次的值由 AgentComplete 路径写入）
             let total_ms = self
                 .timing
                 .effective_elapsed_ms(Instant::now())
@@ -549,6 +550,7 @@ impl App {
                 "total_ms": total_ms,
                 "model": self.resolved.display,
                 "status": "interrupted",
+                "reasoning_effort": self.agent.reasoning_effort().as_str(),
             })
             .to_string();
             if let Err(e) = self
@@ -674,6 +676,9 @@ impl App {
             }
             AppState::ModelPicker { .. } => {
                 self.handle_model_picker_event(event)?;
+            }
+            AppState::EffortPicker { .. } => {
+                self.handle_effort_picker_event(event)?;
             }
             AppState::AddModel(_) => {
                 self.handle_add_model_event(event)?;

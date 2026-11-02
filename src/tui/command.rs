@@ -15,6 +15,7 @@ pub enum Command {
     Plan,
     Models,
     Compact,
+    Effort,
     Skills,
     Mcp,
     Tasks,
@@ -33,7 +34,7 @@ pub struct CommandEntry {
 
 /// 匹配结果：UI-action 命令 vs prompt 命令。
 pub enum MatchedCommand {
-    Ui(Command),
+    Ui { cmd: Command, args: String },
     Prompt { name: String, args: String },
 }
 
@@ -57,6 +58,10 @@ static SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "compact",
         description: "压缩上下文（总结历史对话）",
+    },
+    SlashCommand {
+        name: "effort",
+        description: "设置思考强度（菜单选择；/effort low|high|max 直接设置）",
     },
     SlashCommand {
         name: "skills",
@@ -91,6 +96,7 @@ fn match_ui_command(name: &str) -> Option<Command> {
         "plan" => Some(Command::Plan),
         "models" => Some(Command::Models),
         "compact" => Some(Command::Compact),
+        "effort" => Some(Command::Effort),
         "skills" => Some(Command::Skills),
         "mcp" => Some(Command::Mcp),
         "tasks" => Some(Command::Tasks),
@@ -106,7 +112,7 @@ pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedC
     let (name, args) = parse_slash_input(input)?;
 
     if let Some(cmd) = match_ui_command(&name) {
-        return Some(MatchedCommand::Ui(cmd));
+        return Some(MatchedCommand::Ui { cmd, args });
     }
 
     if registry.find(&name).is_some() {
@@ -119,8 +125,8 @@ pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedC
 /// UI 命令与内建 prompt 命令的统一展示优先级。
 /// 不在此列表中的自定义命令按字母排序追加在末尾。
 const COMMAND_PRIORITY: &[&str] = &[
-    "new", "sessions", "init", "plan", "models", "compact", "skills", "mcp", "tasks", "stats",
-    "yolo", "exit",
+    "new", "sessions", "init", "plan", "models", "compact", "effort", "skills", "mcp", "tasks",
+    "stats", "yolo", "exit",
 ];
 
 /// 构建所有可用命令的展示列表（UI 命令 + prompt 命令按优先级混合排序）。
@@ -198,7 +204,9 @@ mod tests {
     fn match_ui_command_exit() {
         let reg = empty_registry();
         match match_command("/exit", &reg).unwrap() {
-            MatchedCommand::Ui(Command::Exit) => {}
+            MatchedCommand::Ui {
+                cmd: Command::Exit, ..
+            } => {}
             _ => panic!("expected Exit"),
         }
     }
@@ -207,8 +215,23 @@ mod tests {
     fn match_compact_command() {
         let reg = empty_registry();
         match match_command("/compact", &reg).unwrap() {
-            MatchedCommand::Ui(Command::Compact) => {}
+            MatchedCommand::Ui {
+                cmd: Command::Compact,
+                ..
+            } => {}
             _ => panic!("expected Compact"),
+        }
+    }
+
+    #[test]
+    fn effort_command_carries_args() {
+        let reg = empty_registry();
+        match match_command("/effort low", &reg).unwrap() {
+            MatchedCommand::Ui {
+                cmd: Command::Effort,
+                args,
+            } => assert_eq!(args, "low"),
+            _ => panic!("expected Effort"),
         }
     }
 
@@ -224,11 +247,17 @@ mod tests {
         let reg = empty_registry();
         assert!(matches!(
             match_command("/quit", &reg),
-            Some(MatchedCommand::Ui(Command::Exit))
+            Some(MatchedCommand::Ui {
+                cmd: Command::Exit,
+                ..
+            })
         ));
         assert!(matches!(
             match_command("/q", &reg),
-            Some(MatchedCommand::Ui(Command::Exit))
+            Some(MatchedCommand::Ui {
+                cmd: Command::Exit,
+                ..
+            })
         ));
     }
 

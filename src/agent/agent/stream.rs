@@ -21,7 +21,7 @@ use crate::agent::event::{CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
 use crate::agent::models::{
     CompatibleChatCompletionRequestAssistantMessage, CompatibleChatCompletionRequestMessage,
     CompatibleCreateChatCompletionRequestArgs, CompatibleCreateChatCompletionStreamResponse,
-    SharedMessage, ThinkingConfig,
+    ReasoningEffort, SharedMessage, ThinkingConfig,
 };
 use crate::agent::retry::{self, RetryConfig};
 use crate::agent::tools::ToolRegistry;
@@ -52,6 +52,10 @@ pub(super) struct AgentStreamState {
     pub(super) max_tokens: u32,
     /// 当前模型是否支持视觉输入（决定图片附件是否降级）
     pub(super) supports_vision: bool,
+    /// 是否为 DeepSeek/GLM 原生推理接口（决定是否发送私有 `thinking` 开关）
+    pub(super) native_reasoning: bool,
+    /// 思考强度（请求体顶层 reasoning_effort）
+    pub(super) reasoning_effort: ReasoningEffort,
     pub(super) plan_mode: bool,
     pub(super) permission: PermissionManager,
     pub(super) work_dir: String,
@@ -60,7 +64,7 @@ pub(super) struct AgentStreamState {
 }
 
 impl AgentStreamState {
-    fn build_request(
+    pub(super) fn build_request(
         &self,
     ) -> Result<CompatibleCreateChatCompletionRequestArgs, Box<dyn Error + Send + Sync>> {
         let tools = self.tool_registry.to_chat_tools_filtered(self.plan_mode);
@@ -107,8 +111,18 @@ impl AgentStreamState {
                 ToolChoiceOptions::Auto,
             ))
             .messages(messages)
-            .thinking(ThinkingConfig::enabled())
+            // stream_options.include_usage 是 OpenAI 标准，所有 provider 通用
             .extra("stream_options", serde_json::json!({"include_usage": true}));
+        // reasoning_effort：low/high/max 均在 OpenAI 值域内（GPT-5.6+ 全量支持，
+        // DeepSeek/GLM 原生三档），直传即可；仅 `thinking` 是 DeepSeek/GLM 私有
+        // 约定，OpenAI 兼容链路不发送，避免严格校验的服务端拒绝未知字段。
+        if self.native_reasoning {
+            builder.thinking(ThinkingConfig::enabled());
+        }
+        builder.extra(
+            "reasoning_effort",
+            serde_json::json!(self.reasoning_effort.as_str()),
+        );
         Ok(builder)
     }
 }
@@ -137,6 +151,7 @@ pub(super) fn finalize_messages(
     event_tx: &CoreEventTx,
     usages: Vec<MessageUsage>,
     model: &str,
+    reasoning_effort: ReasoningEffort,
     status: TaskStatus,
 ) {
     let needs_assistant = !matches!(
@@ -164,6 +179,7 @@ pub(super) fn finalize_messages(
         messages: final_messages,
         usages,
         model: model.to_string(),
+        reasoning_effort,
         status,
     });
 }
@@ -470,6 +486,7 @@ pub(super) async fn run_stream_loop(
         messages: final_messages,
         usages: all_usages,
         model: state.model_display.clone(),
+        reasoning_effort: state.reasoning_effort,
         status: TaskStatus::Completed,
     });
     Ok(())

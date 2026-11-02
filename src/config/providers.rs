@@ -9,6 +9,10 @@ pub(crate) struct ProviderDef {
     pub(crate) name: &'static str,
     pub(crate) base_url: &'static str,
     pub(crate) models: &'static [ModelDef],
+    /// 是否为 DeepSeek/GLM 原生推理接口：true 发送私有 `thinking` 开关；
+    /// false（自定义 OpenAI 兼容 provider）按标准 OpenAI 接口仅发送
+    /// reasoning_effort（low/high/max 直传，均在 OpenAI 值域内）。
+    pub(crate) native_reasoning: bool,
 }
 
 pub(crate) struct ModelDef {
@@ -27,6 +31,7 @@ pub(crate) const PROVIDERS: &[ProviderDef] = &[
         id: "deepseek",
         name: "DeepSeek",
         base_url: "https://api.deepseek.com",
+        native_reasoning: true,
         models: &[
             ModelDef {
                 id: "deepseek-v4-flash",
@@ -55,6 +60,7 @@ pub(crate) const PROVIDERS: &[ProviderDef] = &[
         id: "zhipu-coding-plan",
         name: "Zhipu AI Coding Plan",
         base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
+        native_reasoning: true,
         models: &[
             ModelDef {
                 id: "GLM-5.3",

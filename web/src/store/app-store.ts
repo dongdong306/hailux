@@ -50,6 +50,7 @@ export const useApp = create<AppState>((set, get) => ({
   contextWindow: 0,
   planMode: false,
   yolo: false,
+  effort: "high",
   inputHistory: [],
   permission: null,
   askUser: null,
@@ -670,9 +671,27 @@ export const useApp = create<AppState>((set, get) => ({
   async syncMode() {
     try {
       const mode = await getJson<ModeStatus>("/api/mode");
-      set({ yolo: mode.yolo, planMode: mode.plan_mode });
+      set({
+        yolo: mode.yolo,
+        planMode: mode.plan_mode,
+        effort: mode.reasoning_effort,
+      });
     } catch {
       // 静默失败：下次对账时机（对话结束 / 页面可见 / 切项目）重试
+    }
+  },
+
+  async setEffort(effort) {
+    const prev = get().effort;
+    set({ effort });
+    try {
+      const resp = await postJson("/api/reasoning-effort", { effort });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const mode = (await resp.json()) as ModeStatus;
+      set({ yolo: mode.yolo, planMode: mode.plan_mode, effort: mode.reasoning_effort });
+    } catch {
+      set({ effort: prev });
+      get().syncMode();
     }
   },
 
