@@ -223,6 +223,12 @@ impl ChatSession {
             .permission()
             .switch_session(session_id.to_string());
 
+        // 恢复路径兜底：修复历史中断遗留的悬挂 tool_calls（幂等，只扫尾部件
+        // tool call 配对），避免 DB 脏数据进入重建后的上下文触发 Provider 400
+        if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
+            eprintln!("[warn] repair_orphaned_tool_calls: {e}");
+        }
+
         // 一次查询拉全量，内存中过滤 compacted 得到活跃上下文，
         // 避免同会话连查两遍（两遍都会解析附件 base64 大字段）
         let stored = self.storage.load_messages(session_id).await?;
@@ -479,6 +485,95 @@ mod tests {
         session.switch_session(&b).await.unwrap();
         assert_eq!(session.messages_excluding_system_count(), 0);
         assert!(session.agent().take_system_prompt().is_some());
+
+        std::fs::remove_dir_all(&work_dir).ok();
+    }
+
+    fn stored_assistant_with_tool_calls() -> StoredMessage {
+        StoredMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_calls: Some(
+                r#"[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"read","arguments":"{}"}}]"#
+                    .to_string(),
+            ),
+            tool_call_id: None,
+            reasoning_content: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            model: None,
+            runtime_meta: None,
+            think_ms: None,
+            compacted: false,
+            attachments: None,
+        }
+    }
+
+    fn stored_tool_result(id: &str) -> StoredMessage {
+        StoredMessage {
+            role: MessageRole::Tool,
+            content: "ok".to_string(),
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+            reasoning_content: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            model: None,
+            runtime_meta: None,
+            think_ms: None,
+            compacted: false,
+            attachments: None,
+        }
+    }
+
+    /// 断连/崩溃遗留的悬挂 tool_calls（assistant 后只落库了部分 tool result）
+    /// 在恢复路径（switch_session）被幂等修复：DB 补齐 stub，重建上下文完整，
+    /// 不会触发严格 Provider 400。
+    #[tokio::test]
+    async fn switch_session_repairs_orphaned_tool_calls() {
+        let (mut session, work_dir) = make_session().await;
+        let dir = work_dir.display().to_string();
+        let id = session.storage().create_session("m", &dir).await.unwrap();
+        session
+            .storage()
+            .append_message(&id, &stored_user_message("hi"))
+            .await
+            .unwrap();
+        session
+            .storage()
+            .append_message(&id, &stored_assistant_with_tool_calls())
+            .await
+            .unwrap();
+        session
+            .storage()
+            .append_message(&id, &stored_tool_result("call_1"))
+            .await
+            .unwrap();
+
+        session.switch_session(&id).await.unwrap();
+
+        // DB 已补齐 call_2 的 stub
+        let stored = session.storage().load_messages(&id).await.unwrap();
+        let stubs: Vec<_> = stored
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("call_2"))
+            .collect();
+        assert_eq!(stubs.len(), 1);
+        assert_eq!(stubs[0].content, "Tool execution aborted");
+
+        // 重建上下文完整：user + assistant + tool(call_1) + tool(call_2 stub)
+        assert_eq!(session.messages_excluding_system_count(), 4);
+
+        // 幂等：再次切换不产生重复 stub
+        session.switch_session(&id).await.unwrap();
+        let stored = session.storage().load_messages(&id).await.unwrap();
+        let stubs: Vec<_> = stored
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("call_2"))
+            .collect();
+        assert_eq!(stubs.len(), 1);
 
         std::fs::remove_dir_all(&work_dir).ok();
     }

@@ -467,6 +467,57 @@ async fn append_message_defaults_uncompacted() {
     assert!(!loaded[0].compacted);
 }
 
+fn make_assistant_with_tool_calls(ids: &[&str]) -> StoredMessage {
+    let calls: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": "read", "arguments": "{}"},
+            })
+        })
+        .collect();
+    StoredMessage {
+        tool_calls: Some(serde_json::to_string(&calls).unwrap()),
+        ..make_message(MessageRole::Assistant, "")
+    }
+}
+
+/// 修复只作用于活跃区间（compacted = 0）：压缩区间内的悬挂 assistant 永远
+/// 不会进入重建上下文，若为其补 stub 反而造出孤儿 tool 消息（同样触发 400）
+#[tokio::test]
+async fn repair_skips_compacted_dangling_tool_calls() {
+    let storage = ChatStorage::new_in_memory().await.unwrap();
+    let sid = storage.create_session("m", "/tmp").await.unwrap();
+
+    // 压缩区间：悬挂 call_old（compacted=1）
+    storage
+        .append_message(&sid, &make_assistant_with_tool_calls(&["call_old"]))
+        .await
+        .unwrap();
+    storage.mark_messages_compacted(&sid).await.unwrap();
+
+    // 活跃区间：悬挂 call_live
+    storage
+        .append_message(&sid, &make_assistant_with_tool_calls(&["call_live"]))
+        .await
+        .unwrap();
+
+    storage.repair_orphaned_tool_calls(&sid).await.unwrap();
+
+    let all = storage.load_messages(&sid).await.unwrap();
+    let stubs: Vec<_> = all.iter().filter(|m| m.role == MessageRole::Tool).collect();
+    assert_eq!(stubs.len(), 1);
+    assert_eq!(stubs[0].tool_call_id.as_deref(), Some("call_live"));
+    assert_eq!(stubs[0].content, "Tool execution aborted");
+
+    // 活跃上下文完整：assistant(call_live) + stub，无孤儿 tool 消息
+    let active = storage.load_active_messages(&sid).await.unwrap();
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().all(|m| !m.compacted));
+}
+
 #[tokio::test]
 async fn usage_stats_roundtrip() {
     let storage = ChatStorage::new_in_memory().await.unwrap();

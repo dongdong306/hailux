@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -5,17 +6,22 @@ use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, FunctionCall,
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    FunctionCall,
 };
 
 use super::messages::{
-    TOOL_ATTACHMENT_NOTE_FALLBACK, build_user_message, sanitize_messages_for_request,
-    tool_attachment_note,
+    TOOL_ATTACHMENT_NOTE_FALLBACK, build_user_message, ensure_tool_call_parity,
+    sanitize_messages_for_request, tool_attachment_note,
 };
-use super::stream::AgentStreamState;
+use super::stream::{AgentStreamState, PartialToolCall};
 use crate::agent::media::Attachment;
-use crate::agent::models::{CompatibleChatCompletionRequestMessage, SharedMessage};
+use crate::agent::models::{
+    CompatibleChatCompletionRequestAssistantMessage, CompatibleChatCompletionRequestMessage,
+    SharedMessage,
+};
 use crate::agent::retry::RetryConfig;
 use crate::agent::tools::{ToolExecuteError, ToolExecution, ToolRegistry};
 
@@ -451,6 +457,189 @@ async fn text_only_tool_calls_produce_no_synthetic_message() {
     assert_eq!(state.messages.len(), 1);
     assert!(matches!(
         state.messages[0].as_ref(),
+        CompatibleChatCompletionRequestMessage::Tool(_)
+    ));
+}
+
+// ── 悬挂 tool_calls 请求前净化（ensure_tool_call_parity）────────
+
+fn assistant_with_tool_calls(ids: &[&str]) -> SharedMessage {
+    Arc::new(
+        CompatibleChatCompletionRequestAssistantMessage {
+            base: ChatCompletionRequestAssistantMessage {
+                tool_calls: Some(ids.iter().map(|id| tool_call(id, "read")).collect()),
+                ..Default::default()
+            },
+            reasoning_content: None,
+        }
+        .into(),
+    )
+}
+
+fn tool_result_msg(id: &str) -> SharedMessage {
+    Arc::new(
+        ChatCompletionRequestToolMessage {
+            content: ChatCompletionRequestToolMessageContent::Text("ok".to_string()),
+            tool_call_id: id.to_string(),
+        }
+        .into(),
+    )
+}
+
+fn tool_call_ids(msg: &SharedMessage) -> Vec<String> {
+    match msg.as_ref() {
+        CompatibleChatCompletionRequestMessage::Assistant(a) => a
+            .base
+            .tool_calls
+            .as_ref()
+            .map(|tcs| {
+                tcs.iter()
+                    .map(|tc| match tc {
+                        ChatCompletionMessageToolCalls::Function(f) => f.id.clone(),
+                        ChatCompletionMessageToolCalls::Custom(c) => c.id.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => panic!("expected Assistant message"),
+    }
+}
+
+#[test]
+fn tool_parity_clean_context_untouched() {
+    let msgs = vec![
+        user_msg("hi"),
+        assistant_with_tool_calls(&["call_1", "call_2"]),
+        tool_result_msg("call_1"),
+        tool_result_msg("call_2"),
+        user_msg("next"),
+    ];
+    let out = ensure_tool_call_parity(&msgs);
+    assert_eq!(out.len(), msgs.len());
+    assert_eq!(tool_call_ids(&out[1]), vec!["call_1", "call_2"]);
+}
+
+#[test]
+fn tool_parity_fills_missing_results_in_place() {
+    // 断连遗留：assistant(3 个 tool_calls) 后只有 call_1 的结果 + 后续轮次消息
+    let msgs = vec![
+        user_msg("hi"),
+        assistant_with_tool_calls(&["call_1", "call_2", "call_3"]),
+        tool_result_msg("call_1"),
+        user_msg("next"),
+    ];
+    let out = ensure_tool_call_parity(&msgs);
+    assert_eq!(out.len(), 6);
+    // stub 插在真实结果之后、后续消息之前，保持 tool 消息紧跟 assistant
+    for (i, id) in ["call_2", "call_3"].iter().enumerate() {
+        match out[3 + i].as_ref() {
+            CompatibleChatCompletionRequestMessage::Tool(t) => {
+                assert_eq!(t.tool_call_id, *id);
+                assert!(matches!(
+                    &t.content,
+                    ChatCompletionRequestToolMessageContent::Text(s)
+                        if s == "Tool execution aborted"
+                ));
+            }
+            _ => panic!("expected Tool stub"),
+        }
+    }
+    assert!(matches!(
+        out[5].as_ref(),
+        CompatibleChatCompletionRequestMessage::User(_)
+    ));
+}
+
+#[test]
+fn tool_parity_drops_empty_id_entries() {
+    // 流式中断的半成品（空 id）无法被应答：从 tool_calls 中剔除而非悬挂
+    let msgs = vec![
+        user_msg("hi"),
+        assistant_with_tool_calls(&["", "call_1"]),
+        tool_result_msg("call_1"),
+    ];
+    let out = ensure_tool_call_parity(&msgs);
+    assert_eq!(out.len(), msgs.len());
+    assert_eq!(tool_call_ids(&out[1]), vec!["call_1".to_string()]);
+}
+
+#[test]
+fn tool_parity_pure_empty_id_assistant_drops_tool_calls() {
+    // 全部条目都是空 id：tool_calls 清空后 assistant 保留（不再悬挂）
+    let msgs = vec![user_msg("hi"), assistant_with_tool_calls(&[""])];
+    let out = ensure_tool_call_parity(&msgs);
+    assert_eq!(out.len(), msgs.len());
+    assert_eq!(tool_call_ids(&out[1]), Vec::<String>::new());
+}
+
+// ── 取消路径全量补 stub ─────────────────────────────────
+
+#[tokio::test]
+async fn cancelled_tool_calls_all_get_stub_results() {
+    let (event_tx, _rx) = crate::agent::event::create_core_event_channel();
+    let cancel = Arc::new(AtomicBool::new(true));
+    let mut state = test_stream_state(true);
+    let calls = vec![
+        tool_call("call_1", "attachment_tool"),
+        tool_call("call_2", "attachment_tool"),
+        tool_call("call_3", "attachment_tool"),
+    ];
+
+    super::dispatch::handle_tool_calls_stream(&mut state, &calls, &cancel, &event_tx)
+        .await
+        .unwrap();
+
+    // 预置取消：3 个 tool call 各补一条 stub，无悬挂
+    assert_eq!(state.messages.len(), 3);
+    for (i, id) in ["call_1", "call_2", "call_3"].iter().enumerate() {
+        match state.messages[i].as_ref() {
+            CompatibleChatCompletionRequestMessage::Tool(t) => {
+                assert_eq!(t.tool_call_id, *id);
+                assert!(matches!(
+                    &t.content,
+                    ChatCompletionRequestToolMessageContent::Text(s)
+                        if s == "Tool execution aborted"
+                ));
+            }
+            _ => panic!("expected Tool stub"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn push_partial_assistant_skips_idless_tool_calls() {
+    let (event_tx, _rx) = crate::agent::event::create_core_event_channel();
+    let mut state = test_stream_state(true);
+    let mut map = BTreeMap::new();
+    map.insert(
+        0u32,
+        PartialToolCall {
+            id: "call_1".to_string(),
+            name: Some("read".to_string()),
+            arguments: "{}".to_string(),
+        },
+    );
+    map.insert(
+        1u32,
+        PartialToolCall {
+            id: String::new(),
+            name: Some("read".to_string()),
+            arguments: "{}".to_string(),
+        },
+    );
+
+    super::stream::push_partial_assistant(&mut state, "", "", &map, &event_tx)
+        .await
+        .unwrap();
+
+    // 空 id 条目不进 assistant.tool_calls 也不产生 stub：1 条 assistant + 1 条 stub
+    assert_eq!(state.messages.len(), 2);
+    assert_eq!(
+        tool_call_ids(&state.messages[0]),
+        vec!["call_1".to_string()]
+    );
+    assert!(matches!(
+        state.messages[1].as_ref(),
         CompatibleChatCompletionRequestMessage::Tool(_)
     ));
 }

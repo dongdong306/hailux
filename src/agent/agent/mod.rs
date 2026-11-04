@@ -31,7 +31,7 @@ mod stream;
 mod tests;
 
 pub use messages::build_user_message;
-use messages::strip_media_for_compaction;
+use messages::{ensure_tool_call_parity, strip_media_for_compaction};
 use stream::{AgentStreamState, finalize_messages, run_stream_loop};
 
 /// 取消标志轮询间隔。通过定时 sleep 轮询 `AtomicBool` 实现取消，
@@ -314,6 +314,10 @@ impl Agent {
             })
             .map(strip_media_for_compaction)
             .collect();
+        // 压缩请求虽不带 tools，但严格 Provider 仍校验 tool_calls/tool 配对：
+        // 悬挂序列会让 /compact 直接 400。复用与对话请求相同的净化
+        //（宽松 Provider 时代遗留的中段悬挂，DB 修复只扫尾部，覆盖不到这里）
+        let conversation = ensure_tool_call_parity(&conversation);
 
         if conversation.len() < 2 {
             return Err("Not enough messages to compact".into());
