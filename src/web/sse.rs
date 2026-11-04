@@ -9,7 +9,7 @@
 //! 上下文与 DB 脱钩（正常结束时 `completed = true`，不触发中断）。
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
@@ -487,9 +487,23 @@ impl Drop for DropInterrupt {
         }
         let session = self.session.clone();
         tokio::spawn(async move {
+            {
+                let s = session.lock().await;
+                s.interrupt();
+                s.unbind_event_channel();
+            }
+            // 对齐 TUI cleanup_on_quit 的 2s 收尾窗口：中断后 agent 会为悬挂的
+            // tool_calls 补发 stub，但事件通道已随断连关闭，PersistMessage 无法
+            // 落库——这里延迟后做幂等修复，避免恢复会话时 Provider 400。
+            // 安全前提：unbind 后 agent 不再直接写 DB（落库只走事件消费方），
+            // 且期间新请求会持有会话锁，修复被串行化到该轮结束后执行
+            tokio::time::sleep(Duration::from_secs(2)).await;
             let s = session.lock().await;
-            s.interrupt();
-            s.unbind_event_channel();
+            if let Some(session_id) = s.current_session_id()
+                && let Err(e) = s.storage().repair_orphaned_tool_calls(&session_id).await
+            {
+                eprintln!("[warn] repair_orphaned_tool_calls: {e}");
+            }
         });
     }
 }

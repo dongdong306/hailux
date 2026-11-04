@@ -1,13 +1,19 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_openai::types::chat::{
+    ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ImageUrl,
 };
 
 use crate::agent::media::Attachment;
-use crate::agent::models::{CompatibleChatCompletionRequestMessage, SharedMessage};
+use crate::agent::models::{
+    CompatibleChatCompletionRequestAssistantMessage, CompatibleChatCompletionRequestMessage,
+    SharedMessage,
+};
 
 /// 不支持视觉的模型收到图片时看到的占位文本
 /// （让模型自行转告用户，避免直接触发 Provider 400）。
@@ -220,4 +226,114 @@ pub(super) fn strip_media_for_compaction(msg: &SharedMessage) -> SharedMessage {
         }
         .into(),
     )
+}
+
+/// 提取 tool call 的 id（Function / Custom 两种形态统一处理）。
+fn tool_call_id(tc: &ChatCompletionMessageToolCalls) -> &str {
+    match tc {
+        ChatCompletionMessageToolCalls::Function(f) => &f.id,
+        ChatCompletionMessageToolCalls::Custom(c) => &c.id,
+    }
+}
+
+/// 请求前兜底：保证每个带 tool_calls 的 assistant 消息，其全部 tool_call_id
+/// 都有对应的 tool result。悬挂的 tool_calls（会话中断/断连/崩溃遗留的脏数据，
+/// 经 DB 重建进入上下文）会触发严格 Provider 400
+///（"tool_calls must be followed by tool messages"）。
+///
+/// 仅在克隆列表上修补，不污染存储：
+/// - 悬挂 id 在该 assistant 紧随的连续 tool results 之后补一条
+///   "Tool execution aborted"（维持 tool 消息紧跟 assistant 且不打乱真实结果的顺序）
+/// - 空 id 的残缺条目（流式中途取消的半成品，永远无法被应答）直接剔除
+///
+/// 干净上下文走快路径：一次反向判别扫描后原样返回（O(n) 枚举判别，零分配），
+/// 相对每轮请求固有的序列化 + 网络 + 推理耗时，开销在噪声以下。
+pub(super) fn ensure_tool_call_parity(messages: &[SharedMessage]) -> Vec<SharedMessage> {
+    // ── 预检：反向扫描，位置 i 的 assistant 悬挂 id = 其后无任何 Tool 消息应答的 id ──
+    // （"已应答"按全局 id 集合判：id 由 Provider 生成、跨 assistant 视为唯一，
+    //   不做逐 assistant 区间配对——换取单次 O(n) 扫描的简单性）
+    let mut answered_later: HashSet<String> = HashSet::new();
+    let mut dangling: Vec<Vec<String>> = vec![Vec::new(); messages.len()];
+    let mut has_empty_id: Vec<bool> = vec![false; messages.len()];
+    let mut dirty = false;
+    for (i, msg) in messages.iter().enumerate().rev() {
+        match msg.as_ref() {
+            CompatibleChatCompletionRequestMessage::Tool(t) => {
+                answered_later.insert(t.tool_call_id.clone());
+            }
+            CompatibleChatCompletionRequestMessage::Assistant(a) => {
+                if let Some(tcs) = &a.base.tool_calls {
+                    for tc in tcs {
+                        let id = tool_call_id(tc);
+                        if id.is_empty() {
+                            has_empty_id[i] = true;
+                            dirty = true;
+                        } else if !answered_later.contains(id) {
+                            dangling[i].push(id.to_string());
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !dirty {
+        return messages.to_vec();
+    }
+
+    // ── 重建：剔除空 id 条目；在每个 assistant 的连续 tool results 之后插入 stub ──
+    // （stub 不能直接追加到列表末尾：悬挂 assistant 之后可能还有后续轮次的消息，
+    //   tool 消息必须紧跟带 tool_calls 的 assistant 才满足 OpenAI 交替约束）
+    let mut out: Vec<SharedMessage> = Vec::with_capacity(messages.len() + 4);
+    let mut i = 0usize;
+    while i < messages.len() {
+        if let CompatibleChatCompletionRequestMessage::Assistant(a) = messages[i].as_ref() {
+            let assistant_pos = i;
+            if has_empty_id[assistant_pos] {
+                let mut rebuilt: ChatCompletionRequestAssistantMessage = a.base.clone();
+                if let Some(tcs) = &mut rebuilt.tool_calls {
+                    tcs.retain(|tc| !tool_call_id(tc).is_empty());
+                    if tcs.is_empty() {
+                        rebuilt.tool_calls = None;
+                    }
+                }
+                out.push(Arc::new(
+                    CompatibleChatCompletionRequestAssistantMessage {
+                        base: rebuilt,
+                        reasoning_content: a.reasoning_content.clone(),
+                    }
+                    .into(),
+                ));
+            } else {
+                out.push(Arc::clone(&messages[i]));
+            }
+            i += 1;
+            // 紧随的连续 tool results 原样保留，stub 插在其后
+            while i < messages.len()
+                && matches!(
+                    messages[i].as_ref(),
+                    CompatibleChatCompletionRequestMessage::Tool(_)
+                )
+            {
+                out.push(Arc::clone(&messages[i]));
+                i += 1;
+            }
+            for id in &dangling[assistant_pos] {
+                out.push(Arc::new(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(
+                            "Tool execution aborted".to_string(),
+                        ),
+                        tool_call_id: id.clone(),
+                    }
+                    .into(),
+                ));
+            }
+        } else {
+            out.push(Arc::clone(&messages[i]));
+            i += 1;
+        }
+    }
+    out
 }

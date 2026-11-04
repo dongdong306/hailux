@@ -171,13 +171,15 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 修复 orphaned tool calls：扫描最后一条 assistant 消息的 tool_calls，
-    /// 为缺少 tool result 的 tool_call_id 补一条 "Tool execution aborted" 消息。
+    /// 修复 orphaned tool calls：扫描最后一条活跃（compacted = 0）assistant 消息的
+    /// tool_calls，为缺少 tool result 的 tool_call_id 补一条 "Tool execution aborted" 消息。
     pub async fn repair_orphaned_tool_calls(&self, session_id: &str) -> Result<()> {
         // 轻量查询：只取角色与 tool call 字段，避免把正文与附件 base64
-        // 大字段全量拉入内存（本修复只需扫描尾部 tool call 配对）
+        // 大字段全量拉入内存（本修复只需扫描尾部 tool call 配对）。
+        // 只看活跃区间：compacted 区间的悬挂永远不会进入重建上下文，
+        // 若为其补 stub 反而会造出孤儿 tool 消息（无前置 assistant → 同样 400）
         let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT role, tool_calls, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC",
+            "SELECT role, tool_calls, tool_call_id FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)

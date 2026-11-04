@@ -11,6 +11,11 @@ impl App {
         };
 
         let compact_summary = self.storage.get_compact_summary(session_id).await?;
+        // 恢复路径兜底：修复历史中断遗留的悬挂 tool_calls（幂等），
+        // 避免崩溃/强杀留下的脏数据进入重建后的上下文触发 Provider 400
+        if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
+            eprintln!("[warn] repair_orphaned_tool_calls: {e}");
+        }
         let stored = self.storage.load_messages(session_id).await?;
         // 内存过滤替代第二次查询：避免同会话连查两遍（两遍都会解析附件 base64 大字段）
         let active_stored: Vec<&crate::storage::StoredMessage> =

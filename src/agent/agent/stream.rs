@@ -16,7 +16,7 @@ use async_openai::{
 };
 use futures_util::StreamExt;
 
-use super::messages::sanitize_messages_for_request;
+use super::messages::{ensure_tool_call_parity, sanitize_messages_for_request};
 use crate::agent::event::{CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
 use crate::agent::models::{
     CompatibleChatCompletionRequestAssistantMessage, CompatibleChatCompletionRequestMessage,
@@ -101,6 +101,9 @@ impl AgentStreamState {
         // 视觉能力兜底校验：
         // 不支持视觉的模型收到图片时替换为错误文本，由模型转告用户
         let messages = sanitize_messages_for_request(&messages, self.supports_vision);
+        // 悬挂 tool_calls 兜底：中断/断连/崩溃遗留的脏数据（经 DB 重建进入上下文）
+        // 会在请求前就地补齐 tool result，任何 Provider 都不会收到悬挂序列
+        let messages = ensure_tool_call_parity(&messages);
         let mut builder = CompatibleCreateChatCompletionRequestArgs::default();
         builder
             .max_completion_tokens(self.max_tokens)
@@ -492,7 +495,7 @@ pub(super) async fn run_stream_loop(
     Ok(())
 }
 
-async fn push_partial_assistant(
+pub(super) async fn push_partial_assistant(
     state: &mut AgentStreamState,
     ai_message: &str,
     ai_reasoning: &str,
@@ -503,8 +506,11 @@ async fn push_partial_assistant(
         return Ok(());
     }
 
+    // 空 id 的条目是流式中断的半成品（id 分片未到达）：无法被任何 tool result
+    // 应答，放进 assistant.tool_calls 即产生悬挂（严格 Provider 400），直接剔除。
     let tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls_map
         .values()
+        .filter(|partial| !partial.id.is_empty())
         .map(|partial| {
             ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
                 id: partial.id.clone(),
@@ -552,9 +558,7 @@ async fn push_partial_assistant(
         msgs.push(assistant_msg);
 
         for tc in &tool_calls {
-            if let ChatCompletionMessageToolCalls::Function(f) = tc
-                && !f.id.is_empty()
-            {
+            if let ChatCompletionMessageToolCalls::Function(f) = tc {
                 let tool_msg: SharedMessage = Arc::new(
                     ChatCompletionRequestToolMessage {
                         content: ChatCompletionRequestToolMessageContent::Text(

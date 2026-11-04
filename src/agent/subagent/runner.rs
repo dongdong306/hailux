@@ -223,6 +223,11 @@ async fn run_subagent_task_inner(
     // 判断是恢复已有会话还是创建新会话
     let (sub_session_id, agent) = if let Some(existing_id) = task_id {
         // 恢复已有会话：加载历史消息
+        // 恢复路径兜底：修复历史悬挂 tool_calls（幂等），主会话中断时
+        // subagent 分离任务的事件通道已关闭，stub 落库只能靠这里补
+        if let Err(e) = ctx.storage.repair_orphaned_tool_calls(&existing_id).await {
+            eprintln!("[warn] repair_orphaned_tool_calls: {e}");
+        }
         let stored_messages =
             ctx.storage
                 .load_messages(&existing_id)
