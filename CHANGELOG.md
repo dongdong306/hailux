@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/dongdong306/hailux/compare/v0.11.0...v0.12.0) (2026-11-10)
+
+
+### Improvements
+
+* **agent:** add reasoning effort control with per-provider gating ([ca26472](https://github.com/dongdong306/hailux/commit/ca264721f70b9f116745f3041c2dc9b5fb48ffb3))
+* **share:** export sessions as self-contained HTML share files ([7945700](https://github.com/dongdong306/hailux/commit/794570035cd8e4631414048a712867c0b3d96600))
+
+
+### Bugfixes
+
+* **agent:** sanitize dangling tool calls left by interrupted sessions ([6a929bc](https://github.com/dongdong306/hailux/commit/6a929bcfcad2193195fe3d35b93fc21f435a9d15))
+
+
+### Refactor
+
+* **web:** unify model and effort switching into a single anchored menu ([25c5491](https://github.com/dongdong306/hailux/commit/25c549180c1d9f6a113d5609fb9695a077456441))
+
 ## [0.11.0](https://github.com/dongdong306/hailux/compare/v0.10.1...v0.11.0) (2026-10-25)
 
 
