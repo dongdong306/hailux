@@ -7,14 +7,13 @@ import {
   PanelLeft,
   PanelLeftClose,
 } from "lucide-react";
-import { useApp } from "./store/app-store";
+import { anyDialogOpen, useApp } from "./store/app-store";
 import { HailuxRuntimeProvider } from "./runtime/hailux-runtime";
 import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/assistant-ui/thread";
 import { ChatInput } from "./components/chat-input";
 import {
   AskUserDialog,
-  ModelPicker,
   PermissionDialog,
   WorkdirPicker,
 } from "./components/dialogs";
@@ -101,7 +100,10 @@ export default function App() {
       }
       if (e.ctrlKey && e.key === "m") {
         e.preventDefault();
-        useApp.getState().setModelPicker(true);
+        // 弹窗打开时忽略：菜单层级低于弹窗遮罩，避免开出被遮住的隐形菜单
+        if (anyDialogOpen()) return;
+        const s = useApp.getState();
+        s.setModelMenu(!s.showModelMenu);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -218,7 +220,6 @@ export default function App() {
 
         <PermissionDialog />
         <AskUserDialog key={askRequestId} />
-        <ModelPicker />
         <AddModelDialog />
         <WorkdirPicker />
       </div>

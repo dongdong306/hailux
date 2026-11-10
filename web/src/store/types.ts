@@ -173,7 +173,8 @@ export interface AppState {
   /** 斜杠命令列表（随 workDir 变化刷新） */
   commands: CommandInfo[];
   showWorkdirPicker: boolean;
-  showModelPicker: boolean;
+  /** 模型 + 推理等级组合菜单（输入区胶囊控件）开合状态 */
+  showModelMenu: boolean;
   /** 主区域视图（技能/MCP 为内联面板，替换聊天区） */
   activeView: ActiveView;
   skills: SkillEntry[];
@@ -254,6 +255,6 @@ export interface AppState {
   /** 切换项目目录：中断运行中的请求，重置会话上下文并拉取该项目会话列表 */
   setWorkDir: (dir: string) => Promise<void>;
   setWorkdirPicker: (show: boolean) => void;
-  setModelPicker: (show: boolean) => void;
+  setModelMenu: (show: boolean) => void;
   setEscHint: (on: boolean) => void;
 }

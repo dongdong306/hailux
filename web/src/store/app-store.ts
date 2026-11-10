@@ -61,7 +61,7 @@ export const useApp = create<AppState>((set, get) => ({
   commands: [],
   workdirs: [],
   showWorkdirPicker: false,
-  showModelPicker: false,
+  showModelMenu: false,
   activeView: "chat",
   skills: [],
   skillsError: null,
@@ -697,7 +697,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   async switchModel(selector) {
     await postJson("/api/models", { selector });
-    set({ showModelPicker: false });
+    set({ showModelMenu: false });
     await get().loadModels();
   },
 
@@ -755,8 +755,8 @@ export const useApp = create<AppState>((set, get) => ({
     if (show) get().loadWorkdirs().catch(() => {});
   },
 
-  setModelPicker(show) {
-    set({ showModelPicker: show });
+  setModelMenu(show) {
+    set({ showModelMenu: show });
     if (show) get().loadModels().catch(() => {});
   },
 
@@ -765,7 +765,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 }));
 
-/** 是否有全局弹窗打开（权限确认 / 提问 / 模型选择 / 添加模型 / 项目选择）。
+/** 是否有全局弹窗打开（权限确认 / 提问 / 模型与推理等级菜单 / 添加模型 / 项目选择）。
  *  视图级 Esc 处理需让位于弹窗关闭，避免一次 Esc 同时关弹窗和切换视图 */
 export function anyDialogOpen(): boolean {
   const s = useApp.getState();
@@ -773,7 +773,7 @@ export function anyDialogOpen(): boolean {
     s.permission !== null ||
     s.askUser !== null ||
     s.showAddModel ||
-    s.showModelPicker ||
+    s.showModelMenu ||
     s.showWorkdirPicker
   );
 }

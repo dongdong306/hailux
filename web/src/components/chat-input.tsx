@@ -6,9 +6,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowUp,
-  Brain,
   ClipboardList,
-  Cpu,
   FileText,
   Loader2,
   Square,
@@ -17,9 +15,9 @@ import {
   Zap,
 } from "lucide-react";
 import { anyDialogOpen, useApp } from "../store/app-store";
-import type { ReasoningEffort } from "../store/types";
 import type { ChatAttachment, CommandInfo } from "../runtime/types";
 import { cn } from "../lib/utils";
+import { ModelEffortMenu } from "./model-effort-menu";
 
 /** 单张待发送附件大小上限（10 MB，对齐后端 ATTACHMENT_MAX_BYTES） */
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -76,165 +74,6 @@ interface SlashState {
   selected: number;
 }
 
-/** 思考强度三挡滑块（low/high/max）：点击或拖动轨道/挡位选择，提交后气泡保持打开。
- *  纯蓝色系深浅递进（浅天蓝→标准蓝→深靛蓝），长度 + 深浅双重表达强度 */
-const EFFORT_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
-
-const EFFORT_HINTS: Record<ReasoningEffort, string> = {
-  low: "轻量推理，更快响应",
-  high: "均衡模式（默认）",
-  max: "深度推理，更强但更慢",
-};
-
-/** 每档的主色：填充单色/渐变、旋钮描边、标签与图标共用同色 */
-const EFFORT_FILL: Record<ReasoningEffort, string> = {
-  low: "bg-sky-500",
-  high: "bg-gradient-to-r from-sky-500 to-blue-600",
-  max: "bg-gradient-to-r from-sky-500 via-blue-600 to-indigo-600",
-};
-
-const EFFORT_ACCENT: Record<ReasoningEffort, string> = {
-  low: "text-sky-600 dark:text-sky-400",
-  high: "text-blue-600 dark:text-blue-400",
-  max: "text-indigo-600 dark:text-indigo-400",
-};
-
-const EFFORT_BORDER: Record<ReasoningEffort, string> = {
-  low: "border-sky-500",
-  high: "border-blue-600",
-  max: "border-indigo-600",
-};
-
-function EffortControl() {
-  const effort = useApp((s) => s.effort);
-  const setEffort = useApp((s) => s.setEffort);
-  const [open, setOpen] = useState(false);
-  /** 拖动中的预览挡位（null = 未在拖动；松手提交，避免拖动途中连发请求） */
-  const [draft, setDraft] = useState<ReasoningEffort | null>(null);
-  const trackRef = useRef<HTMLDivElement>(null);
-
-  const shown = draft ?? effort;
-  const pct = EFFORT_LEVELS.indexOf(shown) * 50; // 三挡均布：0% / 50% / 100%
-
-  const nearestFromClientX = (clientX: number): ReasoningEffort => {
-    const el = trackRef.current;
-    if (!el) return shown;
-    const rect = el.getBoundingClientRect();
-    const ratio = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1);
-    return EFFORT_LEVELS[Math.round(ratio * 2)]!;
-  };
-
-  const commit = (level: ReasoningEffort) => {
-    setDraft(null);
-    setEffort(level);
-  };
-
-  return (
-    <div className="relative">
-      {/* 点击气泡外关闭（透明遮罩，位于气泡之下） */}
-      {open && (
-        <div
-          className="fixed inset-0 z-20 cursor-default"
-          onMouseDown={() => {
-            setOpen(false);
-            setDraft(null);
-          }}
-        />
-      )}
-
-      {/* 气泡：标题 + 挡位说明 + 三挡滑块 */}
-      {open && (
-        <div className="absolute bottom-full left-1/2 z-30 mb-3 w-60 -translate-x-1/2 rounded-xl border border-border bg-background p-3 shadow-lg">
-          {/* 指向按钮的小箭头 */}
-          <div className="absolute left-1/2 top-full -translate-x-1/2 border-[7px] border-transparent border-t-border" />
-          <p className="mb-0.5 text-xs font-semibold text-foreground">思考强度</p>
-          <p className="mb-2.5 text-[11px] text-muted-foreground/70">{EFFORT_HINTS[shown]}</p>
-
-          <div
-            ref={trackRef}
-            className="relative h-5 cursor-pointer touch-none select-none"
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
-              setDraft(nearestFromClientX(e.clientX));
-            }}
-            onPointerMove={(e) => {
-              if (e.buttons & 1) setDraft(nearestFromClientX(e.clientX));
-            }}
-            onPointerUp={() => {
-              if (draft) commit(draft);
-            }}
-          >
-            {/* 静止轨道 + 档位色填充（长度 + 色相双重表达强度） */}
-            <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-muted" />
-            <div
-              className={cn(
-                "absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full",
-                EFFORT_FILL[shown],
-              )}
-              style={{
-                width: `${pct}%`,
-                transition: draft === null ? "width 180ms ease" : undefined,
-              }}
-            />
-            <div
-              className={cn(
-                "absolute top-1/2 size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 bg-background transition-all duration-150",
-                EFFORT_BORDER[shown],
-              )}
-              style={{
-                left: `${pct}%`,
-                transitionProperty: draft === null ? undefined : "none",
-              }}
-            />
-          </div>
-
-          <div className="mt-1 flex items-center justify-between">
-            {EFFORT_LEVELS.map((level) => (
-              <button
-                key={level}
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  commit(level);
-                }}
-                className={cn(
-                  "cursor-pointer font-mono text-[10px] tracking-widest transition-colors",
-                  shown === level
-                    ? cn("font-semibold", EFFORT_ACCENT[level])
-                    : "text-muted-foreground/50 hover:text-foreground",
-                )}
-              >
-                {level.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <button
-        type="button"
-        onClick={() => {
-          setOpen((o) => !o);
-          setDraft(null);
-        }}
-        aria-label="思考强度"
-        aria-expanded={open}
-        title={
-          open
-            ? "收起思考强度"
-            : `思考强度 ${effort.toUpperCase()}：${EFFORT_HINTS[effort]}，点击调整`
-        }
-        className={cn(
-          "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-muted",
-          EFFORT_ACCENT[effort],
-        )}
-      >
-        <Brain className="size-4" />
-      </button>
-    </div>
-  );
-}
-
 export function ChatInput() {
   const [text, setText] = useState("");
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
@@ -266,8 +105,6 @@ export function ChatInput() {
   const setPlanMode = useApp((s) => s.setPlanMode);
   const escHint = useApp((s) => s.escHint);
   const setEscHint = useApp((s) => s.setEscHint);
-  const model = useApp((s) => s.models.find((m) => m.active)?.display ?? "");
-  const setModelPicker = useApp((s) => s.setModelPicker);
   const yolo = useApp((s) => s.yolo);
   const setYolo = useApp((s) => s.setYolo);
   const commands = useApp((s) => s.commands);
@@ -784,7 +621,7 @@ export function ChatInput() {
           )}
 
           <div className="flex min-w-0 items-center justify-between gap-2 px-2.5 pb-2.5 pt-0.5">
-            {/* 左侧工具区：Plan / YOLO 开关 / 模型选择 */}
+            {/* 左侧工具区：Plan / YOLO 开关 */}
             <div className="flex min-w-0 items-center gap-1">
               <button
                 type="button"
@@ -821,24 +658,11 @@ export function ChatInput() {
                 <Zap className={cn("size-3.5", yolo && "fill-current")} />
                 {yolo ? "YOLO" : "ASK"}
               </button>
-
-              <button
-                type="button"
-                onClick={() => setModelPicker(true)}
-                aria-label="切换模型"
-                title="切换模型（Ctrl+M）"
-                className="flex h-8 min-w-0 shrink cursor-pointer items-center gap-1.5 rounded-lg px-2 text-xs transition-colors hover:bg-muted"
-              >
-                <Cpu className="size-3.5 shrink-0 text-muted-foreground/50" />
-                <span className="truncate text-muted-foreground">
-                  {model || "未配置模型"}
-                </span>
-              </button>
             </div>
 
-            {/* 右侧：思考强度 / 发送/停止（紧挨；上下文占用环已移至顶栏右上角） */}
+            {/* 右侧：模型 + 推理等级组合控件 / 发送/停止（上下文占用环已移至顶栏右上角） */}
             <div className="flex shrink-0 items-center gap-1.5">
-              <EffortControl />
+              <ModelEffortMenu />
 
               {/* 发送 / 停止 */}
               {isRunning ? (
