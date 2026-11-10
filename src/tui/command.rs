@@ -20,6 +20,7 @@ pub enum Command {
     Mcp,
     Tasks,
     Stats,
+    Share,
     Yolo,
     Exit,
 }
@@ -80,6 +81,10 @@ static SLASH_COMMANDS: &[SlashCommand] = &[
         description: "查看 token 用量统计",
     },
     SlashCommand {
+        name: "share",
+        description: "导出当前会话为 HTML 分享文件",
+    },
+    SlashCommand {
         name: "yolo",
         description: "切换 YOLO 模式（跳过权限确认）",
     },
@@ -101,6 +106,7 @@ fn match_ui_command(name: &str) -> Option<Command> {
         "mcp" => Some(Command::Mcp),
         "tasks" => Some(Command::Tasks),
         "stats" => Some(Command::Stats),
+        "share" => Some(Command::Share),
         "yolo" => Some(Command::Yolo),
         "exit" | "quit" | "q" => Some(Command::Exit),
         _ => None,
@@ -126,7 +132,7 @@ pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedC
 /// 不在此列表中的自定义命令按字母排序追加在末尾。
 const COMMAND_PRIORITY: &[&str] = &[
     "new", "sessions", "init", "plan", "models", "compact", "effort", "skills", "mcp", "tasks",
-    "stats", "yolo", "exit",
+    "stats", "share", "yolo", "exit",
 ];
 
 /// 构建所有可用命令的展示列表（UI 命令 + prompt 命令按优先级混合排序）。
@@ -233,6 +239,25 @@ mod tests {
             } => assert_eq!(args, "low"),
             _ => panic!("expected Effort"),
         }
+    }
+
+    #[test]
+    fn match_share_command() {
+        let reg = empty_registry();
+        match match_command("/share", &reg).unwrap() {
+            MatchedCommand::Ui {
+                cmd: Command::Share,
+                ..
+            } => {}
+            _ => panic!("expected Share"),
+        }
+    }
+
+    #[test]
+    fn share_in_command_entries() {
+        let reg = empty_registry();
+        let entries = build_all_entries(&reg);
+        assert!(entries.iter().any(|e| e.name == "share"));
     }
 
     #[test]

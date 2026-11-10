@@ -145,6 +145,52 @@ pub(super) async fn get_session(
     }
 }
 
+/// 导出会话为自包含 HTML 分享文件（复用 `share` 模块，与 TUI /share 同源）。
+/// Content-Disposition 走 ASCII 回退名 + UTF-8 扩展名（RFC 5987），避免
+/// 中文标题在不同浏览器的编码歧义。
+pub(super) async fn export_session(
+    State(state): State<Arc<WebServerState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match crate::share::export_session_html(state.manager.storage(), &id).await {
+        Ok(export) => {
+            let ascii_fallback = format!(
+                "hailux-share-{}.html",
+                id.chars().take(8).collect::<String>()
+            );
+            let utf8_name = format!("hailux-share-{}.html", percent_encode(&export.slug));
+            let resp = axum::response::Response::builder()
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header(
+                    "Content-Disposition",
+                    format!(
+                        "attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{utf8_name}"
+                    ),
+                )
+                .body(axum::body::Body::from(export.html));
+            match resp {
+                Ok(r) => r,
+                Err(e) => err500(color_eyre::eyre::eyre!(e.to_string())),
+            }
+        }
+        Err(e) => err500(e),
+    }
+}
+
+/// 百分号编码（RFC 3986 unreserved 之外全编码），用于 filename* 扩展名。
+pub(super) fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 pub(super) async fn delete_session(
     State(state): State<Arc<WebServerState>>,
     Path(id): Path<String>,

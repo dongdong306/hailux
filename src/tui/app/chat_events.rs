@@ -531,6 +531,9 @@ impl App {
                     command::Command::Stats => {
                         self.open_stats_viewer().await?;
                     }
+                    command::Command::Share => {
+                        self.share_session_html().await?;
+                    }
                     command::Command::Plan => {
                         self.toggle_plan_mode();
                     }
