@@ -31,6 +31,7 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
             "/api/sessions/{id}",
             get(sessions::get_session).delete(sessions::delete_session),
         )
+        .route("/api/sessions/{id}/export", get(sessions::export_session))
         .route("/api/workdirs", get(sessions::list_workdirs))
         .route("/api/default-workdir", get(sessions::get_default_workdir))
         .route("/api/workdirs/validate", post(sessions::validate_workdir))

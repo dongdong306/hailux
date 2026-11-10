@@ -126,6 +126,21 @@ impl ChatStorage {
         Ok(row.map(|(title,)| title))
     }
 
+    /// 按 ID 查询单个 session 的元信息（标题/模型/更新时间）；不存在返回 None。
+    pub async fn get_session_info(&self, session_id: &str) -> Result<Option<SessionSummary>> {
+        let row: Option<(String, String, String, String)> =
+            sqlx::query_as("SELECT id, title, model, updated_at FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(id, title, model, updated_at)| SessionSummary {
+            id,
+            title,
+            model,
+            updated_at,
+        }))
+    }
+
     pub async fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")

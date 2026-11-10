@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod permission;
 pub mod prompts;
 pub mod session;
+pub mod share;
 pub mod storage;
 pub mod tui;
 pub mod updater;

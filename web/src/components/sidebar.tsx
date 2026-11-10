@@ -8,6 +8,7 @@ import {
   Plug,
   Plus,
   Settings,
+  Share2,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -61,6 +62,16 @@ function SessionItem({
           {title || "新对话"}
         </span>
       </button>
+
+      {/* 导出分享（hover 显示；触发浏览器原生下载单文件 HTML） */}
+      <a
+        href={`/api/sessions/${id}/export`}
+        download
+        title="导出会话为 HTML 分享文件"
+        className="mr-0.5 flex size-6 shrink-0 items-center justify-center rounded-md p-1.5 text-muted-foreground/40 transition-all opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground focus:opacity-100 disabled:pointer-events-none"
+      >
+        <Share2 className="size-3" />
+      </a>
 
       {/* 删除按钮（hover 显示；点击弹二次确认） */}
       <button

@@ -221,6 +221,60 @@ impl App {
         Ok(())
     }
 
+    /// `/share`：导出当前会话为自包含 HTML 分享文件，写入当前工作目录。
+    /// 含全量历史（compacted 消息照常渲染），复用 `share` 模块（与 Web 端点同源）。
+    pub(super) async fn share_session_html(&mut self) -> Result<()> {
+        let Some(session_id) = self.current_session_id.clone() else {
+            self.messages.push(Message::Agent(
+                "当前没有进行中的会话，先发送一条消息后再使用 /share。".to_string(),
+            ));
+            self.render.dirty = true;
+            return Ok(());
+        };
+
+        // 空会话（无消息且无压缩摘要）提示而非生成空文件
+        let has_messages = self.storage.count_active_messages(&session_id).await? > 0
+            || self
+                .storage
+                .get_compact_summary(&session_id)
+                .await?
+                .is_some();
+        if !has_messages {
+            self.messages.push(Message::Agent(
+                "当前会话还没有消息，没有可分享的内容。".to_string(),
+            ));
+            self.render.dirty = true;
+            return Ok(());
+        }
+
+        let export = match crate::share::export_session_html(&self.storage, &session_id).await {
+            Ok(export) => export,
+            Err(e) => {
+                self.messages.push(Message::Agent(format!("导出失败: {e}")));
+                self.render.dirty = true;
+                return Ok(());
+            }
+        };
+
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let file_name = format!("hailux-share-{stamp}-{}.html", export.slug);
+        let out_path = std::path::PathBuf::from(Self::current_work_dir()?).join(file_name);
+        match tokio::fs::write(&out_path, export.html).await {
+            Ok(()) => {
+                let display = out_path.display();
+                self.messages.push(Message::Agent(format!(
+                    "会话已导出: {display}（单文件 HTML，可直接发给他人在浏览器打开）"
+                )));
+            }
+            Err(e) => {
+                self.messages
+                    .push(Message::Agent(format!("写入文件失败: {e}")));
+            }
+        }
+        self.render.dirty = true;
+        Ok(())
+    }
+
     pub(super) fn current_work_dir() -> Result<String> {
         Ok(std::env::current_dir()?
             .canonicalize()?

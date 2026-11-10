@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+/* ── 令牌：对齐 web/src/styles/globals.css（亮色默认，暗色跟随系统）── */
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --border: oklch(0.922 0 0);
+  --primary: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --warning: oklch(0.666 0.179 58.44);
+  --todo-done: #059669;
+  --todo-doing: #0891b2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --border: oklch(1 0 0 / 10%);
+    --primary: oklch(0.922 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --warning: oklch(0.795 0.184 86.047);
+    --todo-done: #34d399;
+    --todo-doing: #22d3ee;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font: 16px/1.625 -apple-system, "Segoe UI", system-ui, Roboto, "Helvetica Neue",
+    Arial, "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+  "Liberation Mono", "Courier New", monospace; }
+.wrap { max-width: 48rem; margin: 0 auto; padding: 24px 16px 48px; }
+
+/* ── 头部（分享文件专属，风格同应用）───────────────────────── */
+.share-header { padding: 16px 0 16px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+.brand {
+  font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted-foreground); font-weight: 500; margin-bottom: 8px;
+}
+.share-header h1 {
+  margin: 0 0 8px; font-size: 1.25rem; font-weight: 600; line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.meta { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted-foreground); font-size: 13px; }
+.meta span { font-variant-numeric: tabular-nums; }
+
+/* ── 用户消息：右对齐 bg-muted 气泡（对齐 thread.tsx UserMessage）── */
+.msg-user-row { display: flex; justify-content: flex-end; margin: 20px 0; }
+.msg-user {
+  background: var(--muted); color: var(--foreground);
+  max-width: 80%; border-radius: 14px; padding: 8px 16px;
+}
+.user-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.plan-tag {
+  text-align: right; font-size: 12px; color: var(--warning); margin: 0 0 2px;
+}
+.attachments { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 8px; }
+.attachments img {
+  max-height: 12rem; max-width: 100%; border-radius: 10px;
+  border: 1px solid var(--border); object-fit: contain;
+}
+
+/* ── 助手消息：无气泡正文（对齐 thread.tsx AssistantMessage）── */
+.msg-assistant { padding: 0 8px; margin: 20px 0; }
+
+/* ── 卡片（思考 / 工具调用）：rounded-lg border px-3 py-2 ──── */
+.card { margin: 8px 0; width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; }
+.card summary, .card-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  font-size: 14px; color: var(--muted-foreground); cursor: pointer;
+  list-style: none; user-select: none;
+}
+.card summary::-webkit-details-marker { display: none; }
+.card summary:hover, details.card[open] summary { color: var(--foreground); }
+.card summary svg, .card-head svg { width: 16px; height: 16px; flex-shrink: 0; }
+.card summary .chev, .tool-row summary .chev { margin-left: auto; transition: transform .2s; transform: rotate(-90deg); }
+details.card[open] summary .chev, details.tool-row[open] summary .chev { transform: rotate(0); }
+.card-title { min-width: 0; overflow-wrap: anywhere; }
+.card-timer { font-size: 12px; }
+
+/* ── 工具调用行内元素（对齐 ToolFallback 标题结构）────────── */
+.tool-verb { font-size: 12px; line-height: 1.2; flex-shrink: 0; }
+.tool-object { font-weight: 500; overflow-wrap: anywhere; }
+.tool-suffix { font-size: 12px; color: color-mix(in oklab, var(--muted-foreground) 70%, transparent); flex-shrink: 0; }
+.tool-body { padding: 4px 0 8px 24px; max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.reasoning-body { max-height: 16rem; color: var(--muted-foreground); font-size: 14px; white-space: pre-wrap; }
+.tool-pre {
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; color: var(--foreground);
+}
+.result-label { font-size: 12px; font-weight: 500; color: var(--muted-foreground); margin: 0; }
+.tool-noresult { font-size: 12px; color: color-mix(in oklab, var(--muted-foreground) 60%, transparent); margin: 0; font-style: italic; }
+
+/* ── 工具合并卡内行（对齐 ToolGroup）──────────────────────── */
+.group-body { padding: 4px 0; }
+.tool-row { border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
+.tool-row:first-of-type { border-top: none; }
+.tool-row summary {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  font-size: 14px; color: var(--muted-foreground); cursor: pointer;
+  list-style: none; user-select: none;
+}
+.tool-row summary::-webkit-details-marker { display: none; }
+.tool-row summary:hover { color: var(--foreground); }
+.tool-row summary svg { width: 16px; height: 16px; flex-shrink: 0; }
+.tool-row .tool-body { padding: 0 0 8px 24px; }
+
+/* ── todo 卡（对齐 TodoView）──────────────────────────────── */
+.todo-items { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 2px 16px; }
+.todo-row { display: flex; align-items: flex-start; gap: 8px; }
+.todo-icon { flex-shrink: 0; user-select: none; }
+.todo-icon.done { color: var(--todo-done); }
+.todo-icon.doing { color: var(--todo-doing); }
+.todo-icon.rest { color: color-mix(in oklab, var(--muted-foreground) 60%, transparent); }
+.todo-text { min-width: 0; overflow-wrap: anywhere; }
+.todo-text.done, .todo-text.cancelled { color: color-mix(in oklab, var(--muted-foreground) 70%, transparent); text-decoration: line-through; }
+.todo-text.doing { font-weight: 500; }
+.todo-count { font-size: 12px; color: color-mix(in oklab, var(--muted-foreground) 70%, transparent); font-variant-numeric: tabular-nums; }
+
+/* ── ask_user 问答卡（对齐 AskUserView）───────────────────── */
+.ask-body { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 6px; }
+.ask-row { font-size: 14px; }
+.ask-q { color: color-mix(in oklab, var(--muted-foreground) 70%, transparent); }
+.ask-sep { color: color-mix(in oklab, var(--muted-foreground) 40%, transparent); }
+.ask-a { font-weight: 500; }
+.ask-cancelled { font-size: 14px; color: color-mix(in oklab, var(--muted-foreground) 60%, transparent); padding-bottom: 4px; }
+
+/* ── 完成行（对齐 AssistantActions：model · 4.3s · 状态）───── */
+.done-row {
+  padding: 4px 8px 0; font-size: 12px;
+  color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.done-row .st-interrupted { color: var(--warning); }
+.done-row .st-error { color: var(--destructive); }
+
+/* ── 压缩分隔线（对齐 SystemRowView compact：两侧细线）────── */
+.compact-divider {
+  display: flex; align-items: center; gap: 12px; margin: 16px 0;
+  font-size: 12px; white-space: nowrap;
+  color: color-mix(in oklab, var(--muted-foreground) 50%, transparent);
+}
+.compact-divider .cline { height: 1px; flex: 1; background: var(--border); }
+
+/* ── markdown（对齐 markdown-text.tsx 组件样式）────────────── */
+.markdown { overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 12px 0; }
+.markdown h1 { font-size: 1.25rem; font-weight: 600; margin: 20px 0 8px; }
+.markdown h2 { font-size: 1.125rem; font-weight: 600; margin: 20px 0 8px; }
+.markdown h3 { font-size: 1rem; font-weight: 600; margin: 16px 0 6px; }
+.markdown h4 { font-size: 1rem; font-weight: 500; margin: 14px 0 4px; }
+.markdown h5 { font-size: 0.875rem; font-weight: 600; margin: 12px 0 4px; }
+.markdown h6 { font-size: 0.875rem; font-weight: 500; margin: 12px 0 4px; }
+.markdown a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+.markdown ul { list-style: disc; margin: 12px 0; padding-left: 20px; }
+.markdown ol { list-style: decimal; margin: 12px 0; padding-left: 20px; }
+.markdown li { margin-top: 4px; }
+.markdown li::marker { color: var(--muted-foreground); }
+.markdown blockquote {
+  margin: 12px 0; border-left: 2px solid color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  padding-left: 16px; color: var(--muted-foreground);
+}
+.markdown hr { border: none; border-top: 1px solid color-mix(in oklab, var(--muted-foreground) 20%, transparent); margin: 12px 0; }
+.markdown code {
+  background: var(--muted); border-radius: 6px; padding: 2px 6px; font-size: 0.85em;
+}
+.markdown .codeblock { margin: 12px 0; }
+.markdown .code-header {
+  display: flex; align-items: center; justify-content: space-between;
+  border: 1px solid color-mix(in oklab, var(--border) 50%, transparent); border-bottom: none;
+  border-radius: 14px 14px 0 0; background: color-mix(in oklab, var(--muted) 50%, transparent);
+  padding: 6px 14px; font-size: 12px;
+}
+.markdown .code-lang { color: var(--muted-foreground); font-weight: 500; text-transform: lowercase; }
+.markdown pre {
+  background: color-mix(in oklab, var(--muted) 30%, transparent);
+  border: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
+  border-radius: 0 0 14px 14px; border-top: none;
+  padding: 14px; font-size: 13px; line-height: 1.625; overflow-x: auto; margin: 0;
+}
+.markdown pre code { background: none; border-radius: 0; padding: 0; font-size: inherit; }
+.markdown .codeblock.plain pre { border-radius: 14px; border-top: 1px solid color-mix(in oklab, var(--border) 50%, transparent); }
+.markdown table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 12px 0; display: block; overflow-x: auto; }
+.markdown th { background: var(--muted); padding: 6px 12px; text-align: left; font-weight: 500; }
+.markdown th:first-child { border-top-left-radius: 10px; }
+.markdown th:last-child { border-top-right-radius: 10px; }
+.markdown td { border-bottom: 1px solid color-mix(in oklab, var(--muted-foreground) 20%, transparent); border-right: 1px solid color-mix(in oklab, var(--muted-foreground) 20%, transparent); padding: 6px 12px; text-align: left; }
+.markdown td:first-child { border-left: 1px solid color-mix(in oklab, var(--muted-foreground) 20%, transparent); }
+.markdown tr:last-child td:first-child { border-bottom-left-radius: 10px; }
+.markdown tr:last-child td:last-child { border-bottom-right-radius: 10px; }
+.markdown img { max-width: 100%; border-radius: 10px; }
+
+.empty { color: var(--muted-foreground); text-align: center; padding: 48px 0; }
+.share-footer {
+  margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border);
+  color: color-mix(in oklab, var(--muted-foreground) 60%, transparent); font-size: 12px; text-align: center;
+}
+@media print {
+  details > * { display: block; }
+  details.reasoning, details.toolcall { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="share-header">
+    <div class="brand">hailux 会话分享</div>
+    <h1>{{TITLE}}</h1>
+    <div class="meta">{{META}}</div>
+  </header>
+  <main class="chat">
+{{BODY}}
+  </main>
+  <footer class="share-footer">由 hailux 导出于 {{EXPORTED}}</footer>
+</div>
+</body>
+</html>

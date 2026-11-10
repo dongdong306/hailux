@@ -1,4 +1,14 @@
+use super::sessions::percent_encode;
 use super::skills::{render_skill_md, skill_scope, valid_skill_name, validate_skill_location};
+
+#[test]
+fn percent_encode_rfc3986() {
+    assert_eq!(percent_encode("abc-._~"), "abc-._~");
+    assert_eq!(percent_encode("a b"), "a%20b");
+    assert_eq!(percent_encode("修复"), "%E4%BF%AE%E5%A4%8D");
+    assert_eq!(percent_encode("a/b?c"), "a%2Fb%3Fc");
+    assert!(percent_encode("").is_empty());
+}
 
 #[test]
 fn skill_name_validation() {
