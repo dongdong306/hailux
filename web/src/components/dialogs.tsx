@@ -1,6 +1,6 @@
-// 弹窗：权限确认 / 提问 / 模型选择 / 工作目录选择
+// 弹窗：权限确认 / 提问 / 工作目录选择
 // （技能与 MCP 管理为内联视图，见 skills-manager.tsx / mcp-manager.tsx；
-//   模型提供商管理见 settings-view.tsx）
+//   模型提供商管理见 settings-view.tsx；模型 + 推理等级切换见 model-effort-menu.tsx）
 import { useEffect, useState, type ReactNode } from "react";
 import { Check, Folder, ShieldAlert } from "lucide-react";
 import { useApp } from "../store/app-store";
@@ -290,44 +290,6 @@ export function AskUserDialog() {
         <button type="button" className={btnPrimary} onClick={submit}>
           提交{unanswered ? "（未答项记为 Unanswered）" : ""}
         </button>
-      </div>
-    </Overlay>
-  );
-}
-
-/* ── 模型选择 ───────────────────────────────────────────────── */
-export function ModelPicker() {
-  const show = useApp((s) => s.showModelPicker);
-  const models = useApp((s) => s.models);
-  const switchModel = useApp((s) => s.switchModel);
-  const setModelPicker = useApp((s) => s.setModelPicker);
-  if (!show) return null;
-
-  return (
-    <Overlay onClose={() => setModelPicker(false)}>
-      <h3 className="mb-3 text-[15px] font-semibold">切换模型</h3>
-      <div className="space-y-1">
-        {models.map((m) => (
-          <button
-            type="button"
-            key={m.display}
-            className={cn(
-              "flex w-full cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-              m.active
-                ? "border-primary/30 bg-primary/[0.06] text-foreground"
-                : "border-border/50 text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-            )}
-            onClick={() => switchModel(m.display)}
-          >
-            <span className="flex-1">
-              {m.display}
-              <span className="block text-xs text-muted-foreground/60">
-                {m.provider_name}
-              </span>
-            </span>
-            {m.active && <Check className="size-4 text-foreground" />}
-          </button>
-        ))}
       </div>
     </Overlay>
   );
