@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub(crate) mod model_discovery;
 mod providers;
 mod toml_serde;
 mod types;
@@ -11,11 +12,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use providers::PROVIDERS;
-#[cfg(feature = "web")]
-pub(crate) use providers::find_provider_def;
+pub(crate) use providers::{PROVIDERS, find_provider_def};
 pub use types::{
     CustomModelEntry, ModelEntry, PermissionConfig, ProviderEntry, RemoveError, RetryConfigToml,
+    UpdateError,
 };
 
 use crate::agent::ReasoningEffort;
@@ -23,10 +23,10 @@ use crate::agent::ReasoningEffort;
 const CONFIG_DIR_NAME: &str = ".hailux";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
-/// 模型输出上限（max_completion_tokens）
+/// Max output tokens (max_completion_tokens)
 pub const DEFAULT_OUTPUT_TOKENS: u32 = 65536;
-/// 模型上下文窗口大小
-pub const DEFAULT_CONTEXT_WINDOW: u32 = 131072;
+/// Context window assumed for newly added models (256K)
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 262144;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -34,18 +34,21 @@ pub struct Config {
     pub main_model: String,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
-    /// 自动压缩阈值（0.0-1.0），上下文 token 占比超过此值时自动压缩
+    /// Auto-compaction threshold (0.0-1.0); compaction triggers once context token usage exceeds this ratio
     #[serde(default = "default_compact_threshold")]
     pub compact_threshold: f32,
-    /// 权限配置
+    /// Permission rules
     #[serde(default)]
     pub permission: PermissionConfig,
-    /// LLM 请求瞬态错误重试策略
+    /// Retry policy for transient LLM request errors
     #[serde(default)]
     pub retry: RetryConfigToml,
-    /// 思考强度（请求体顶层 reasoning_effort，low/high/max；默认 high）
+    /// Reasoning effort (top-level `reasoning_effort` in the request body: low/high/max; default high)
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
+    /// Model lists fetched from each provider's `/models` endpoint (a disposable hint layer, never saved to config.toml)
+    #[serde(skip)]
+    pub(crate) discovered: model_discovery::DiscoveryCache,
 }
 
 impl Default for Config {
@@ -57,6 +60,7 @@ impl Default for Config {
             permission: PermissionConfig::default(),
             retry: RetryConfigToml::default(),
             reasoning_effort: ReasoningEffort::default(),
+            discovered: model_discovery::DiscoveryCache::new(),
         }
     }
 }
@@ -65,10 +69,10 @@ fn default_compact_threshold() -> f32 {
     0.75
 }
 
-// ── 核心方法 ─────────────────────────────────────────────────
+// ── Core methods ─────────────────────────────────────────────
 
 impl Config {
-    /// 获取 provider 的显示名称
+    /// Display name of a provider
     fn provider_display_name(&self, pid: &str) -> String {
         if let Some(def) = providers::find_provider_def(pid) {
             def.name.to_string()
@@ -77,8 +81,8 @@ impl Config {
         }
     }
 
-    /// 获取 provider 的 base_url
-    fn provider_base_url(&self, pid: &str) -> Option<String> {
+    /// Base URL of a provider
+    pub fn provider_base_url(&self, pid: &str) -> Option<String> {
         let entry = self.providers.get(pid)?;
         if let Some(ref url) = entry.base_url {
             return Some(url.clone());
@@ -86,79 +90,56 @@ impl Config {
         providers::find_provider_def(pid).map(|d| d.base_url.to_string())
     }
 
-    /// 返回所有已启用 provider 下的可选模型列表
+    /// Model metadata fetched from the provider, when the cache holds it
+    pub fn remote_model(&self, pid: &str, model_id: &str) -> Option<&model_discovery::RemoteModel> {
+        self.discovered
+            .get(pid)?
+            .models
+            .iter()
+            .find(|m| m.id.eq_ignore_ascii_case(model_id))
+    }
+
+    /// Replace one provider's discovered list and refresh its fetch timestamp
+    pub(crate) fn set_discovered_models(
+        &mut self,
+        pid: &str,
+        models: Vec<model_discovery::RemoteModel>,
+    ) {
+        self.discovered.insert(
+            pid.to_string(),
+            model_discovery::ProviderDiscovery {
+                fetched_at: model_discovery::now_unix(),
+                models,
+            },
+        );
+    }
+
+    /// Available models: exactly the provider's model table. The `/models` cache only feeds
+    /// the fetch dialog; a reported model becomes visible once the user picks it.
     pub fn available_models(&self) -> Vec<ModelEntry> {
         let mut result = Vec::new();
 
-        // 已配置的 provider
         for (pid, entry) in &self.providers {
             if entry.api_key.is_empty() {
                 continue;
             }
             let provider_name = self.provider_display_name(pid);
 
-            // 自定义模型优先
-            if let Some(ref custom_models) = entry.models {
-                for mid in custom_models.keys() {
-                    // 与预定义模型同 id 的条目来自 setup 同步，删除后会被预定义合并分支复活 → 不可删
-                    let deletable = providers::find_provider_def(pid)
-                        .and_then(|d| d.models.iter().find(|m| m.id == *mid))
-                        .is_none();
-                    result.push(ModelEntry {
-                        provider_id: pid.clone(),
-                        provider_name: provider_name.clone(),
-                        model_id: mid.clone(),
-                        model_name: mid.clone(),
-                        display: format!("{}/{}", pid, mid),
-                        needs_setup: false,
-                        deletable,
-                    });
-                }
-            }
-
-            // 合并预定义模型（跳过已被自定义覆盖的），确保新增预定义模型对已有配置可见
-            if let Some(def) = providers::find_provider_def(pid) {
-                for m in def.models {
-                    let covered = entry
-                        .models
-                        .as_ref()
-                        .is_some_and(|models| models.contains_key(m.id));
-                    if !covered {
-                        result.push(ModelEntry {
-                            provider_id: pid.clone(),
-                            provider_name: provider_name.clone(),
-                            model_id: m.id.to_string(),
-                            model_name: m.name.to_string(),
-                            display: format!("{}/{}", pid, m.id),
-                            needs_setup: false,
-                            deletable: false,
-                        });
-                    }
-                }
-            }
-        }
-
-        // 未配置的预定义 provider
-        for def in providers::PROVIDERS {
-            if !self.providers.contains_key(def.id) {
-                for m in def.models {
-                    result.push(ModelEntry {
-                        provider_id: def.id.to_string(),
-                        provider_name: def.name.to_string(),
-                        model_id: m.id.to_string(),
-                        model_name: m.name.to_string(),
-                        display: format!("{}/{}", def.id, m.id),
-                        needs_setup: true,
-                        deletable: false,
-                    });
-                }
+            for mid in entry.models.keys() {
+                result.push(ModelEntry {
+                    provider_id: pid.clone(),
+                    provider_name: provider_name.clone(),
+                    model_id: mid.clone(),
+                    model_name: mid.clone(),
+                    display: format!("{}/{}", pid, mid),
+                });
             }
         }
 
         result
     }
 
-    /// 根据 "provider/model" 选择器解析出 OpenAIConfig、模型 ID、max_tokens、context_window
+    /// Resolve a "provider/model" selector into OpenAIConfig, model id, max_tokens and context_window
     pub fn resolve(&self, selector: &str) -> Result<ResolvedModel> {
         let (provider_id, model_id) = selector.split_once('/').ok_or_else(|| {
             color_eyre::eyre::eyre!("模型格式错误，应为 provider/model: {}", selector)
@@ -168,15 +149,6 @@ impl Config {
             .providers
             .get(provider_id)
             .ok_or_else(|| color_eyre::eyre::eyre!("未找到 provider: {}", provider_id))?;
-
-        if providers::REMOVED_PREDEFINED_MODELS
-            .iter()
-            .any(|(p, m)| *p == provider_id && *m == model_id)
-        {
-            return Err(color_eyre::eyre::eyre!(
-                "模型 {selector} 已从预定义列表移除，请通过 /model 重新选择（config 中残留的旧条目可删除）"
-            ));
-        }
 
         if entry.api_key.is_empty() {
             return Err(color_eyre::eyre::eyre!(
@@ -189,28 +161,16 @@ impl Config {
             .provider_base_url(provider_id)
             .ok_or_else(|| color_eyre::eyre::eyre!("provider {} 未配置 base_url", provider_id))?;
 
-        // 查找模型的 max_tokens 和 context_window
-        let (max_tokens, context_window, supports_vision) =
-            if let Some(ref custom_models) = entry.models {
-                if let Some(custom) = custom_models.get(model_id) {
-                    (
-                        custom.max_tokens,
-                        custom.context_window,
-                        custom.supports_vision,
-                    )
-                } else {
-                    providers::fallback_model_values(provider_id, model_id)
-                }
-            } else {
-                providers::fallback_model_values(provider_id, model_id)
-            };
-        // supports_vision 回退链：显式配置 > 同 provider 预定义模型声明 > false
-        let supports_vision = supports_vision
-            .or_else(|| providers::predefined_vision_flag(provider_id, model_id))
-            .unwrap_or(false);
+        // Table-driven: a model that was never picked from the fetch dialog cannot be used.
+        // Case-insensitive: the table key is the canonical spelling (see find_model_key).
+        let actual_id = entry.find_model_key(model_id).ok_or_else(|| {
+            color_eyre::eyre::eyre!("模型 {} 未配置，请先在模型列表中添加", selector)
+        })?;
+        let custom = &entry.models[&actual_id];
+        let supports_vision = custom.supports_vision.unwrap_or(false);
 
-        // 推理接口分流：预定义 provider 按声明（DeepSeek/GLM 原生，发送私有
-        // thinking 开关），自定义 provider 一律按 OpenAI 标准接口（不带 thinking）
+        // Inference API split: predefined providers follow their declaration (DeepSeek/GLM native, send the
+        // private `thinking` switch); custom providers always use the standard OpenAI API (no thinking)
         let native_reasoning = providers::find_provider_def(provider_id)
             .map(|d| d.native_reasoning)
             .unwrap_or(false);
@@ -221,16 +181,16 @@ impl Config {
 
         Ok(ResolvedModel {
             config,
-            model_id: model_id.to_string(),
-            max_tokens,
-            context_window,
-            display: format!("{}/{}", provider_id, model_id),
+            model_id: actual_id.clone(),
+            max_tokens: custom.max_tokens,
+            context_window: custom.context_window,
+            display: format!("{}/{}", provider_id, actual_id),
             supports_vision,
             native_reasoning,
         })
     }
 
-    /// 解析默认模型
+    /// Resolve the default model
     pub fn resolve_default(&self) -> Result<ResolvedModel> {
         if self.main_model.is_empty() {
             return Err(color_eyre::eyre::eyre!("未配置模型，请通过设置添加"));
@@ -238,16 +198,15 @@ impl Config {
         self.resolve(&self.main_model)
     }
 
-    /// LLM 请求重试策略（运行时形态）
+    /// Retry policy for LLM requests (runtime form)
     pub fn retry_config(&self) -> crate::agent::retry::RetryConfig {
         crate::agent::retry::RetryConfig::from(&self.retry)
     }
 }
 
 impl Config {
-    /// 添加自定义模型到已有 provider，返回新模型的 display 字符串
-    /// 如果 provider 不存在会自动创建（需同时提供 base_url 和 api_key）
-    #[allow(clippy::too_many_arguments)]
+    /// Add a model to an existing provider with explicit parameters; returns the display string.
+    /// A missing provider is created automatically (requires both base_url and api_key unless predefined).
     pub fn add_custom_model(
         &mut self,
         provider_id: &str,
@@ -257,51 +216,126 @@ impl Config {
         max_tokens: u32,
         context_window: u32,
     ) -> String {
-        let entry = self
+        self.add_model_entry(
+            provider_id,
+            base_url,
+            api_key,
+            model_id,
+            CustomModelEntry {
+                max_tokens,
+                context_window,
+                // Keep supports_vision from an existing entry so re-adding does not drop user config
+                supports_vision: self.providers.get(provider_id).and_then(|e| {
+                    e.find_model_key(model_id)
+                        .and_then(|key| e.models.get(&key))
+                        .and_then(|m| m.supports_vision)
+                }),
+            },
+        )
+    }
+
+    /// Add a model with a full entry (the setup / add-model flow passes `/models` metadata here).
+    /// A missing provider is created automatically; `base_url`/`api_key` override when given.
+    pub fn add_model_entry(
+        &mut self,
+        provider_id: &str,
+        base_url: Option<&str>,
+        api_key: Option<&str>,
+        model_id: &str,
+        entry: CustomModelEntry,
+    ) -> String {
+        let provider = self
             .providers
             .entry(provider_id.to_string())
             .or_insert_with(|| ProviderEntry {
                 api_key: String::new(),
                 base_url: None,
-                models: Some(BTreeMap::new()),
+                models: BTreeMap::new(),
             });
 
         if let Some(url) = base_url {
-            entry.base_url = Some(url.to_string());
+            provider.base_url = Some(url.to_string());
         }
         if let Some(key) = api_key {
-            entry.api_key = key.to_string();
+            provider.api_key = key.to_string();
         }
 
-        let models = entry.models.get_or_insert_with(BTreeMap::new);
-        // 保留已有条目的 supports_vision（重复添加不丢用户配置）；
-        // 缺省时物化预定义声明，使 config.toml 始终反映生效值
-        let supports_vision = models
-            .get(model_id)
-            .and_then(|m| m.supports_vision)
-            .or_else(|| providers::predefined_vision_flag(provider_id, model_id));
-        models.insert(
-            model_id.to_string(),
-            CustomModelEntry {
-                max_tokens,
-                context_window,
-                supports_vision,
-            },
-        );
+        // One row per model regardless of case (find_model_key contract): the inserted
+        // spelling replaces a differently-cased pre-existing row instead of duplicating it
+        provider
+            .models
+            .retain(|k, _| !k.eq_ignore_ascii_case(model_id));
+        provider.models.insert(model_id.to_string(), entry);
 
         format!("{}/{}", provider_id, model_id)
     }
 
-    /// 删除用户自定义模型（selector = "provider/model"）。
+    /// Add the picked model ids of one provider from its cached `/models` list (the fetch
+    /// dialog's confirm action). Ids already in the table are skipped — the existing row wins.
+    /// An id missing from the cache lands on the default parameters.
     ///
-    /// - 预定义 provider 的预定义模型不可删：即使被 setup 同步写入 models 表，
-    ///   删除后也会被 available_models 的预定义合并分支复活
-    /// - models 表删空时清理 provider：自定义 provider 整条移除，预定义 provider 重置为 None（回归合并预定义模式）
-    /// - 若删除的是当前 main_model：迁移到第一个可用模型；无任何可用模型则拒绝（Err）
+    /// Requires the provider to be configured and to have a cached list. Returns the ids that
+    /// were actually added, in request order.
+    pub fn apply_discovered_models(
+        &mut self,
+        provider_id: &str,
+        model_ids: &[String],
+    ) -> Result<Vec<String>, UpdateError> {
+        let entry = self
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| UpdateError::NotFound(format!("未找到 provider: {provider_id}")))?;
+        if entry.api_key.is_empty() {
+            return Err(UpdateError::Conflict(format!(
+                "provider {provider_id} 未配置 API Key，请先完成配置"
+            )));
+        }
+        let discovery = self.discovered.get(provider_id).cloned().ok_or_else(|| {
+            UpdateError::NotFound(format!(
+                "provider {provider_id} 没有已获取的模型列表，请先获取模型"
+            ))
+        })?;
+
+        let mut added = Vec::new();
+        for id in model_ids {
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(UpdateError::Invalid("模型名称不能为空".into()));
+            }
+            if id.contains('/') {
+                return Err(UpdateError::Invalid("模型名称不能包含 /".into()));
+            }
+            let already = self
+                .providers
+                .get(provider_id)
+                .is_some_and(|e| e.find_model_key(id).is_some());
+            if already {
+                continue;
+            }
+            let entry_meta = discovery
+                .models
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(id))
+                .map(model_discovery::RemoteModel::to_model_entry)
+                .unwrap_or_else(|| CustomModelEntry {
+                    max_tokens: types::default_max_tokens(),
+                    context_window: types::default_context_window(),
+                    supports_vision: None,
+                });
+            self.add_model_entry(provider_id, None, None, id, entry_meta);
+            added.push(id.to_string());
+        }
+        Ok(added)
+    }
+
+    /// Delete a model (selector = "provider/model").
     ///
-    /// 返回 Ok(Some(新 main_model)) 表示已迁移；Ok(None) 表示 main_model 未受影响。
+    /// - When the table empties, clean up the provider: custom providers are removed entirely,
+    ///   predefined providers stay (credentials kept, back to discovered-only mode)
+    ///
+    /// - Deleting the current main_model migrates to the first available model; Err when none is available.
     pub fn remove_custom_model(&mut self, selector: &str) -> Result<Option<String>, RemoveError> {
-        // 在克隆上操作，失败（含拒绝删除场景）时保持 self 不被污染
+        // Operate on a clone: a failed deletion must not leave self half-mutated
         let mut next = self.clone();
         let migrated = next.remove_custom_model_inner(selector)?;
         *self = next;
@@ -313,48 +347,34 @@ impl Config {
             RemoveError::InvalidSelector(format!("模型格式错误，应为 provider/model: {}", selector))
         })?;
 
-        let is_predefined_model = providers::find_provider_def(provider_id)
-            .is_some_and(|d| d.models.iter().any(|m| m.id == model_id));
-        if is_predefined_model {
-            return Err(RemoveError::Predefined(format!(
-                "预定义模型 {}/{} 不可删除",
-                provider_id, model_id
-            )));
-        }
-
         let entry = self
             .providers
             .get_mut(provider_id)
             .ok_or_else(|| RemoveError::NotFound(format!("未找到 provider: {}", provider_id)))?;
-        let in_models = entry
-            .models
-            .as_ref()
-            .is_some_and(|models| models.contains_key(model_id));
-        if !in_models {
+        // Normalize to the table's canonical key so a differently-cased selector still
+        // removes the one row (see find_model_key)
+        let Some(actual_id) = entry.find_model_key(model_id) else {
             return Err(RemoveError::NotFound(format!("未找到模型: {}", selector)));
-        }
-        if let Some(models) = entry.models.as_mut() {
-            models.remove(model_id);
-        }
-
-        // models 删空后的 provider 清理
-        let entry_empty = entry
+        };
+        entry
             .models
-            .as_ref()
-            .is_some_and(|models| models.is_empty());
-        if entry_empty {
-            if providers::find_provider_def(provider_id).is_some() {
-                // 预定义 provider：models 重置为 None，回归合并预定义模式
-                entry.models = None;
-            } else {
-                // 自定义 provider：整条移除（else 分支不再使用 entry，NLL 借用已结束）
-                self.providers.remove(provider_id);
-            }
+            .remove(&actual_id)
+            .ok_or_else(|| RemoveError::NotFound(format!("未找到模型: {}", selector)))?;
+
+        if entry.models.is_empty() && providers::find_provider_def(provider_id).is_none() {
+            // Custom provider: remove the whole entry (predefined ones keep their credentials)
+            self.providers.remove(provider_id);
+            // Same as remove_provider: no stale discovery entry lingering in models.json
+            self.discovered.remove(provider_id);
         }
 
-        // main_model 迁移（仅考虑已配置的模型，未配置的预定义条目无法 resolve）
-        if self.main_model == selector {
-            match self.available_models().into_iter().find(|m| !m.needs_setup) {
+        // main_model migration (only configured models count)
+        let main_is_removed = self
+            .main_model
+            .split_once('/')
+            .is_some_and(|(pid, mid)| pid == provider_id && mid == actual_id);
+        if main_is_removed {
+            match self.available_models().into_iter().next() {
                 Some(next_model) => {
                     let display = next_model.display.clone();
                     self.main_model = display.clone();
@@ -370,11 +390,11 @@ impl Config {
         }
     }
 
-    /// 删除自定义 provider（整条含凭据与全部模型）。预定义 provider 不可删。
+    /// Delete a custom provider (the whole entry, credentials and all models). Predefined providers cannot be deleted.
     ///
-    /// main_model 迁移语义同 `remove_custom_model`。
+    /// main_model migration semantics match `remove_custom_model`.
     pub fn remove_provider(&mut self, provider_id: &str) -> Result<Option<String>, RemoveError> {
-        // 在克隆上操作，失败时保持 self 不被污染
+        // Operate on a clone: a failed deletion must not leave self half-mutated
         let mut next = self.clone();
         let migrated = next.remove_provider_inner(provider_id)?;
         *self = next;
@@ -395,14 +415,15 @@ impl Config {
             )));
         }
         self.providers.remove(provider_id);
-
-        // main_model 指向该 provider 下的模型 → 迁移（仅考虑已配置的模型）
+        // Drop the stale discovery cache entry so it does not linger in models.json forever
+        self.discovered.remove(provider_id);
+        // main_model points at a model of this provider -> migrate (only configured models count)
         if self
             .main_model
             .split_once('/')
             .is_some_and(|(pid, _)| pid == provider_id)
         {
-            match self.available_models().into_iter().find(|m| !m.needs_setup) {
+            match self.available_models().into_iter().next() {
                 Some(next_model) => {
                     let display = next_model.display.clone();
                     self.main_model = display.clone();
@@ -418,56 +439,230 @@ impl Config {
         }
     }
 
-    /// 确保 provider 的 model 列表已写入配置（从预定义同步过来）
-    pub fn ensure_provider_models(&mut self, provider_id: &str) {
-        if let Some(entry) = self.providers.get_mut(provider_id) {
-            if entry.models.is_some() {
-                return;
+    /// Update an existing model in place (the settings page "edit model" action).
+    ///
+    /// - Omitted fields keep the configured value
+    /// - `model_id` renames when given
+    ///
+    /// Returns the resulting selector (identical to the input when nothing was renamed).
+    pub fn update_model(
+        &mut self,
+        selector: &str,
+        model_id: Option<&str>,
+        context_window: Option<u32>,
+        max_tokens: Option<u32>,
+        supports_vision: Option<bool>,
+    ) -> Result<String, UpdateError> {
+        // Clone-and-commit: a rejected edit must not leave self half-mutated
+        let mut next = self.clone();
+        let updated = next.update_model_inner(
+            selector,
+            model_id,
+            context_window,
+            max_tokens,
+            supports_vision,
+        )?;
+        *self = next;
+        Ok(updated)
+    }
+
+    fn update_model_inner(
+        &mut self,
+        selector: &str,
+        model_id: Option<&str>,
+        context_window: Option<u32>,
+        max_tokens: Option<u32>,
+        supports_vision: Option<bool>,
+    ) -> Result<String, UpdateError> {
+        let (provider_id, current_id) = selector.split_once('/').ok_or_else(|| {
+            UpdateError::InvalidSelector(format!("模型格式错误，应为 provider/model: {selector}"))
+        })?;
+
+        if context_window == Some(0) {
+            return Err(UpdateError::Invalid("上下文窗口必须为正整数".into()));
+        }
+        if max_tokens == Some(0) {
+            return Err(UpdateError::Invalid("输出上限必须为正整数".into()));
+        }
+
+        let entry = self
+            .providers
+            .get_mut(provider_id)
+            .ok_or_else(|| UpdateError::NotFound(format!("未找到 provider: {provider_id}")))?;
+        if entry.api_key.is_empty() {
+            return Err(UpdateError::Conflict(format!(
+                "provider {provider_id} 未配置 API Key，请先完成配置"
+            )));
+        }
+        // Only table rows are editable, so a PUT can never conjure a new one.
+        // Normalize to the table's canonical key so lookups/removals below stay consistent
+        // when the selector's casing differs (see find_model_key).
+        let Some(actual_id) = entry.find_model_key(current_id) else {
+            return Err(UpdateError::NotFound(format!("未找到模型: {selector}")));
+        };
+        let Some(current) = entry.models.get(&actual_id).cloned() else {
+            return Err(UpdateError::NotFound(format!("未找到模型: {selector}")));
+        };
+
+        let target_id = match model_id.map(str::trim) {
+            Some("") => return Err(UpdateError::Invalid("模型名称不能为空".into())),
+            Some(id) => id,
+            None => &actual_id,
+        };
+        if target_id.contains('/') {
+            return Err(UpdateError::Invalid("模型名称不能包含 /".into()));
+        }
+
+        let renamed = target_id != actual_id;
+        if renamed
+            && entry
+                .models
+                .keys()
+                .any(|k| *k != actual_id && k.eq_ignore_ascii_case(target_id))
+        {
+            return Err(UpdateError::Conflict(format!(
+                "模型 {target_id} 已存在于 {provider_id}"
+            )));
+        }
+
+        let updated = CustomModelEntry {
+            max_tokens: max_tokens.unwrap_or(current.max_tokens),
+            context_window: context_window.unwrap_or(current.context_window),
+            // `or` keeps the configured value when the field is omitted; None ≈ false, so
+            // there is no "unset" back to None — an explicit Some(false) covers that case
+            supports_vision: supports_vision.or(current.supports_vision),
+        };
+
+        let models = &mut entry.models;
+        if renamed {
+            models.remove(&actual_id);
+        }
+        models.insert(target_id.to_string(), updated);
+
+        let new_selector = format!("{provider_id}/{target_id}");
+        let main_is_current = self
+            .main_model
+            .split_once('/')
+            .is_some_and(|(pid, mid)| pid == provider_id && mid == actual_id);
+        if renamed && main_is_current {
+            self.main_model = new_selector.clone();
+        }
+        Ok(new_selector)
+    }
+
+    /// Update an existing provider's credentials and endpoint (the settings page "edit provider" action).
+    ///
+    /// - `api_key`: overrides when given (empty is rejected)
+    /// - `base_url`: `Some("")` clears the override and falls back to the predefined endpoint;
+    ///   rejected for custom providers, which would be left without an endpoint
+    /// - `new_id`: renames when given; predefined providers reject renames
+    /// - An unconfigured predefined provider is enabled by supplying `api_key` (same as the setup flow)
+    ///
+    /// Returns the resulting provider id.
+    pub fn update_provider(
+        &mut self,
+        provider_id: &str,
+        new_id: Option<&str>,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Result<String, UpdateError> {
+        let mut next = self.clone();
+        let updated = next.update_provider_inner(provider_id, new_id, api_key, base_url)?;
+        *self = next;
+        Ok(updated)
+    }
+
+    fn update_provider_inner(
+        &mut self,
+        provider_id: &str,
+        new_id: Option<&str>,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Result<String, UpdateError> {
+        let def = providers::find_provider_def(provider_id);
+        let mut entry = match self.providers.get(provider_id).cloned() {
+            Some(entry) => entry,
+            // Unconfigured predefined provider: fill in the key to enable it (same as the setup flow)
+            None if def.is_some() => ProviderEntry {
+                api_key: String::new(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+            None => {
+                return Err(UpdateError::NotFound(format!(
+                    "未找到 provider: {provider_id}"
+                )));
             }
-            entry.models = providers::predefined_models_table(provider_id);
-        }
-    }
+        };
 
-    /// 将预定义 provider 添加到配置（如果还不存在）
-    pub fn add_predefined_provider(&mut self, provider_id: &str, api_key: &str) {
-        if self.providers.contains_key(provider_id) {
-            self.ensure_provider_models(provider_id);
-            return;
+        if let Some(key) = api_key.map(str::trim) {
+            if key.is_empty() {
+                return Err(UpdateError::Invalid("API Key 不能为空".into()));
+            }
+            entry.api_key = key.to_string();
         }
-        if let Some(models) = providers::predefined_models_table(provider_id) {
-            self.providers.insert(
-                provider_id.to_string(),
-                ProviderEntry {
-                    api_key: api_key.to_string(),
-                    base_url: None,
-                    models: Some(models),
-                },
-            );
+        if entry.api_key.is_empty() {
+            return Err(UpdateError::Conflict(format!(
+                "provider {provider_id} 尚未配置 API Key，请填写后保存"
+            )));
         }
-    }
 
-    /// 存量配置迁移：将 models 表中 supports_vision 缺省（None）且命中预定义表
-    /// 的条目补写预定义声明值。显式配置（含 false）与自定义 provider 不动。
-    /// 返回是否有变更（调用方据此决定是否 save）。
-    pub fn migrate_predefined_vision_flags(&mut self) -> bool {
-        let mut changed = false;
-        for (pid, entry) in self.providers.iter_mut() {
-            let Some(models) = entry.models.as_mut() else {
-                continue;
-            };
-            for (mid, custom) in models.iter_mut() {
-                if custom.supports_vision.is_none()
-                    && let Some(sv) = providers::predefined_vision_flag(pid, mid)
-                {
-                    custom.supports_vision = Some(sv);
-                    changed = true;
+        if let Some(url) = base_url {
+            let url = url.trim();
+            if url.is_empty() {
+                if def.is_none() {
+                    return Err(UpdateError::Invalid(format!(
+                        "自定义服务商 {provider_id} 必须提供 API 地址"
+                    )));
                 }
+                entry.base_url = None;
+            } else if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(UpdateError::Invalid(
+                    "API 地址必须以 http:// 或 https:// 开头".into(),
+                ));
+            } else {
+                entry.base_url = Some(url.to_string());
             }
         }
-        changed
+
+        let target_id = match new_id.map(str::trim) {
+            Some("") => return Err(UpdateError::Invalid("服务商标识不能为空".into())),
+            Some(id) => id,
+            None => provider_id,
+        };
+
+        if target_id != provider_id {
+            if def.is_some() {
+                return Err(UpdateError::Conflict(format!(
+                    "预定义服务商 {provider_id} 不可重命名"
+                )));
+            }
+            if target_id.contains('/') {
+                return Err(UpdateError::Invalid("服务商标识不能包含 /".into()));
+            }
+            if providers::find_provider_def(target_id).is_some()
+                || self.providers.contains_key(target_id)
+            {
+                return Err(UpdateError::Conflict(format!("服务商 {target_id} 已存在")));
+            }
+            self.providers.remove(provider_id);
+            // Keep the discovery cache reachable: resolve/available_models look it up by provider id
+            if let Some(disc) = self.discovered.remove(provider_id) {
+                self.discovered.insert(target_id.to_string(), disc);
+            }
+            // main_model carries the provider id as its prefix, so it follows the rename
+            let main_model = self.main_model.clone();
+            if let Some((pid, mid)) = main_model.split_once('/')
+                && pid == provider_id
+            {
+                self.main_model = format!("{target_id}/{mid}");
+            }
+        }
+        self.providers.insert(target_id.to_string(), entry);
+        Ok(target_id.to_string())
     }
 
-    /// 返回当前所有已配置 provider 的列表（用于 UI 中选择目标 provider）
+    /// All configured providers (used by the UI to pick a target provider)
     pub fn configured_providers(&self) -> Vec<ProviderInfo> {
         let mut result = Vec::new();
         for (pid, entry) in &self.providers {
@@ -485,7 +680,7 @@ impl Config {
         result
     }
 
-    /// 持久化保存到配置文件
+    /// Persist to the config file
     pub fn save(&self) -> Result<()> {
         toml_serde::save_config(self)
     }
@@ -505,14 +700,14 @@ pub struct ResolvedModel {
     pub max_tokens: u32,
     pub context_window: u32,
     pub display: String,
-    /// 模型是否支持视觉（图片）输入；不支持时附件在请求组装层降级为提示文本
+    /// Whether the model accepts image input; when not, attachments are downgraded to hint text at request assembly
     pub supports_vision: bool,
-    /// 是否为 DeepSeek/GLM 原生推理接口（决定是否发送私有 `thinking`
-    /// 开关；reasoning_effort 三档值两边生态通用，恒直传）
+    /// Whether this uses the native DeepSeek/GLM reasoning API (decides whether to send the private
+    /// `thinking` switch; the three reasoning_effort levels are common to both ecosystems and always passed through)
     pub native_reasoning: bool,
 }
 
-// ── 配置文件 I/O ─────────────────────────────────────────────
+// ── Config file I/O ──────────────────────────────────────────
 
 fn config_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().wrap_err("无法获取用户主目录")?;
@@ -523,13 +718,13 @@ fn config_file_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CONFIG_FILE_NAME))
 }
 
-/// 加载结果：配置就绪或需要初始化设置
+/// Load result: config is ready, or initial setup is required
 pub enum LoadResult {
     Ready(Box<Config>),
     NeedsSetup,
 }
 
-/// 读取配置文件，判断是否需要初始化
+/// Read the config file and decide whether initial setup is needed
 pub fn load() -> Result<LoadResult> {
     let path = config_file_path()?;
 
@@ -541,6 +736,7 @@ pub fn load() -> Result<LoadResult> {
         .wrap_err_with(|| format!("无法读取配置文件: {}", path.display()))?;
     let mut config: Config = toml::from_str(&content)
         .wrap_err_with(|| format!("无法解析配置文件: {}", path.display()))?;
+    config.discovered = model_discovery::load_cache();
 
     if config.compact_threshold <= 0.0 || config.compact_threshold >= 1.0 {
         config.compact_threshold = default_compact_threshold();
@@ -551,18 +747,11 @@ pub fn load() -> Result<LoadResult> {
         return Ok(LoadResult::NeedsSetup);
     }
 
-    // 存量配置迁移：supports_vision 缺省且命中预定义表的条目物化声明值。
-    // save 失败静默忽略——resolve 的回退链已保证运行时取值正确。
-    if config.migrate_predefined_vision_flags() {
-        let _ = toml_serde::save_config(&config);
-    }
-
     if config.main_model.is_empty() {
         let available = config.available_models();
         if available.is_empty() {
             return Ok(LoadResult::NeedsSetup);
         }
-        // 自动将第一个可用模型设为默认
         config.main_model = available[0].display.clone();
     }
 

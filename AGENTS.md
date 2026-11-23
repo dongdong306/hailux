@@ -128,11 +128,24 @@ subagent delegation, and custom slash commands.
 - `permission/` — Permission engine: rules (`mod.rs::default_rules()`), `bash_arity.rs`
   (command-arity parsing for file-path detection), `bash_readonly.rs` (plan-mode bash gate).
 - `config/` — Model/provider config in `~/.hailux/config.toml`, split into `mod.rs`
-  (Config + load/resolve), `providers.rs` (predefined provider/model tables), `types.rs`
-  (TOML structs), `toml_serde.rs` (serialization + atomic save). Predefined providers:
-  `deepseek`, `zhipu-coding-plan`; custom supported. Selector format `provider/model`.
-  `resolve()` returns `ResolvedModel`. Also holds `compact_threshold`, `[retry]`
-  (transient-error retry tuning), and `reasoning_effort` (per-provider gated).
+  (Config + load/resolve), `providers.rs` (built-in provider table: id / name / base_url /
+  `native_reasoning` only — **no hardcoded models**), `types.rs` (TOML structs),
+  `toml_serde.rs` (serialization + atomic save), `model_discovery.rs`
+  (fetch `GET {base_url}/models`, cache in `~/.hailux/models.json`; manual refresh only —
+  `R` in the TUI model picker or `POST /api/models/discover` on the web, both through the
+  shared `model_discovery::fetch_provider_models`; the web endpoint also fetches with
+  unsaved credentials for the add-model flows). The visible model list is exactly
+  the provider's model table: `/models` results are only a hint layer (cached in
+  `~/.hailux/models.json`) feeding the fetch dialogs — TUI (R key in the picker, and the
+  setup flow after the API key) and web (`POST /api/models/discover` + checkbox dialog) let
+  the user tick models, and `POST /api/models/apply-discovered` / `Config::apply_discovered_models`
+  materialize the picked rows with the reported metadata; already-present rows win and the
+  main model is never switched by a fetch. `resolve()` is table-driven only — an unlisted
+  model cannot be used.
+  Built-in providers: `deepseek`, `zhipu-coding-plan` (endpoint + `thinking` switch only);
+  custom supported. Selector format `provider/model`. `resolve()` returns `ResolvedModel`.
+  Also holds `compact_threshold`, `[retry]` (transient-error retry tuning), and
+  `reasoning_effort`.
 - `mcp/` — MCP client via `rmcp`: `config.rs` reads `~/.hailux/mcp.toml` (stdio + http
   transports, auto-generates commented sample); `client.rs` connects in background and
   registers tools. `SharedMcpBackends` shared with `TaskTool` for subagent MCP access.
@@ -155,7 +168,9 @@ subagent delegation, and custom slash commands.
   `chat_events.rs` (CoreEvent handling), `chat_input.rs` (+ `paste.rs` — the PasteBurst
   state machine, `attachments.rs` — image attach helpers), `session_ops.rs`, `app_render.rs`,
   `overlay/` (model/effort/setup/skills/stats/mcp/tasks overlay events, dispatched from
-  `overlay/mod.rs`), `types.rs` (`AppState`). `ask_user.rs`
+  `overlay/mod.rs`; the model picker's `R` key refreshes a provider's `/models` list via a
+  background task that reports back as `AppEvent::ModelsRefreshed`), `types.rs` (`AppState`).
+  `ask_user.rs`
   (question dialog + `ask_escape`), `history_cell/`
   (history rendering units by cell type: message/tool/task/todo/diff/`ask_user_render.rs`
   — incl. `parse_ask_user_pairs`), `event.rs` (async event channel),

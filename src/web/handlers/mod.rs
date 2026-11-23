@@ -1,4 +1,4 @@
-//! REST handlers：会话管理、工作目录、权限/提问回复、模型、技能、MCP、模式。
+//! REST handlers: sessions, work dirs, permission/ask replies, models, skills, MCP, modes.
 
 use std::sync::Arc;
 
@@ -48,11 +48,20 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         )
         .route(
             "/api/models/custom",
-            post(models::create_model).delete(models::delete_model),
+            post(models::create_model)
+                .put(models::update_model)
+                .delete(models::delete_model),
+        )
+        .route("/api/models/discover", post(models::discover_models))
+        .route(
+            "/api/models/apply-discovered",
+            post(models::apply_discovered),
         )
         .route(
             "/api/providers",
-            get(models::list_providers).delete(models::delete_provider),
+            get(models::list_providers)
+                .put(models::update_provider)
+                .delete(models::delete_provider),
         )
         .route(
             "/api/skills",
@@ -78,16 +87,16 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         .route("/api/instance", get(instance_info))
 }
 
-// ── 实例探测 ─────────────────────────────────────────────────
+// ── Instance probe ──────────────────────────────────────────
 
-/// 实例探测端点：`hailux web` 启动时用于识别同机其他 hailux Web UI
-/// 实例。响应标记值与 `mod.rs::detect_hailux_instance` 锁步
-/// （共享 [`super::INSTANCE_MARKER_APP`]）。
+/// Instance probe endpoint: `hailux web` uses it at startup to detect other hailux Web UI
+/// instances on the same machine. The marker value stays in lockstep with
+/// `mod.rs::detect_hailux_instance` (they share [`super::INSTANCE_MARKER_APP`]).
 async fn instance_info() -> impl IntoResponse {
     Json(serde_json::json!({ "app": super::INSTANCE_MARKER_APP }))
 }
 
-// ── 辅助 ─────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────
 
 pub(super) fn resolve_dir(state: &WebServerState, work_dir: Option<&str>) -> std::path::PathBuf {
     match work_dir {
@@ -100,7 +109,7 @@ pub(super) fn err500(e: color_eyre::eyre::Report) -> Response {
     (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
 }
 
-/// 剥离 Windows verbatim 前缀，前端展示用
+/// Strip the Windows verbatim prefix for frontend display
 pub(crate) fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\")
         .map(|s| s.to_string())

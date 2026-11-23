@@ -38,25 +38,25 @@ use crate::storage::ChatStorage;
 
 use super::chat_widget::RenderCache;
 
-/// 批量消费积压事件的时间预算，超时后立即渲染，避免高速输出时 UI 卡顿
+/// Time budget for batch-draining backlogged events; render immediately once exceeded to avoid UI stutter during fast output
 pub(super) const BATCH_RENDER_BUDGET: Duration = Duration::from_millis(50);
-/// 单次批量消费的事件上限，防止极端积压下长时间占用
+/// Cap on events consumed per batch, preventing long occupation under extreme backlogs
 pub(super) const BATCH_MAX_EVENTS: usize = 128;
 
-/// 文件选择器状态
+/// File picker state
 #[derive(Default)]
 pub(super) struct FilePickerState {
     pub(super) active: bool,
     pub(super) results: Vec<String>,
     pub(super) selected: usize,
     pub(super) pending_mentions: Vec<(String, String)>,
-    /// 懒缓存的路径列表（path, lowercase），picker 会话期间只遍历一次文件系统。
-    /// None = 尚未构建，Some(vec) = 已构建（可能为空）
+    /// Lazily cached path list (path, lowercase); the filesystem is walked once per picker session.
+    /// None = not built yet, Some(vec) = built (possibly empty)
     pub(super) cached: Option<Vec<(String, String)>>,
 }
 
 impl FilePickerState {
-    /// 输入内容被消费/重置时调用：关闭 picker 并清空缓存，下次 `@` 重新扫描
+    /// Called when input content is consumed/reset: closes the picker and clears the cache; the next `@` rescans
     pub(super) fn reset(&mut self) {
         self.active = false;
         self.results.clear();
@@ -66,7 +66,7 @@ impl FilePickerState {
     }
 }
 
-/// 命令补全建议
+/// Command completion suggestion
 #[derive(Default)]
 pub(super) struct CommandSuggestion {
     pub(super) show: bool,
@@ -74,29 +74,29 @@ pub(super) struct CommandSuggestion {
     pub(super) selected: usize,
 }
 
-/// Windows bracketed paste 标记配对状态机。
+/// State machine for pairing Windows bracketed paste markers.
 ///
-/// crossterm 的 Windows 输入源走 Win32 `ReadConsoleInput`（INPUT_RECORD 按键），
-/// 没有 VT 输入解析——**永远不会产生 `Event::Paste`**。WT 按约定（对齐 Claude Code
-/// 等的空 paste 协议）在剪贴板只有图片时发送 `\e[200~\e[201~`（空 bracketed paste）；
-/// 由于 conhost 在 WinAPI 输入模式丢弃该序列，实际到达应用的是「Ctrl+V Release
-/// 泄漏」或按键流两种形态之一（paste_probe 实测，见 event.rs / chat_input.rs）。
-/// 按键流形态下 `\e[200~` 已被 conhost 拆成一串 `Esc`、`[`、`2`、`0`、`0`、`~`
-/// 按键，并被 PasteBurst 组装成文本交给 [`super::App::handle_paste`]。
+/// crossterm's Windows input source goes through Win32 `ReadConsoleInput` (INPUT_RECORD key events)
+/// with no VT input parsing — it can **never produce `Event::Paste`**. Per convention (aligned
+/// with the empty-paste protocol used by Claude Code and others), WT sends `\e[200~\e[201~` (an
+/// empty bracketed paste) when the clipboard holds only an image; conhost drops that sequence in
+/// WinAPI input mode, so what reaches the app is either a "Ctrl+V Release leak" or a key-event
+/// stream (verified with paste_probe; see event.rs / chat_input.rs). There conhost has already split
+/// `\e[200~` into `Esc`, `[`, `2`, `0`, `0`, `~` keys, which PasteBurst reassembles into text for [`super::App::handle_paste`].
 ///
-/// 因此在 handle_paste 层做标记剥离与配对：
-/// - 仅 start+end 标记、无内容 → 空 paste（图片剪贴板 Ctrl+V）→ 触发剪贴板探测
-/// - 标记夹文本 → 剥掉标记后按普通粘贴处理
+/// Marker stripping and pairing therefore happen at the handle_paste layer:
+/// - start+end markers with no content → empty paste (image-clipboard Ctrl+V) → trigger clipboard probing
+/// - markers wrapping text → strip the markers and treat it as a normal paste
 #[derive(Default)]
 pub(super) struct BracketPasteState {
-    /// 已见 `[200~`（start 标记），等待 `[201~`
+    /// Saw `[200~` (start marker), waiting for `[201~`
     pub(super) pending_start: bool,
-    /// 状态建立时间；超时（孤立标记）自动失效
+    /// When the state was established; expires automatically on timeout (orphan marker)
     pub(super) at: Option<Instant>,
 }
 
-/// Esc 误清恢复快照。Windows 下 `\e[200~` 序列的首字节是 Esc，会把输入框
-/// 连同附件/粘贴/提及元素一起误清空；紧接着出现 paste 标记时整体恢复。
+/// Snapshot for recovering from accidental Esc clears. On Windows the first byte of a `\e[200~` sequence
+/// is Esc, wiping the input box along with attachment/paste/mention elements; restored wholesale when paste markers follow.
 #[derive(Default)]
 pub(super) struct EscClearedSnapshot {
     pub(super) text: String,
@@ -106,7 +106,7 @@ pub(super) struct EscClearedSnapshot {
 }
 
 impl EscClearedSnapshot {
-    /// 从当前输入框状态抓取快照（take 语义：原状态被清空）
+    /// Grabs a snapshot of the current input state (take semantics: the original state is cleared)
     pub(super) fn take_from(app: &mut App) -> Self {
         Self {
             text: app.input.text().to_string(),
@@ -117,51 +117,51 @@ impl EscClearedSnapshot {
     }
 }
 
-/// Task 跟踪
+/// Task tracking
 #[derive(Default)]
 pub(super) struct TaskTracker {
     pub(super) records: Vec<TaskRecord>,
     pub(super) call_counter: u64,
-    /// 当前运行中的 task 调用对应记录（并发批次含多个）
+    /// Records for in-flight task calls (a concurrent batch holds several)
     pub(super) active_call_ids: Vec<u64>,
 }
 
-/// Spinner 动画
+/// Spinner animation
 #[derive(Default)]
 pub(super) struct Spinner {
     pub(super) frame: usize,
     pub(super) last_tick: Option<Instant>,
 }
 
-/// 请求计时统计
+/// Request timing stats
 #[derive(Default)]
 pub(super) struct TimingStats {
     pub(super) user_msg_sent_at: Option<Instant>,
     pub(super) last_total_ms: Option<u64>,
-    /// 累计暂停时长：等待用户输入的弹窗（权限确认 / ask）期间不计入耗时
+    /// Accumulated paused time: dialogs waiting for user input (permission / ask) don't count toward elapsed time
     pub(super) paused_total: Duration,
-    /// 当前暂停起点；Some = 正处于弹窗等待用户输入
+    /// Start of the current pause; Some = currently blocked on a dialog waiting for user input
     pub(super) paused_at: Option<Instant>,
 }
 
 impl TimingStats {
-    /// 进入等待用户输入的状态（Permission / AskUser 弹窗）时调用。
-    /// 已在暂停中或没有进行中的请求时为无操作。
+    /// Called when entering a wait-for-user-input state (Permission / AskUser dialog).
+    /// No-op if already paused or no request is in flight.
     pub(super) fn pause(&mut self) {
         if self.user_msg_sent_at.is_some() && self.paused_at.is_none() {
             self.paused_at = Some(Instant::now());
         }
     }
 
-    /// 弹窗关闭（回复完成 / 取消 / Esc）后调用，恢复计时。
+    /// Called after the dialog closes (reply done / canceled / Esc); resumes timing.
     pub(super) fn resume(&mut self) {
         if let Some(paused_at) = self.paused_at.take() {
             self.paused_total += paused_at.elapsed();
         }
     }
 
-    /// 扣除暂停时间后的等效发送时刻。
-    /// 暂停中该值随时间同步后移，使 `elapsed()` 显示为冻结值。
+    /// Effective send instant with paused time deducted.
+    /// While paused this value shifts forward in lockstep with the clock, so `elapsed()` appears frozen.
     pub(super) fn effective_sent_at(&self, now: Instant) -> Option<Instant> {
         let sent_at = self.user_msg_sent_at?;
         let mut adjust = self.paused_total;
@@ -171,40 +171,40 @@ impl TimingStats {
         Some(sent_at + adjust)
     }
 
-    /// 扣除暂停时间后的实际耗时（毫秒）。
+    /// Actual elapsed time in milliseconds with paused time deducted.
     pub(super) fn effective_elapsed_ms(&self, now: Instant) -> Option<u64> {
         self.effective_sent_at(now)
             .map(|t| now.duration_since(t).as_millis() as u64)
     }
 
-    /// 清空暂停状态（新请求开始 / 一轮请求结束时）。
+    /// Clears pause state (a new request starts / a request round ends).
     pub(super) fn clear_pause(&mut self) {
         self.paused_total = Duration::ZERO;
         self.paused_at = None;
     }
 
-    /// 开始一轮新的请求计时：记录发送时刻、清空上一轮耗时与暂停状态。
+    /// Starts timing a new request round: records the send instant and resets the previous round's elapsed time and pause state.
     pub(super) fn start_request(&mut self) {
         self.user_msg_sent_at = Some(Instant::now());
         self.last_total_ms = None;
         self.clear_pause();
     }
 
-    /// 结束计时：记录最终耗时并清空进行中状态。
+    /// Finishes timing: records the final elapsed time and clears in-flight state.
     pub(super) fn finish(&mut self, now: Instant) {
         self.last_total_ms = self.effective_elapsed_ms(now);
         self.user_msg_sent_at = None;
         self.clear_pause();
     }
 
-    /// 中止计时：不记录耗时，直接清空进行中状态（用于错误 / 取消路径）。
+    /// Aborts timing: clears in-flight state without recording elapsed time (error / cancel paths).
     pub(super) fn abort(&mut self) {
         self.user_msg_sent_at = None;
         self.clear_pause();
     }
 }
 
-/// 渲染缓存与脏标记
+/// Render cache and dirty flag
 pub(super) struct RenderState {
     pub(super) cache: RenderCache,
     pub(super) cells: Vec<Box<dyn HistoryCell>>,
@@ -234,7 +234,7 @@ pub struct App {
     pub(super) should_quit: bool,
     pub(super) agent: Agent,
     pub(super) events: (EventTx, event::EventRx),
-    /// agent 领域事件发送器（经 forwarder 包装为 AppEvent::Core 进入事件循环）
+    /// Agent domain event sender (wrapped by the forwarder into `AppEvent::Core` to enter the event loop)
     pub(super) core_tx: crate::agent::event::CoreEventTx,
     pub(super) resolved: ResolvedModel,
     pub(super) state: AppState,
@@ -248,26 +248,26 @@ pub struct App {
     pub(super) last_esc_time: Option<Instant>,
     pub(super) esc_hint_active: bool,
     pub(super) pending_pastes: Vec<(String, String)>,
-    /// 待发送的图片附件（占位符文本 → 附件），随消息提交传给 agent
+    /// Pending image attachments (placeholder text → attachment), passed to the agent on message submit
     pub(super) pending_images: Vec<(String, crate::agent::media::Attachment)>,
-    /// Windows bracketed paste 标记配对状态（见 BracketPasteState 注释）
+    /// Windows bracketed paste marker pairing state (see the `BracketPasteState` docs)
     pub(super) bracket_paste: BracketPasteState,
-    /// 最近一次 Esc 清空输入框的完整状态快照（文本 + 附件/粘贴/提及）。
-    /// Windows 下 `\e[200~` / `\e[201~` 序列的首字节是 Esc，会误清输入框；
-    /// 紧接着出现 paste 标记时用于整体恢复（见 handle_paste）。
+    /// Full snapshot of the input state most recently cleared by Esc (text + attachments/pastes/mentions).
+    /// On Windows the first byte of `\e[200~` / `\e[201~` sequences is Esc, which wipes the input
+    /// box; restored wholesale when paste markers follow immediately (see handle_paste).
     pub(super) esc_cleared: Option<(EscClearedSnapshot, Instant)>,
-    /// 最近一次 Ctrl+V Press 的时间（Release 泄漏探测的去重窗口）：
-    /// 不拦截 Ctrl+V 的终端 Press+Release 成对到达，避免重复探测
+    /// Time of the most recent Ctrl+V Press (dedupe window for Release-leak probing):
+    /// terminals that don't intercept Ctrl+V deliver Press+Release in pairs; avoids duplicate probes
     pub(super) last_ctrl_v_press: Option<Instant>,
-    /// 剪贴板图片探测是否进行中（子进程探测异步分离执行，in-flight 期间
-    /// 忽略新请求，避免长按 Ctrl+V 排队大量探测）
+    /// Whether a clipboard image probe is in flight (the probe runs as a detached async child
+    /// process; new requests are ignored while in flight, so holding Ctrl+V doesn't queue a flood)
     pub(super) image_probe_in_flight: bool,
-    /// 最近一次静默剪贴板探测的发起时间（Release 泄漏 / 空 bracketed paste）。
-    /// 微信/QQ「复制图片」同时携带位图与 FileDrop，同一次 Ctrl+V 会经双通道
-    /// 到达：路径文本注入（原文件字节）+ 探测 GetImage（位图重编码字节）——
-    /// 两者 data_url 不同，attach_image 去重无法识别，需按配对时间窗丢弃副本
+    /// Start time of the most recent silent clipboard probe (Release leak / empty bracketed paste).
+    /// WeChat/QQ "copy image" carries both a bitmap and a FileDrop, so one Ctrl+V arrives via two
+    /// channels: path text injection (original file bytes) + probe GetImage (re-encoded bitmap
+    /// bytes) — the data_urls differ, so attach_image dedupe can't match them; drop copies by pairing window
     pub(super) leak_probe_started_at: Option<Instant>,
-    /// 最近一次路径注入通道挂图的时间（handle_paste 的 FileDrop→路径识别）
+    /// When an image was last attached via the path-injection channel (handle_paste's FileDrop → path recognition)
     pub(super) path_image_attached_at: Option<Instant>,
     pub(super) config: config::Config,
     pub(super) skills: Vec<SkillInfo>,
@@ -358,7 +358,7 @@ impl App {
     }
 
     pub fn enter_setup(&mut self) {
-        self.state = AppState::Setup(SetupForm::new());
+        self.state = AppState::Setup(SetupForm::new(&self.config, false));
     }
 
     pub async fn run(&mut self, terminal: &mut terminal::Tui) -> Result<()> {
@@ -401,9 +401,9 @@ impl App {
                 break;
             }
 
-            // 在非处理状态下批量消费积压的 InputKey 事件，避免粘贴时逐字符渲染导致卡顿。
-            // 粘贴（尤其无 bracketed paste 的终端）会以独立按键事件发送每个字符，
-            // 若不批量处理，每个字符都会触发一次完整渲染周期。
+            // Batch-drain backlogged InputKey events while not processing so pasting doesn't stutter
+            // with per-character renders. Pastes (especially in terminals without bracketed paste)
+            // send each character as a separate key event; without batching, each triggers a full render cycle.
             if !self.is_processing && !self.should_quit && matches!(self.state, AppState::Chat) {
                 let batch_start = Instant::now();
                 let mut batch_count = 0usize;
@@ -427,7 +427,7 @@ impl App {
                 }
             }
 
-            // 批量消费积压的流式事件（chunk/tool 等），用户交互事件暂存后逐个处理
+            // Batch-drain backlogged streaming events (chunks/tools etc.); user interaction events are parked and handled one by one
             if self.is_processing {
                 let batch_start = Instant::now();
                 let mut batch_count = 0usize;
@@ -468,7 +468,7 @@ impl App {
                     self.spinner.frame = self.spinner.frame.wrapping_add(1);
                     self.spinner.last_tick = Some(now);
                 }
-                // 5 秒后自动重置 esc 提示
+                // Auto-reset the Esc hint after 5 seconds
                 if self.esc_hint_active
                     && self
                         .last_esc_time
@@ -481,11 +481,11 @@ impl App {
 
             if !self.paste_burst.is_active() {
                 if self.render.force_clear {
-                    // 不能用 Terminal::clear()：ratatui 0.30 的 clear 为保留光标会先发 CPR
-                    // 查询（ESC[6n）读光标位置，Unix 上回复可能被 EventStream 的 stdin
-                    // 读取抢走，2s 超时导致整个应用报错退出（Windows 走 Win32 API 无此
-                    // 问题）。resize 到当前尺寸同样清屏并重置 back buffer（下一帧全量
-                    // 重绘），且不做任何输入查询，各平台行为一致。
+                    // Can't use Terminal::clear(): ratatui 0.30's clear first sends a CPR query
+                    // (ESC[6n) to read the cursor position; on Unix the reply can be swallowed by
+                    // EventStream's stdin reads, and the 2s timeout kills the whole app (Windows
+                    // goes through the Win32 API and is unaffected). Resizing to the current size
+                    // also clears the screen, resets the back buffer (full redraw next frame), and issues no input queries on any platform.
                     terminal.resize(terminal.size()?.into())?;
                     self.render.force_clear = false;
                 }
@@ -495,7 +495,7 @@ impl App {
 
         event_collector.abort();
 
-        // 如果任务仍在进行中，执行清理：标记为中断并修复 orphaned tool calls
+        // If work is still in flight, clean up: mark it interrupted and repair orphaned tool calls
         if self.is_processing {
             self.cleanup_on_quit().await;
         }
@@ -503,16 +503,16 @@ impl App {
         Ok(())
     }
 
-    /// 退出时清理：中断 agent，尝试等待 AgentComplete（2s 超时），
-    /// 超时则手动修复存储中的 orphaned tool calls 并写入 interrupted 状态。
+    /// Cleanup on quit: interrupt the agent and try to wait for AgentComplete (2s timeout);
+    /// on timeout, manually repair orphaned tool calls in storage and write the interrupted status.
     ///
-    /// 竞态安全：stream task 通过事件通道通信，cleanup 退出后其事件无人读取；
-    /// `repair_orphaned_tool_calls` 幂等（检查 existing_ids），不会产生重复记录。
-    /// 仅处理 PersistMessage 和 AgentComplete，其余 UI 事件在退出路径无需处理。
+    /// Race-safe: the stream task communicates via the event channel and nobody reads its events
+    /// after cleanup returns; `repair_orphaned_tool_calls` is idempotent (checks existing_ids) so
+    /// no duplicates. Only PersistMessage and AgentComplete are handled; other UI events don't matter on the exit path.
     async fn cleanup_on_quit(&mut self) {
         self.agent.interrupt();
 
-        // 尝试等待 AgentComplete 事件（最多 2 秒）
+        // Try to wait for the AgentComplete event (up to 2 seconds)
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if let Ok(Some(event)) =
@@ -535,13 +535,13 @@ impl App {
             }
         }
 
-        // 超时 fallback：手动修复存储
+        // Timeout fallback: repair storage manually
         if let Some(session_id) = &self.current_session_id {
             if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
                 eprintln!("[warn] repair_orphaned_tool_calls: {e}");
             }
-            // 写入 interrupted runtime_meta（思考强度取当前 Agent 值：
-            // 中断时流式快照已不可得，正常轮次的值由 AgentComplete 路径写入）
+            // Write interrupted runtime_meta (reasoning effort taken from the current Agent value:
+            // the streaming snapshot is unavailable at interrupt time; normal rounds write it via the AgentComplete path)
             let total_ms = self
                 .timing
                 .effective_elapsed_ms(Instant::now())
@@ -563,7 +563,7 @@ impl App {
         }
     }
 
-    /// 包装 handle_event，自动检测消息变更并标记 cells 缓存失效
+    /// Wraps handle_event, auto-detecting message changes and marking the cells cache dirty
     async fn process_event(&mut self, event: AppEvent) -> Result<()> {
         let streaming = matches!(
             &event,
@@ -590,7 +590,7 @@ impl App {
         Ok(())
     }
 
-    /// 判断事件是否为可批量消费的高频流式事件
+    /// Whether an event is a high-frequency streaming event eligible for batch draining
     fn is_batchable_event(event: &AppEvent) -> bool {
         match event {
             AppEvent::Core(e) => matches!(
@@ -609,15 +609,36 @@ impl App {
     }
 
     async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
-        // MCP 后台连接完成事件，不受当前 state 限制
+        // MCP background connection completion event, not gated by the current state
         if let AppEvent::McpReady(connections) = event {
             self.handle_mcp_ready(connections).await?;
             return Ok(());
         }
 
-        // 权限请求统一在此入队，不受当前 state 限制。
-        // 必须优先处理：若此时处于其他弹窗（如 AskUser）而把请求
-        // 交给对应 handler，事件会被吞掉，agent 端 oneshot 永不 resolve 而死锁。
+        // Model list fetch results: the model picker (R key) or the setup form (post-key fetch)
+        if let AppEvent::ModelsRefreshed {
+            provider_id,
+            result,
+        } = event
+        {
+            match &self.state {
+                AppState::ModelPicker { .. } => {
+                    self.handle_model_picker_event(AppEvent::ModelsRefreshed {
+                        provider_id,
+                        result,
+                    })?;
+                }
+                AppState::Setup(_) => {
+                    self.handle_setup_models_refreshed(&provider_id, result)?;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Permission requests are enqueued here regardless of the current state.
+        // Must be handled first: if another dialog (e.g. AskUser) is open and the request were
+        // routed to that handler, the event would be swallowed and the agent-side oneshot would never resolve, deadlocking.
         if let AppEvent::Core(crate::agent::event::CoreEvent::PermissionRequest {
             request,
             response_tx,
@@ -630,7 +651,7 @@ impl App {
                 subagent_name,
             };
             match &mut self.state {
-                // 弹窗已打开：新请求入队，不覆盖当前请求
+                // Dialog already open: enqueue the new request instead of overwriting the current one
                 AppState::Permission { pending: queue, .. } => queue.push(pending),
                 _ => {
                     self.state = AppState::Permission {
@@ -643,8 +664,8 @@ impl App {
             return Ok(());
         }
 
-        // 非 Chat 覆盖层状态下，非键盘事件仍需转发给 Chat 处理器，
-        // 确保 agent 响应、工具结果等不被丢弃。
+        // In non-Chat overlay states, non-keyboard events must still be forwarded to the Chat handler
+        // so agent responses, tool results, etc. aren't dropped.
         let is_overlay = !matches!(
             &self.state,
             AppState::Chat | AppState::AskUser { .. } | AppState::Permission { .. }
@@ -679,9 +700,6 @@ impl App {
             }
             AppState::EffortPicker { .. } => {
                 self.handle_effort_picker_event(event)?;
-            }
-            AppState::AddModel(_) => {
-                self.handle_add_model_event(event)?;
             }
             AppState::Skills { .. } => {
                 self.handle_skills_event(event)?;
@@ -768,10 +786,10 @@ impl App {
         Ok(())
     }
 
-    /// 回复当前权限请求（队列队首），并批量处理同组其余请求：
-    /// - Always：写入会话规则后，同组中已被新规则覆盖的请求自动放行
-    /// - Deny：同组其余 pending 请求一并拒绝
-    /// - Once：仅回复当前请求
+    /// Replies to the current permission request (queue head) and batch-handles the remaining requests in the same group:
+    /// - Always: after session rules are written, same-group requests covered by the new rules are auto-approved
+    /// - Deny: the other pending requests in the group are denied as well
+    /// - Once: only the current request is answered
     fn reply_permission(
         &mut self,
         pending: &mut Vec<crate::tui::app::types::PermissionPending>,

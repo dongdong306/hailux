@@ -222,13 +222,13 @@ pub struct SwitchModelRequest {
     pub selector: String,
 }
 
-/// Add a custom model (POST /api/models/custom). Align with TUI AddModelForm:
+/// Add a model (POST /api/models/custom). Align with the TUI setup flow:
 /// an existing provider reuses its credentials (base_url/api_key optional); a new provider requires both.
 #[derive(Debug, Deserialize)]
 pub struct CreateModelRequest {
     /// Target provider id; reuses its credentials if it exists, creates it otherwise (needs base_url + api_key)
     pub provider_id: String,
-    /// Only needed when creating a new provider; optional for predefined providers (their predefined base_url is used)
+    /// Only needed when creating a new provider; optional for predefined providers (their built-in base_url is used)
     #[serde(default)]
     pub base_url: Option<String>,
     /// Only needed when creating a new provider
@@ -236,9 +236,51 @@ pub struct CreateModelRequest {
     pub api_key: Option<String>,
     /// Model ID (e.g. qwen3-235b-a22b)
     pub model_id: String,
-    /// Context window size, defaults to 131072 (128K)
+    /// Context window size. Absent = take the `/models` metadata when cached (see /api/models/discover),
+    /// otherwise the default 262144 (256K)
     #[serde(default)]
     pub context_window: Option<u32>,
+}
+
+/// Fetch a provider's model list (POST /api/models/discover). With an api_key the (not yet
+/// saved) credentials of the add-model dialog are used; without one the saved credentials of
+/// `provider_id` apply. The result is cached under `provider_id`, so a following
+/// apply-discovered / create_model for that provider picks the metadata up.
+#[derive(Debug, Deserialize)]
+pub struct DiscoverModelsRequest {
+    /// Cache key: the provider the list belongs to (a predefined id, or the name of the custom
+    /// provider about to be created). With no base_url it must be a predefined id.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// Custom endpoint; defaults to the built-in endpoint of a predefined provider_id
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Absent/empty = use the saved key of provider_id (the fetch dialog of a configured provider)
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscoveredModelDto {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    /// Already in the provider's model table (the checkbox is pre-checked/disabled)
+    #[serde(default)]
+    pub already_added: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscoverModelsResponse {
+    /// The provider id the list was cached under (empty for a custom endpoint)
+    pub provider_id: String,
+    pub models: Vec<DiscoveredModelDto>,
 }
 
 /// Delete a custom model (DELETE /api/models/custom)
@@ -252,6 +294,56 @@ pub struct DeleteModelRequest {
 #[derive(Debug, Deserialize)]
 pub struct DeleteProviderRequest {
     pub provider_id: String,
+}
+
+/// Edit an existing model (PUT /api/models/custom). Omitted fields keep their effective values.
+#[derive(Debug, Deserialize)]
+pub struct UpdateModelRequest {
+    /// Existing selector, format provider/model
+    pub selector: String,
+    /// New model id (rename)
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Context window size (must be positive)
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    /// Output token cap (must be positive)
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Whether the model accepts image input
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
+}
+
+/// Edit an existing provider (PUT /api/providers). Omitted fields keep their current values.
+#[derive(Debug, Deserialize)]
+pub struct UpdateProviderRequest {
+    pub provider_id: String,
+    /// New provider id (rename); predefined providers cannot be renamed
+    #[serde(default)]
+    pub new_id: Option<String>,
+    /// New API key (absent = keep current)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// New endpoint; empty string clears the override and falls back to the predefined endpoint
+    /// (rejected for custom providers, which have no fallback)
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+/// Add the picked models of a fetched list to the provider's model table
+/// (POST /api/models/apply-discovered)
+#[derive(Debug, Deserialize)]
+pub struct ApplyDiscoveredRequest {
+    pub provider_id: String,
+    /// Model ids to add; ids already in the table are skipped
+    pub model_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplyDiscoveredResponse {
+    /// Ids that were actually added (skipped ones are not included)
+    pub added: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,21 +406,23 @@ pub struct ModelInfo {
     /// Context window size (absent when parsing fails, e.g. provider not configured)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-    /// Deletable (user-added; predefined models cannot be deleted and are merged back automatically)
-    pub deletable: bool,
+    /// Output token cap (max_completion_tokens); same absence rule as context_window
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Whether the model accepts image input (effective value after the fallback chain)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
     /// Whether the provider is predefined (predefined providers cannot be deleted as a whole)
     pub provider_predefined: bool,
-    /// Provider has no API Key configured (must be set up before use)
-    pub needs_setup: bool,
 }
-
-/// Configured provider entry (GET /api/providers; used to pick a target provider when adding a model)
+/// Provider entry (GET /api/providers; used to pick a target provider when adding a model):
+/// configured ones first, unconfigured predefined providers after
 #[derive(Debug, Serialize)]
 pub struct ProviderInfoDto {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    /// Predefined provider (base_url comes from the predefined table; no need to fill it in when adding a model)
+    /// Predefined provider (base_url comes from the built-in table; no need to fill it in when adding a model)
     pub predefined: bool,
     /// No API Key configured (after selecting, just fill in api_key to enable)
     pub needs_setup: bool,

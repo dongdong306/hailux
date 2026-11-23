@@ -8,27 +8,27 @@ use crossterm::event::{
 };
 use tokio::sync::mpsc;
 
-/// TUI 事件 = 领域事件（包装）+ 终端专有事件。
+/// TUI events = domain events (wrapped) + terminal-specific events.
 ///
-/// agent 只产出 `CoreEvent`；本模块的转发任务将其包装为 `AppEvent::Core`
-/// 送入终端事件循环，终端输入（键盘/粘贴/缩放/鼠标）则直接产生专有变体。
+/// The agent only produces `CoreEvent`; the forwarder task in this module wraps it as `AppEvent::Core`
+/// and feeds it into the terminal event loop, while terminal input (keyboard/paste/resize/mouse) directly produces the specific variants.
 #[derive(Debug)]
 pub enum AppEvent {
-    /// 领域事件（agent / subagent 产出）
+    /// Domain event (produced by the agent / subagent)
     Core(CoreEvent),
     InputKey(KeyEvent),
     InputPaste(String),
-    /// 用户提交一条消息，可携带图片附件与 (绝对路径, 展示相对路径) 提及对
+    /// User submits a message, optionally carrying image attachments and (absolute path, display relative path) mention pairs
     UserSubmit {
         text: String,
         attachments: Vec<crate::agent::media::Attachment>,
         mentions: Vec<(String, String)>,
     },
-    /// 检测到空 bracketed paste（Windows WT 图片剪贴板 Ctrl+V 的按键流形态），
-    /// 触发一次剪贴板图片探测（内部事件，由 handle_paste 的标记配对发出）
+    /// An empty bracketed paste was detected (the key-stream shape of image-clipboard Ctrl+V on Windows WT),
+    /// triggering one clipboard image probe (internal event, emitted via the marker pairing in handle_paste)
     PasteImageProbe,
-    /// 剪贴板图片探测结果（探测在独立任务中执行，避免阻塞事件循环）。
-    /// `interactive` 区分显式按键（未命中给提示）与静默探测（未命中无感）
+    /// Clipboard image probe result (the probe runs in a separate task to avoid blocking the event loop).
+    /// `interactive` distinguishes an explicit keypress (show a hint on miss) from a silent probe (no hint on miss)
     PasteImageResult {
         image: Option<crate::tui::clipboard::ClipboardImage>,
         interactive: bool,
@@ -37,8 +37,14 @@ pub enum AppEvent {
     ScrollUp,
     ScrollDown,
     MouseClick,
-    /// MCP 后台连接完成，携带所有连接结果供 UI 更新与工具注册
+    /// MCP background connections finished, carrying all connection results for UI updates and tool registration
     McpReady(Vec<McpConnection>),
+    /// `/models` fetch result from a background task (the model picker's fetch key or the
+    /// setup form's post-key fetch); only meaningful while the originating overlay is open
+    ModelsRefreshed {
+        provider_id: String,
+        result: Result<Vec<crate::config::model_discovery::RemoteModel>, String>,
+    },
 }
 
 pub type EventTx = mpsc::Sender<AppEvent>;
@@ -48,8 +54,8 @@ pub fn create_event_channel() -> (EventTx, EventRx) {
     mpsc::channel(4096)
 }
 
-/// 将领域事件流转发进 TUI 事件循环（`CoreEvent` → `AppEvent::Core`）。
-/// TUI 事件通道关闭时自动退出。
+/// Forwards the domain event stream into the TUI event loop (`CoreEvent` → `AppEvent::Core`).
+/// Exits automatically when the TUI event channel is closed.
 pub fn spawn_core_forwarder(mut core_rx: crate::agent::event::CoreEventRx, tx: EventTx) {
     tokio::spawn(async move {
         while let Some(event) = core_rx.recv().await {
@@ -75,8 +81,8 @@ pub async fn collect_terminal_events(tx: EventTx) {
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     let _ = tx.try_send(AppEvent::InputKey(key));
                 } else if is_ctrl_v_paste_leak(&key) {
-                    // Windows WT 把 Ctrl+V 交给 paste 动作时 Press 被终端消费、
-                    // 仅 Release 泄漏给应用——图片剪贴板场景唯一可达的事件信号
+                    // When Windows WT hands Ctrl+V to the paste action, Press is consumed by the terminal
+                    // and only Release leaks to the app — the only reachable event signal in the image-clipboard scenario
                     let _ = tx.try_send(AppEvent::InputKey(key));
                 }
             }
@@ -94,15 +100,15 @@ pub async fn collect_terminal_events(tx: EventTx) {
     }
 }
 
-/// WT（及其他把 Ctrl+V 绑定为 paste 的终端）将按键交给 paste 动作时，
-/// `Press` 被终端消费、仅 `Release` 泄漏给应用。图片剪贴板场景下，
-/// conhost 在 WinAPI 输入模式丢弃空 bracketed paste 序列（`Event::Paste`
-/// 永不产生），这个「只有 Release 没有 Press」的特征事件是唯一可达信号，
-/// 据此触发剪贴板图片探测（见 chat_input 的 handle_chat_key）。
+/// When WT (and other terminals that bind Ctrl+V to the paste action) hands the keypress to paste,
+/// `Press` is consumed by the terminal and only `Release` leaks to the app. In the image-clipboard
+/// scenario, conhost drops the empty bracketed paste sequence in WinAPI input mode (`Event::Paste`
+/// is never produced), so this "Release without Press" signature event is the only reachable signal;
+/// it triggers the clipboard image probe (see handle_chat_key in chat_input).
 ///
-/// 仅 Windows 存在该泄漏形态：Unix 开启 kitty 事件类型协议（REPORT_EVENT_TYPES）
-/// 后终端同样上报 Release，放行会导致 Ctrl+V 双探测与提示噪音，故非 Windows
-/// 一律不匹配（Release 维持原有的丢弃行为）。
+/// This leak shape exists only on Windows: on Unix, once the kitty keyboard event-type protocol
+/// (REPORT_EVENT_TYPES) is enabled the terminal reports Release too, and letting it through would
+/// cause double Ctrl+V probes and hint noise, so non-Windows never matches (Release keeps its original drop behavior).
 #[cfg(windows)]
 fn is_ctrl_v_paste_leak(key: &KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
@@ -152,7 +158,7 @@ mod tests {
         )
     }
 
-    /// WT Ctrl+V paste 泄漏形态：仅 Release + Ctrl + v（含 Shift 变体与大写）
+    /// WT Ctrl+V paste leak shape: Release only + Ctrl + v (including the Shift variant and uppercase)
     #[cfg(windows)]
     #[test]
     fn detects_ctrl_v_release_leak() {
@@ -161,13 +167,13 @@ mod tests {
             KeyCode::Char('v'),
             true
         )));
-        // WT 默认把 Ctrl+Shift+V 也绑定为 paste，crossterm 报 Char('V')
+        // WT binds Ctrl+Shift+V to paste by default too; crossterm reports Char('V')
         assert!(is_ctrl_v_paste_leak(&key(
             KeyEventKind::Release,
             KeyCode::Char('V'),
             true
         )));
-        // legacy 终端 \x16 控制字符形态
+        // legacy-terminal \x16 control-character form
         assert!(is_ctrl_v_paste_leak(&key(
             KeyEventKind::Release,
             KeyCode::Char('\x16'),
@@ -175,8 +181,8 @@ mod tests {
         )));
     }
 
-    /// Press / 无 Ctrl / 其他键的 Release 均不匹配
-    /// （非 Windows 下 stub 恒 false，本测试同样成立）
+    /// Press / missing Ctrl / Release of other keys all fail to match
+    /// (on non-Windows the stub always returns false, so this test holds there as well)
     #[test]
     fn rejects_non_leak_keys() {
         assert!(!is_ctrl_v_paste_leak(&key(

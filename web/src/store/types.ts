@@ -4,11 +4,15 @@ import type {
   ChatMention,
   CommandInfo,
   CreateModelInput,
+  DiscoverModelsInput,
+  DiscoverModelsResult,
   ModelInfo,
   ProviderOption,
   QuestionInfo,
   SessionInfo,
   StatsResponse,
+  UpdateModelInput,
+  UpdateProviderInput,
 } from "../runtime/types";
 import type { SseSession } from "../runtime/sse-client";
 
@@ -174,7 +178,7 @@ export interface AppState {
   models: ModelInfo[];
   /** Provider list (incl. unconfigured predefined providers; for the add-model form) */
   providers: ProviderOption[];
-  /** Add-model dialog; may open with a preset (provider card / needs-setup model entry) */
+  /** Add-model dialog; may open with a preset (provider card / model id prefill) */
   showAddModel: boolean;
   addModelPreset: { provider: string; modelId?: string } | null;
   /** Slash command list (refreshed when workDir changes) */
@@ -209,12 +213,22 @@ export interface AppState {
   loadSessions: () => Promise<void>;
   loadModels: () => Promise<void>;
   loadProviders: () => Promise<void>;
-  /** Add a custom model and auto-switch to it */
+  /** Add a model and auto-switch to it */
   addModel: (input: CreateModelInput) => Promise<void>;
+  /** Edit an existing model's parameters (and optionally rename it) */
+  updateModel: (input: UpdateModelInput) => Promise<void>;
   /** Delete a custom model (backend auto-migrates when the current model is deleted) */
   deleteModel: (selector: string) => Promise<void>;
+  /** Edit an existing provider's credentials / endpoint (and optionally rename it) */
+  updateProvider: (input: UpdateProviderInput) => Promise<void>;
   /** Delete a custom provider (entire entry incl. credentials and all its models) */
   deleteProvider: (providerId: string) => Promise<void>;
+  /** Add the checked models of a fetched list to a provider's model table
+   * (returns the ids that were actually added) */
+  applyDiscoveredModels: (providerId: string, modelIds: string[]) => Promise<string[]>;
+  /** Fetch a model list: with unsaved credentials (add-model dialog) or through the saved
+   * credentials of a configured provider (fetch dialog); cached server-side */
+  discoverModels: (input: DiscoverModelsInput) => Promise<DiscoverModelsResult>;
   loadWorkdirs: () => Promise<void>;
   loadCommands: () => Promise<void>;
   /** Switch main area view; refresh list when entering skills/mcp */
