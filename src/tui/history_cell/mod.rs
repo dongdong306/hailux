@@ -158,11 +158,16 @@ pub(crate) fn messages_to_cells(
 
     while i < messages.len() {
         match &messages[i] {
-            Message::User { text, plan_mode } => {
+            Message::User {
+                text,
+                plan_mode,
+                mentions,
+            } => {
                 last_plan_mode = *plan_mode;
                 cells.push(Box::new(UserMessageCell {
                     text: text.clone(),
                     plan_mode: *plan_mode,
+                    mentions: mentions.clone(),
                 }));
                 i += 1;
             }

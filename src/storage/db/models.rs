@@ -137,4 +137,7 @@ pub struct StoredMessage {
     pub compacted: bool,
     /// 图片附件 JSON（[{mime, data_url}]）；仅用户消息使用
     pub attachments: Option<String>,
+    /// @ 提及元数据 JSON（[{start, end, kind}]，码点偏移）；仅用户消息使用
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<String>,
 }

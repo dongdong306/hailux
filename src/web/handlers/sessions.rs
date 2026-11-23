@@ -272,13 +272,15 @@ pub(super) async fn search_files(
 
     let result = tokio::task::spawn_blocking(move || -> Vec<String> {
         let walker = ignore::WalkBuilder::new(&root)
-            .hidden(true)
+            .hidden(false)
             .git_ignore(true)
-            .git_global(true)
             .git_exclude(true)
             .filter_entry(|e| {
                 let name = e.file_name().to_string_lossy().to_lowercase();
-                name != "node_modules" && name != "target" && name != ".git"
+                let ignored = crate::agent::IGNORED_DIRS.contains(&name.as_str())
+                    || name == "node_modules"
+                    || name == "target";
+                !ignored
             })
             .build();
         let mut hits = Vec::new();
@@ -290,13 +292,14 @@ pub(super) async fn search_files(
             if rel.is_empty() {
                 continue;
             }
+            let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+            let rel = if is_dir { format!("{rel}/") } else { rel };
             if keyword.is_empty() || rel.to_lowercase().contains(&keyword) {
                 hits.push(rel);
-                if hits.len() >= 50 {
-                    break;
-                }
             }
         }
+        hits.sort();
+        hits.truncate(50);
         hits
     })
     .await;

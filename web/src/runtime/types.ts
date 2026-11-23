@@ -97,6 +97,8 @@ export interface StoredMessage {
   compacted: boolean;
   /** 图片附件 JSON（[{mime, data_url}]）；仅用户消息使用 */
   attachments: string | null;
+  /** @ 提及元数据 JSON（[{start, end, kind}]，码点偏移）；仅用户消息使用 */
+  mentions?: string | null;
 }
 
 export interface SessionDetail {
@@ -169,9 +171,17 @@ export interface ChatAttachment {
   data_url: string;
 }
 
+/** @ 提及元数据：start/end 为 content 中的 Unicode 码点偏移（后端契约 protocol.rs `ChatMention`） */
+export interface ChatMention {
+  start: number;
+  end: number;
+  kind: string;
+}
+
 export interface ChatRequest {
   message: string;
   attachments?: ChatAttachment[];
+  mentions?: ChatMention[];
   session_id?: string;
   work_dir?: string;
 }

@@ -73,9 +73,12 @@ impl App {
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
                         .and_then(|v| v.get("plan_mode").and_then(|v| v.as_bool()))
                         .unwrap_or(false);
+                    let (text, mention_spans) =
+                        mention_display(&msg.content, msg.mentions.as_deref(), &self.work_dir);
                     display_messages.push(Message::User {
-                        text: msg.content.clone(),
+                        text,
                         plan_mode,
+                        mentions: mention_spans,
                     });
                 }
                 MessageRole::Assistant => {
@@ -366,4 +369,67 @@ impl App {
         self.state = AppState::Chat;
         Ok(())
     }
+}
+
+fn mention_relative_path(abs: &str, work_dir: &str) -> String {
+    let norm = |s: &str| s.replace('\\', "/");
+    let wd = norm(work_dir);
+    let wd = wd.trim_end_matches('/');
+    let p = norm(abs);
+    if wd.is_empty() {
+        return p;
+    }
+    let prefix = format!("{wd}/");
+    if p.len() >= prefix.len() && p[..prefix.len()].to_lowercase() == prefix.to_lowercase() {
+        p[prefix.len()..].to_string()
+    } else {
+        p
+    }
+}
+
+fn mention_display(
+    content: &str,
+    mentions_json: Option<&str>,
+    work_dir: &str,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let Some(json) = mentions_json else {
+        return (content.to_string(), Vec::new());
+    };
+    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return (content.to_string(), Vec::new());
+    };
+
+    let mut replacements: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for m in &list {
+        let start = m.get("start").and_then(|v| v.as_u64());
+        let end = m.get("end").and_then(|v| v.as_u64());
+        if let (Some(s), Some(e)) = (start, end)
+            && let Some(r) = super::types::char_range_to_byte_range(content, s as usize, e as usize)
+        {
+            let token = &content[r.clone()];
+            let abs = token.strip_prefix('@').unwrap_or(token);
+            replacements.push((r, mention_relative_path(abs, work_dir)));
+        }
+    }
+    if replacements.is_empty() {
+        return (content.to_string(), Vec::new());
+    }
+    replacements.sort_by_key(|(r, _)| r.start);
+
+    let mut out = String::with_capacity(content.len());
+    let mut spans = Vec::new();
+    let mut last = 0;
+    for (r, rel) in &replacements {
+        if r.start < last {
+            continue;
+        }
+        out.push_str(&content[last..r.start]);
+        let s = out.len();
+        out.push('@');
+        out.push_str(rel);
+        spans.push(s..out.len());
+        last = r.end;
+    }
+    out.push_str(&content[last..]);
+    (out, spans)
 }

@@ -190,6 +190,7 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
         think_ms: None,
         compacted: false,
         attachments,
+        mentions: None,
     }
 }
 

@@ -379,11 +379,12 @@ export const useApp = create<AppState>((set, get) => ({
     await get().loadSessions();
   },
 
-  async sendMessage(message, attachments) {
+  async sendMessage(message, attachments, mentions) {
     if (get().isRunning) return;
     const req: ChatRequest = {
       message,
       attachments: attachments?.length ? attachments : undefined,
+      mentions: mentions?.length ? mentions : undefined,
       session_id: get().sessionId ?? undefined,
       work_dir: get().workDir || undefined,
     };
@@ -395,7 +396,10 @@ export const useApp = create<AppState>((set, get) => ({
       isRunning: true,
       runStartedAt: Date.now(),
       inputHistory: [...s.inputHistory.filter((h) => h !== message), message].slice(-100),
-      items: [...s.items, { kind: "user", text: message, images: attachments }],
+      items: [
+        ...s.items,
+        { kind: "user", text: message, images: attachments, mentions },
+      ],
     }));
 
     // 本轮最近一次 UsageUpdate 快照：AgentComplete 时随 done 行落进消息底部操作栏

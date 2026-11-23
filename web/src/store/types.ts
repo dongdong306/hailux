@@ -1,6 +1,7 @@
 // 状态与视图模型类型：ChatItem 渲染模型、技能/MCP 条目、AppState 契约
 import type {
   ChatAttachment,
+  ChatMention,
   CommandInfo,
   CreateModelInput,
   ModelInfo,
@@ -41,6 +42,8 @@ export interface ChatItem {
   thinkStartedAt?: number; // 思考计时起点（进行中，epoch ms）
   /** 用户消息的图片附件（data URL，用于气泡内缩略图） */
   images?: ChatAttachment[];
+  /** 用户消息的 @ 提及元数据 */
+  mentions?: ChatMention[];
 }
 
 /** 全局模式状态（GET /api/mode 及 yolo/plan-mode/reasoning-effort 设置响应体）。
@@ -237,7 +240,11 @@ export interface AppState {
   newSession: (workDir?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
-  sendMessage: (message: string, attachments?: ChatAttachment[]) => Promise<void>;
+  sendMessage: (
+    message: string,
+    attachments?: ChatAttachment[],
+    mentions?: ChatMention[],
+  ) => Promise<void>;
   /** 手动压缩当前会话上下文（POST /api/compact，SSE 响应） */
   runCompact: () => Promise<void>;
   interrupt: () => Promise<void>;

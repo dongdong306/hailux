@@ -130,11 +130,23 @@ pub struct ChatAttachment {
     pub data_url: String,
 }
 
+/// @ 提及元数据：`start`/`end` 为 content 中的 Unicode 码点偏移
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ChatMention {
+    /// 起始码点偏移（token 含前缀 `@`）
+    pub start: usize,
+    /// 结束码点偏移（不含）
+    pub end: usize,
+    pub kind: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
+    #[serde(default)]
+    pub mentions: Vec<ChatMention>,
     pub session_id: Option<String>,
     pub work_dir: Option<String>,
 }

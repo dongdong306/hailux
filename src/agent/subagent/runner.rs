@@ -275,6 +275,7 @@ async fn run_subagent_task_inner(
             think_ms: None,
             compacted: false,
             attachments: None,
+            mentions: None,
         };
         if let Err(e) = ctx.storage.append_message(&existing_id, &user_stored).await {
             eprintln!("[warn] Failed to persist subagent user message: {e}");
@@ -318,6 +319,7 @@ async fn run_subagent_task_inner(
             think_ms: None,
             compacted: false,
             attachments: None,
+            mentions: None,
         };
         if let Err(e) = ctx
             .storage

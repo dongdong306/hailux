@@ -145,7 +145,9 @@ pub async fn chat_handler(
             }
         };
 
-        if let Err(e) = persist_user_message(&session, &session_id, &message, &attachments).await {
+        if let Err(e) =
+            persist_user_message(&session, &session_id, &message, &attachments, &req.mentions).await
+        {
             yield sse_event(&ServerEvent::Error { message: format!("持久化用户消息失败: {e}") });
             return;
         }
@@ -560,11 +562,17 @@ async fn persist_user_message(
     session_id: &str,
     message: &str,
     attachments: &[crate::agent::media::Attachment],
+    mentions: &[protocol::ChatMention],
 ) -> Result<(), String> {
     let attachments_json = if attachments.is_empty() {
         None
     } else {
         Some(serde_json::to_string(attachments).map_err(|e| e.to_string())?)
+    };
+    let mentions_json = if mentions.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(mentions).map_err(|e| e.to_string())?)
     };
     let stored = StoredMessage {
         role: MessageRole::User,
@@ -580,6 +588,7 @@ async fn persist_user_message(
         think_ms: None,
         compacted: false,
         attachments: attachments_json,
+        mentions: mentions_json,
     };
     session
         .storage()

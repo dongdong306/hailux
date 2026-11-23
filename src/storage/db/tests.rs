@@ -42,6 +42,7 @@ fn make_message(role: MessageRole, content: &str) -> StoredMessage {
         think_ms: None,
         compacted: false,
         attachments: None,
+        mentions: None,
     }
 }
 

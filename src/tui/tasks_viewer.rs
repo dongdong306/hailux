@@ -225,6 +225,7 @@ fn stored_messages_to_chat(messages: &[StoredMessage]) -> Vec<Message> {
                     result.push(Message::User {
                         text: msg.content.clone(),
                         plan_mode: false,
+                        mentions: Vec::new(),
                     });
                 }
             }

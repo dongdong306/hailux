@@ -7,7 +7,7 @@ impl ChatStorage {
     pub async fn append_message(&self, session_id: &str, msg: &StoredMessage) -> Result<()> {
         let now = Self::now_iso();
         sqlx::query(
-            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, mentions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(msg.role.as_str())
@@ -23,6 +23,7 @@ impl ChatStorage {
         .bind(msg.think_ms)
         .bind(if msg.compacted { 1 } else { 0 })
         .bind(&msg.attachments)
+        .bind(&msg.mentions)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -32,7 +33,7 @@ impl ChatStorage {
     /// 执行给定 SQL 查询并将结果映射为 `StoredMessage` 列表。
     /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
     /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
-    ///  prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments`
+    ///  prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, mentions`
     async fn query_messages(
         &self,
         sql: &'static str,
@@ -52,6 +53,7 @@ impl ChatStorage {
             Option<String>,
             Option<i64>,
             i64,
+            Option<String>,
             Option<String>,
         );
         let rows: Vec<MessageRow> = sqlx::query_as(sql)
@@ -76,6 +78,7 @@ impl ChatStorage {
                     think_ms,
                     compacted,
                     attachments,
+                    mentions,
                 )| {
                     let role: MessageRole = role
                         .parse()
@@ -94,6 +97,7 @@ impl ChatStorage {
                         think_ms,
                         compacted: compacted != 0,
                         attachments,
+                        mentions,
                     })
                 },
             )
@@ -102,7 +106,7 @@ impl ChatStorage {
 
     pub async fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments FROM messages WHERE session_id = ? ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, mentions FROM messages WHERE session_id = ? ORDER BY id ASC",
             session_id,
         )
         .await
@@ -111,7 +115,7 @@ impl ChatStorage {
     /// 加载活跃上下文消息（仅 compacted=0），按 id 升序。
     pub async fn load_active_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
-            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
+            "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, mentions FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
             session_id,
         )
         .await
@@ -239,6 +243,7 @@ impl ChatStorage {
                     think_ms: None,
                     compacted: false,
                     attachments: None,
+                    mentions: None,
                 };
                 self.append_message(session_id, &stored).await?;
             }

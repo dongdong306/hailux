@@ -444,6 +444,7 @@ mod tests {
             think_ms: None,
             compacted: false,
             attachments: None,
+            mentions: None,
         }
     }
 
@@ -507,6 +508,7 @@ mod tests {
             think_ms: None,
             compacted: false,
             attachments: None,
+            mentions: None,
         }
     }
 
@@ -525,6 +527,7 @@ mod tests {
             think_ms: None,
             compacted: false,
             attachments: None,
+            mentions: None,
         }
     }
 
