@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type {
   ChatRequest,
   CommandInfo,
+  DiscoverModelsResult,
   ModelInfo,
   ProviderOption,
   ServerEvent,
@@ -125,11 +126,33 @@ export const useApp = create<AppState>((set, get) => ({
     get().loadProviders().catch(() => {});
   },
 
+  async updateModel(input) {
+    const resp = await fetch("/api/models/custom", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    await get().loadModels();
+    get().loadProviders().catch(() => {});
+  },
+
   async deleteModel(selector) {
     const resp = await fetch("/api/models/custom", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ selector }),
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    await get().loadModels();
+    get().loadProviders().catch(() => {});
+  },
+
+  async updateProvider(input) {
+    const resp = await fetch("/api/providers", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
     });
     if (!resp.ok) throw new Error(await readError(resp));
     await get().loadModels();
@@ -145,6 +168,23 @@ export const useApp = create<AppState>((set, get) => ({
     if (!resp.ok) throw new Error(await readError(resp));
     await get().loadModels();
     get().loadProviders().catch(() => {});
+  },
+
+  async applyDiscoveredModels(providerId, modelIds) {
+    const resp = await postJson("/api/models/apply-discovered", {
+      provider_id: providerId,
+      model_ids: modelIds,
+    });
+    if (!resp.ok) throw new Error(await readError(resp));
+    const result = (await resp.json()) as { added: string[] };
+    await get().loadModels();
+    return result.added;
+  },
+
+  async discoverModels(input) {
+    const resp = await postJson("/api/models/discover", input);
+    if (!resp.ok) throw new Error(await readError(resp));
+    return (await resp.json()) as DiscoverModelsResult;
   },
 
   async loadWorkdirs() {

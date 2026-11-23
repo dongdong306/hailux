@@ -1,11 +1,11 @@
-// ── 配置文件 I/O ─────────────────────────────────────────────
+// ── Config file I/O ──────────────────────────────────────────
 
 use color_eyre::{Result, eyre::Context};
 
 use super::{Config, config_dir, config_file_path};
 use crate::agent::ReasoningEffort;
 
-/// 将配置序列化为 TOML 字符串（不落盘，供 save_config 与单测复用）
+/// Serialize the config to a TOML string (no disk write; reused by save_config and unit tests)
 pub(super) fn config_to_toml(config: &Config) -> Result<String> {
     let mut providers_toml = toml::map::Map::new();
     for (pid, entry) in &config.providers {
@@ -14,9 +14,9 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         if let Some(ref url) = entry.base_url {
             table.insert("base_url".into(), toml::Value::String(url.clone()));
         }
-        if let Some(ref models) = entry.models {
+        if !entry.models.is_empty() {
             let mut models_table = toml::map::Map::new();
-            for (mid, custom) in models {
+            for (mid, custom) in &entry.models {
                 let mut m = toml::map::Map::new();
                 m.insert(
                     "max_tokens".into(),
@@ -47,7 +47,7 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         toml::Value::Float(config.compact_threshold as f64),
     );
 
-    // 思考强度：与默认值一致时不写入，保持配置文件最小化
+    // Reasoning effort: omitted when equal to the default, keeping the config file minimal
     if config.reasoning_effort != ReasoningEffort::default() {
         root.insert(
             "reasoning_effort".into(),
@@ -55,7 +55,7 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         );
     }
 
-    // 重试策略：与默认值一致时不写入，保持配置文件最小化
+    // Retry policy: omitted when equal to the default, keeping the config file minimal
     if !config.retry.is_default() {
         let mut retry_table = toml::map::Map::new();
         retry_table.insert(
@@ -77,7 +77,7 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         root.insert("retry".into(), toml::Value::Table(retry_table));
     }
 
-    // 权限配置
+    // Permission settings
     let mut perm_table = toml::map::Map::new();
     if !config.permission.mode.is_empty() {
         perm_table.insert(
@@ -117,7 +117,7 @@ pub fn save_config(config: &Config) -> Result<()> {
 
     let toml_str = config_to_toml(config)?;
     let path = config_file_path()?;
-    // 原子写入：先写临时文件，再重命名
+    // Atomic write: write to a temp file first, then rename
     let tmp_path = path.with_extension("toml.tmp");
     std::fs::write(&tmp_path, &toml_str)
         .wrap_err_with(|| format!("无法写入配置文件: {}", path.display()))?;

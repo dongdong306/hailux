@@ -8,7 +8,7 @@ use crate::tui::ask_user;
 use crate::tui::chat_widget::ChatWidget;
 use crate::tui::history_cell::{self, HistoryCell, SessionHeaderCell, TooltipCell};
 use crate::tui::mcp_viewer::{self, render_mcp_viewer};
-use crate::tui::model_picker::{render_add_model, render_effort_picker, render_model_picker};
+use crate::tui::model_picker::{render_effort_picker, render_model_picker};
 use crate::tui::session_picker::SessionPicker;
 use crate::tui::setup::render_setup;
 use crate::tui::skills_viewer::{self, render_skills_viewer};
@@ -35,15 +35,7 @@ impl App {
             return;
         }
 
-        if let AppState::Setup(ref form) = self.state {
-            let cursor_pos = render_setup(area, frame.buffer_mut(), form);
-            if let Some(pos) = cursor_pos {
-                frame.set_cursor_position(pos);
-            }
-            return;
-        }
-
-        // 用量统计是全屏二级页面，接管整个屏幕（不渲染底下的聊天）
+        // Stats is a full-screen secondary page that takes over the entire screen (the chat underneath is not rendered)
         if let AppState::Stats {
             data,
             selected_index,
@@ -60,7 +52,7 @@ impl App {
                 picker_index: *picker_index,
             };
             viewer.render(area, frame.buffer_mut());
-            // JediTerm 下 ratatui 的增量 diff 会导致渲染错位，强制全量重绘
+            // Under JediTerm, ratatui's incremental diff causes rendering misalignment; force a full redraw
             if self.is_jediterm {
                 for cell in frame.buffer_mut().content.iter_mut() {
                     cell.diff_option = CellDiffOption::AlwaysUpdate;
@@ -161,7 +153,6 @@ impl App {
             | AppState::Setup(_) => false,
             AppState::Permission { .. } => false,
             AppState::AskUser { editing_custom, .. } => *editing_custom,
-            AppState::AddModel(_) => true,
         };
 
         if show_cursor {
@@ -202,6 +193,8 @@ impl App {
         if let AppState::ModelPicker {
             models,
             selected_index,
+            refreshing,
+            refresh_note,
         } = &self.state
         {
             render_model_picker(
@@ -210,6 +203,8 @@ impl App {
                 models,
                 *selected_index,
                 &self.resolved.display,
+                refreshing.as_deref(),
+                refresh_note.as_ref(),
             );
         }
 
@@ -222,9 +217,12 @@ impl App {
             );
         }
 
-        if let AppState::AddModel(ref form) = self.state {
-            let cursor_pos = render_add_model(area, frame.buffer_mut(), form);
-            frame.set_cursor_position(cursor_pos);
+        // Onboarding / add-model dialog: overlaid on top of the chat UI (the chat area is empty during first-run onboarding)
+        if let AppState::Setup(ref form) = self.state {
+            let cursor_pos = render_setup(area, frame.buffer_mut(), form);
+            if let Some(pos) = cursor_pos {
+                frame.set_cursor_position(pos);
+            }
         }
 
         if let AppState::Skills { selected_index } = &self.state {
@@ -358,7 +356,7 @@ impl App {
             );
         }
 
-        // JediTerm 下 ratatui 的增量 diff 会导致渲染错位，强制全量重绘
+        // Under JediTerm, ratatui's incremental diff causes rendering misalignment; force a full redraw
         if self.is_jediterm {
             for cell in frame.buffer_mut().content.iter_mut() {
                 cell.diff_option = CellDiffOption::AlwaysUpdate;

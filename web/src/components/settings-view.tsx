@@ -1,20 +1,23 @@
-// 设置面板：内联视图（替换聊天区渲染）。当前含「模型提供商」区块：
-// provider 卡片（凭据信息 + 模型列表），支持添加模型 / 新建服务商 /
-// 删除模型 / 删除服务商 / 设为默认模型。后续可扩展更多设置区块。
-import { useEffect, useState } from "react";
+// Settings panel: inline view replacing the chat area.
+// Currently only the "model providers" section: one card per provider (credentials + model list),
+// supporting add model / add provider / edit model / edit provider / delete model / delete provider /
+// set as default. Further sections can be added here later.
+import { useCallback, useEffect, useState } from "react";
 import {
   Loader2,
+  Pencil,
   Plus,
+  RefreshCw,
   Settings,
   Trash2,
   X,
 } from "lucide-react";
 import { anyDialogOpen, useApp } from "../store/app-store";
 import { cn } from "../lib/utils";
-import type { ModelInfo, ProviderOption } from "../runtime/types";
+import type { DiscoveredModel, ModelInfo, ProviderOption } from "../runtime/types";
 import { Overlay } from "./dialogs";
 
-/* 按钮样式（与 dialogs.tsx 一致） */
+/* Button styles (same as dialogs.tsx) */
 const btnPrimary =
   "cursor-pointer rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-30";
 const btnOutline =
@@ -23,28 +26,38 @@ const btnOutline =
 const inputCls =
   "w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30";
 
-/** 上下文窗口默认值 */
-const DEFAULT_CONTEXT_WINDOW = "131072";
+/** Default context window (256K) */
+const DEFAULT_CONTEXT_WINDOW = "262144";
 
-/* ── 设置面板 ─────────────────────────────────────────────── */
+/* ── Settings panel ───────────────────────────────────────── */
 export function SettingsView() {
   const setView = useApp((s) => s.setView);
   const models = useApp((s) => s.models);
   const providers = useApp((s) => s.providers);
   const switchModel = useApp((s) => s.switchModel);
   const setAddModel = useApp((s) => s.setAddModel);
-  /** 删除目标：单个模型 / 整个 provider */
+  /** Provider whose fetch-models dialog is open */
+  const [fetchTarget, setFetchTarget] = useState<{
+    providerId: string;
+    providerName: string;
+  } | null>(null);
+  /** Delete target: a single model / the whole provider */
   const [deleting, setDeleting] = useState<
     | { type: "model"; model: ModelInfo }
     | { type: "provider"; providerId: string; providerName: string }
     | null
   >(null);
+  /** Edit target: model parameters / provider credentials */
+  const [editingModel, setEditingModel] = useState<ModelInfo | null>(null);
+  const [editingProvider, setEditingProvider] = useState<{
+    providerId: string;
+    providerName: string;
+    predefined: boolean;
+    baseUrl?: string;
+  } | null>(null);
 
-  // providers（已配置）与 models 分组对齐；models 里可能含未配置 provider 的
-  // 预定义条目（needs_setup），单独归入「未配置」组展示。
-  // 契约：models 由后端 available_models 按 provider 连续返回（BTreeMap 字母序），
-  // 此处按相邻分组聚合；若后端排序不再连续，需改为按 providerId 累积分组
-  const configuredIds = new Set(providers.map((p) => p.id));
+  // Contract: the backend returns models grouped contiguously by provider (BTreeMap order);
+  // grouping here relies on adjacency, so non-contiguous ordering would require accumulating by providerId.
   const groups: {
     name: string;
     providerId: string;
@@ -68,20 +81,22 @@ export function SettingsView() {
     }
   }
 
-  // Esc 返回聊天
+  // Esc returns to chat
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
+      if (anyDialogOpen()) return; // Global dialogs win: Esc closes the dialog only, not the view
+      // Local dialogs (delete confirm / edit / fetch models) behave the same: Esc closes the dialog, not the view
+      if (deleting || editingModel || editingProvider || fetchTarget) return;
       setView("chat");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setView]);
+  }, [setView, deleting, editingModel, editingProvider, fetchTarget]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 顶部栏 */}
+      {/* Top bar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border/40 px-4 py-3">
         <Settings className="size-4.5 shrink-0 text-primary" />
         <h2 className="mr-2 text-[15px] font-semibold">设置</h2>
@@ -96,15 +111,15 @@ export function SettingsView() {
         </button>
       </div>
 
-      {/* 内容区 */}
+      {/* Content area */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-4 py-6">
-          {/* ── 模型提供商区块 ── */}
+          {/* ── Model providers section ── */}
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-[15px] font-semibold text-foreground">模型提供商</h3>
               <p className="mt-0.5 text-xs text-muted-foreground/60">
-                管理 API 服务商与模型；预定义服务商的预定义模型不可删除
+                管理 API 服务商与模型：可编辑模型参数、更换凭据与端点；内置服务商本身不可删除或改名
               </p>
             </div>
             <button
@@ -128,7 +143,7 @@ export function SettingsView() {
                 key={g.providerId}
                 className="rounded-xl border border-border/60 bg-card/50 p-4"
               >
-                {/* 卡片头：服务商信息 + 操作 */}
+                {/* Card header: provider info + actions */}
                 <div className="mb-3 flex items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
@@ -146,12 +161,39 @@ export function SettingsView() {
                   </div>
                   <button
                     type="button"
+                    className={cn(btnOutline, "flex items-center gap-1 px-2 py-1 text-xs")}
+                    title={`从 ${g.providerId} 的 /models 获取模型并勾选添加`}
+                    onClick={() =>
+                      setFetchTarget({ providerId: g.providerId, providerName: g.name })
+                    }
+                  >
+                    <RefreshCw className="size-3" />
+                    获取模型
+                  </button>
+                  <button
+                    type="button"
+                    className={cn(btnOutline, "flex items-center gap-1 px-2 py-1 text-xs")}
+                    title={`编辑服务商 ${g.providerId}（API Key / API 地址 / 标识）`}
+                    onClick={() =>
+                      setEditingProvider({
+                        providerId: g.providerId,
+                        providerName: g.name,
+                        predefined: g.predefined,
+                        baseUrl: g.baseUrl,
+                      })
+                    }
+                  >
+                    <Pencil className="size-3" />
+                    编辑
+                  </button>
+                  <button
+                    type="button"
                     className={cn(btnOutline, "px-2 py-1 text-xs")}
                     onClick={() => setAddModel(true, { provider: g.providerId })}
                   >
                     + 添加模型
                   </button>
-                  {!g.predefined && configuredIds.has(g.providerId) && (
+                  {!g.predefined && (
                     <button
                       type="button"
                       className="flex cursor-pointer items-center gap-1 rounded-lg border border-destructive/50 px-2 py-1 text-xs text-destructive transition-colors hover:bg-destructive/10"
@@ -170,7 +212,7 @@ export function SettingsView() {
                   )}
                 </div>
 
-                {/* 模型列表 */}
+                {/* Model list */}
                 <div className="space-y-1">
                   {g.models.map((m) => (
                     <div
@@ -180,21 +222,9 @@ export function SettingsView() {
                       <button
                         type="button"
                         className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
-                        title={
-                          m.needs_setup
-                            ? "配置 API Key 以启用该服务商"
-                            : m.active
-                              ? "当前默认模型"
-                              : "设为默认模型"
-                        }
+                        title={m.active ? "当前默认模型" : "设为默认模型"}
                         onClick={() => {
-                          if (m.needs_setup) {
-                            // 未配置 provider：打开添加弹窗预填，补 API Key 启用
-                            setAddModel(true, {
-                              provider: m.provider_id,
-                              modelId: m.model_id,
-                            });
-                          } else if (!m.active) {
+                          if (!m.active) {
                             switchModel(m.display);
                           }
                         }}
@@ -208,9 +238,6 @@ export function SettingsView() {
                         <span className="min-w-0 flex-1 truncate font-mono text-sm text-foreground/90">
                           {m.model_id}
                         </span>
-                        {m.needs_setup && (
-                          <span className="shrink-0 text-xs text-warning">(需配置)</span>
-                        )}
                         <span className="shrink-0 text-xs text-muted-foreground/50">
                           {m.context_window
                             ? `${(m.context_window / 1000).toFixed(0)}K`
@@ -222,16 +249,22 @@ export function SettingsView() {
                           </span>
                         )}
                       </button>
-                      {m.deletable && (
-                        <button
-                          type="button"
-                          className="cursor-pointer rounded p-1 text-muted-foreground/40 opacity-0 transition-all group-hover/item:opacity-100 hover:bg-destructive/10 hover:text-destructive"
-                          title="删除模型"
-                          onClick={() => setDeleting({ type: "model", model: m })}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="cursor-pointer rounded p-1 text-muted-foreground/40 opacity-70 transition-all group-hover/item:opacity-100 hover:bg-primary/10 hover:text-primary"
+                        title="编辑模型参数（上下文窗口 / 输出上限 / 视觉）"
+                        onClick={() => setEditingModel(m)}
+                      >
+                        <Pencil className="size-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        className="cursor-pointer rounded p-1 text-muted-foreground/40 opacity-0 transition-all group-hover/item:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                        title="删除模型"
+                        onClick={() => setDeleting({ type: "model", model: m })}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -241,13 +274,29 @@ export function SettingsView() {
         </div>
       </div>
 
-      {/* 删除二次确认 */}
+      {/* Delete confirmation */}
       {deleting && <DeleteConfirm target={deleting} onClose={() => setDeleting(null)} />}
+
+      {/* Fetch-models multi-select dialog */}
+      {fetchTarget && (
+        <FetchModelsDialog target={fetchTarget} onClose={() => setFetchTarget(null)} />
+      )}
+
+      {/* Edit dialogs */}
+      {editingModel && (
+        <EditModelDialog model={editingModel} onClose={() => setEditingModel(null)} />
+      )}
+      {editingProvider && (
+        <EditProviderDialog
+          target={editingProvider}
+          onClose={() => setEditingProvider(null)}
+        />
+      )}
     </div>
   );
 }
 
-/* ── 删除确认 ─────────────────────────────────────────────── */
+/* ── Delete confirmation ──────────────────────────────────── */
 function DeleteConfirm({
   target,
   onClose,
@@ -316,15 +365,449 @@ function DeleteConfirm({
   );
 }
 
-/* ── 添加模型弹窗（单页表单，动态显隐凭据字段）───────────── */
+/* ── Fetch-models dialog (multi-select, nothing checked by default) ── */
+function FetchModelsDialog({
+  target,
+  onClose,
+}: {
+  target: { providerId: string; providerName: string };
+  onClose: () => void;
+}) {
+  const discoverModels = useApp((s) => s.discoverModels);
+  const applyDiscoveredModels = useApp((s) => s.applyDiscoveredModels);
+  /** Null while the list is being fetched */
+  const [models, setModels] = useState<DiscoveredModel[] | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [fetchError, setFetchError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const fetchList = useCallback(async () => {
+    setModels(null);
+    setFetchError("");
+    setChecked(new Set());
+    try {
+      // No api_key: the server uses the saved credentials of the configured provider
+      const result = await discoverModels({ provider_id: target.providerId });
+      setModels(result.models);
+    } catch (e) {
+      setFetchError(e instanceof Error ? e.message : String(e));
+    }
+  }, [discoverModels, target.providerId]);
+
+  useEffect(() => {
+    void fetchList();
+  }, [fetchList]);
+
+  const toggle = (id: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const selectable = models?.filter((m) => !m.already_added) ?? [];
+  const allChecked = selectable.length > 0 && selectable.every((m) => checked.has(m.id));
+  const toggleAll = () => {
+    setChecked(
+      allChecked
+        ? new Set()
+        : new Set(selectable.map((m) => m.id)),
+    );
+  };
+
+  const confirm = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await applyDiscoveredModels(target.providerId, [...checked]);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Overlay onClose={() => !busy && onClose()} wide>
+      <div className="mb-3 flex items-center gap-2.5">
+        <span className="flex size-9 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/30">
+          <RefreshCw className="size-4.5 text-primary" />
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold">获取模型</h3>
+          <p className="truncate font-mono text-xs text-muted-foreground/60">
+            {target.providerName}（{target.providerId}）
+          </p>
+        </div>
+      </div>
+
+      {fetchError ? (
+        <div className="space-y-3">
+          <p className="text-sm text-destructive">{fetchError}</p>
+          <button type="button" className={btnOutline} onClick={() => void fetchList()}>
+            重试
+          </button>
+        </div>
+      ) : models === null ? (
+        <p className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          正在获取模型列表…
+        </p>
+      ) : models.length === 0 ? (
+        <p className="py-6 text-sm text-muted-foreground">服务商未返回任何模型</p>
+      ) : (
+        <>
+          <p className="mb-2 text-xs text-muted-foreground/60">
+            勾选要加入模型列表的模型（已在列表中的不可重复添加）
+          </p>
+          <div className="max-h-80 space-y-1 overflow-y-auto pr-1">
+            {models.map((m) => (
+              <label
+                key={m.id}
+                className={cn(
+                  "flex items-center gap-2.5 rounded-lg border border-border/50 px-3 py-2 text-sm",
+                  m.already_added
+                    ? "cursor-not-allowed opacity-50"
+                    : "cursor-pointer hover:bg-muted/40",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  className="size-4 accent-primary"
+                  disabled={m.already_added || busy}
+                  checked={m.already_added || checked.has(m.id)}
+                  onChange={() => toggle(m.id)}
+                />
+                <span className="min-w-0 flex-1 truncate font-mono">{m.id}</span>
+                {m.context_window ? (
+                  <span className="shrink-0 text-xs text-muted-foreground/50">
+                    {(m.context_window / 1000).toFixed(0)}K
+                  </span>
+                ) : null}
+                {m.already_added && (
+                  <span className="shrink-0 text-xs text-muted-foreground/60">已在列表</span>
+                )}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+
+      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+
+      <div className="mt-4 flex justify-between">
+        <button
+          type="button"
+          className={btnOutline}
+          onClick={toggleAll}
+          disabled={models === null || models.length === 0 || busy}
+        >
+          {allChecked ? "取消全选" : "全选"}
+        </button>
+        <div className="flex gap-2">
+          <button type="button" className={btnOutline} onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button
+            type="button"
+            className={btnPrimary}
+            onClick={confirm}
+            disabled={checked.size === 0 || busy}
+          >
+            {busy && <Loader2 className="mr-1.5 size-3.5 animate-spin" />}
+            添加所选（{checked.size}）
+          </button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+/* ── Edit model dialog (parameters + optional rename) ─────── */
+/** Parse a positive integer: empty → undefined (keep the effective value) */
+function parsePositive(raw: string, label: string): number | undefined {
+  const v = raw.trim();
+  if (!v) return undefined;
+  if (!/^\d+$/.test(v) || Number(v) === 0) throw new Error(`${label}必须为正整数`);
+  return Number(v);
+}
+
+function EditModelDialog({ model, onClose }: { model: ModelInfo; onClose: () => void }) {
+  const updateModel = useApp((s) => s.updateModel);
+  const [modelId, setModelId] = useState(model.model_id);
+  const [contextWindow, setContextWindow] = useState(
+    model.context_window ? String(model.context_window) : "",
+  );
+  const [maxTokens, setMaxTokens] = useState(
+    model.max_tokens ? String(model.max_tokens) : "",
+  );
+  const [supportsVision, setSupportsVision] = useState(model.supports_vision ?? false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    setError("");
+    const id = modelId.trim();
+    if (!id) {
+      setError("模型名称不能为空");
+      return;
+    }
+    let cw: number | undefined;
+    let mt: number | undefined;
+    try {
+      cw = parsePositive(contextWindow, "上下文窗口");
+      mt = parsePositive(maxTokens, "输出上限");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    const rename = id !== model.model_id;
+    const unchanged =
+      !rename &&
+      cw === model.context_window &&
+      mt === model.max_tokens &&
+      supportsVision === (model.supports_vision ?? false);
+    if (unchanged) {
+      onClose();
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateModel({
+        selector: model.display,
+        ...(rename ? { model_id: id } : {}),
+        ...(cw !== undefined ? { context_window: cw } : {}),
+        ...(mt !== undefined ? { max_tokens: mt } : {}),
+        supports_vision: supportsVision,
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Overlay onClose={() => !busy && onClose()} wide closeOnMask={false}>
+      <div className="mb-4 flex items-center gap-2.5">
+        <span className="flex size-9 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/30">
+          <Pencil className="size-4.5 text-primary" />
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold">编辑模型</h3>
+          <p className="truncate font-mono text-xs text-muted-foreground/60">
+            {model.display}
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">模型名称 (Model ID)</p>
+          <input
+            value={modelId}
+            className={inputCls}
+            onChange={(e) => setModelId(e.target.value)}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <p className="mb-1.5 text-xs font-medium text-muted-foreground">上下文窗口大小</p>
+            <input
+              value={contextWindow}
+              className={inputCls}
+              inputMode="numeric"
+              placeholder="留空保持不变"
+              onChange={(e) => setContextWindow(e.target.value)}
+            />
+          </div>
+          <div>
+            <p className="mb-1.5 text-xs font-medium text-muted-foreground">输出上限</p>
+            <input
+              value={maxTokens}
+              className={inputCls}
+              inputMode="numeric"
+              placeholder="留空保持不变"
+              onChange={(e) => setMaxTokens(e.target.value)}
+            />
+          </div>
+        </div>
+        <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border/50 px-3 py-2 hover:bg-muted/40">
+          <input
+            type="checkbox"
+            checked={supportsVision}
+            className="mt-0.5 size-3.5 cursor-pointer accent-[var(--primary)]"
+            onChange={(e) => setSupportsVision(e.target.checked)}
+          />
+          <span className="text-sm">
+            支持图片输入（视觉）
+            <span className="block text-xs text-muted-foreground/60">
+              关闭后附件会降级为文件名提示文本，不发送图片数据
+            </span>
+          </span>
+        </label>
+      </div>
+
+      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+
+      <div className="mt-4 flex justify-end gap-2">
+        <button type="button" className={btnOutline} onClick={onClose} disabled={busy}>
+          取消
+        </button>
+        <button type="button" className={btnPrimary} onClick={submit} disabled={busy}>
+          {busy && <Loader2 className="mr-1.5 size-3.5 animate-spin" />}
+          保存
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+/* ── Edit provider dialog (credentials / endpoint / rename) ── */
+function EditProviderDialog({
+  target,
+  onClose,
+}: {
+  target: { providerId: string; providerName: string; predefined: boolean; baseUrl?: string };
+  onClose: () => void;
+}) {
+  const updateProvider = useApp((s) => s.updateProvider);
+  const providers = useApp((s) => s.providers);
+  /** Unconfigured predefined provider: it needs an API key before it can be enabled */
+  const needsSetup = providers.find((p) => p.id === target.providerId)?.needs_setup ?? false;
+  const canRename = !target.predefined;
+  const [newId, setNewId] = useState(target.providerId);
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState(target.baseUrl ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    setError("");
+    const id = newId.trim();
+    if (canRename && !id) {
+      setError("服务商标识不能为空");
+      return;
+    }
+    if (needsSetup && !apiKey.trim()) {
+      setError("该服务商尚未配置 API Key，请填写后保存");
+      return;
+    }
+    if (!target.predefined && !baseUrl.trim()) {
+      setError("自定义服务商必须填写 API 地址");
+      return;
+    }
+    setBusy(true);
+    try {
+      // Only send base_url when it changed: prefilled builtin endpoints of unconfigured
+      // predefined providers must not become explicit overrides
+      const url = baseUrl.trim();
+      const urlChanged = url !== (target.baseUrl ?? "").trim();
+      await updateProvider({
+        provider_id: target.providerId,
+        ...(canRename && id !== target.providerId ? { new_id: id } : {}),
+        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        ...(urlChanged ? { base_url: url } : {}),
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Overlay onClose={() => !busy && onClose()} wide closeOnMask={false}>
+      <div className="mb-4 flex items-center gap-2.5">
+        <span className="flex size-9 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/30">
+          <Pencil className="size-4.5 text-primary" />
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold">编辑服务商</h3>
+          <p className="truncate font-mono text-xs text-muted-foreground/60">
+            {target.providerName} · {target.providerId}
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">服务商标识</p>
+          <input
+            value={newId}
+            className={cn(inputCls, !canRename && "opacity-60")}
+            disabled={!canRename}
+            placeholder="例如: ollama、siliconflow"
+            onChange={(e) => setNewId(e.target.value)}
+          />
+          <p className="mt-1 text-xs text-muted-foreground/50">
+            {canRename
+              ? "改名后该服务商下的模型选择器同步迁移"
+              : "预定义服务商不可改名"}
+          </p>
+        </div>
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">API Key</p>
+          <input
+            type="password"
+            value={apiKey}
+            className={inputCls}
+            placeholder={needsSetup ? "该服务商尚未配置，请填写" : "留空则不修改"}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+        </div>
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">API 地址</p>
+          <input
+            value={baseUrl}
+            className={inputCls}
+            placeholder={
+              target.predefined ? "留空使用内置端点" : "例如: http://localhost:11434/v1"
+            }
+            onChange={(e) => setBaseUrl(e.target.value)}
+          />
+          <p className="mt-1 text-xs text-muted-foreground/50">
+            {target.predefined
+              ? "清空则回退内置端点（可用于指向代理 / 中转）"
+              : "OpenAI 兼容端点，须以 http:// 或 https:// 开头"}
+          </p>
+        </div>
+      </div>
+
+      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+
+      <div className="mt-4 flex justify-end gap-2">
+        <button type="button" className={btnOutline} onClick={onClose} disabled={busy}>
+          取消
+        </button>
+        <button type="button" className={btnPrimary} onClick={submit} disabled={busy}>
+          {busy && <Loader2 className="mr-1.5 size-3.5 animate-spin" />}
+          保存
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+/* ── Add model dialog (single-page form, credential fields shown conditionally) ── */
 const NEW_PROVIDER = "__new__";
 
 export function AddModelDialog() {
   const show = useApp((s) => s.showAddModel);
-  /** 预填项（provider 卡片 / 需配置模型入口打开时设置） */
+  /** Prefill (set when opened from a provider card) */
   const preset = useApp((s) => s.addModelPreset);
   const providers = useApp((s) => s.providers);
   const addModel = useApp((s) => s.addModel);
+  const discoverModels = useApp((s) => s.discoverModels);
   const setAddModel = useApp((s) => s.setAddModel);
 
   const [providerId, setProviderId] = useState("");
@@ -333,10 +816,14 @@ export function AddModelDialog() {
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [newProviderName, setNewProviderName] = useState("");
+  /** Models reported by the provider's `/models` (after the fetch button); null = not fetched */
+  const [discovered, setDiscovered] = useState<DiscoveredModel[] | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [discoverNote, setDiscoverNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // 打开时同步预填项（useState 初始值只在首次挂载时生效）
+  // Sync the prefill on open (useState initial values only apply on first mount)
   useEffect(() => {
     if (show) {
       setProviderId(preset?.provider ?? "");
@@ -344,30 +831,65 @@ export function AddModelDialog() {
     }
   }, [show, preset]);
 
+  // A different provider means a different model list
+  useEffect(() => {
+    setDiscovered(null);
+    setDiscoverNote("");
+  }, [providerId, newProviderName]);
+
   if (!show) return null;
 
   const isNewProvider = providerId === NEW_PROVIDER;
   const selected = providers.find((p) => p.id === providerId);
-  // 未配置的预定义 provider：仅补 API Key 即可启用（base_url 用预定义端点）
+  // Unconfigured predefined provider: supplying an API key is enough (base_url comes from the built-in endpoint)
   const needsApiKey = isNewProvider || !!selected?.needs_setup;
   const needsBaseUrl = isNewProvider;
+  const targetProvider = isNewProvider ? newProviderName.trim() : providerId;
+  // The list needs either the typed credentials or a provider the server already knows
+  const canDiscover =
+    !!targetProvider &&
+    (!needsApiKey || !!apiKey.trim()) &&
+    (!needsBaseUrl || !!baseUrl.trim());
 
   const close = () => {
     if (busy) return;
     setAddModel(false);
-    // 重置表单
     setProviderId("");
     setModelId("");
     setContextWindow(DEFAULT_CONTEXT_WINDOW);
     setApiKey("");
     setBaseUrl("");
     setNewProviderName("");
+    setDiscovered(null);
+    setDiscoverNote("");
     setError("");
+  };
+
+  /** Pull the provider's `/models` list: with the typed credentials for new/unconfigured
+   * providers, or through the server's saved credentials for configured ones */
+  const doDiscover = async () => {
+    setFetching(true);
+    setError("");
+    setDiscoverNote("");
+    try {
+      const result = await discoverModels({
+        provider_id: targetProvider || undefined,
+        base_url: needsBaseUrl ? baseUrl.trim() : undefined,
+        api_key: needsApiKey ? apiKey.trim() : undefined,
+      });
+      setDiscovered(result.models);
+      if (result.models.length === 0) setDiscoverNote("服务商未返回任何模型，请手动输入");
+    } catch (e) {
+      // Drop the stale list so the error message is not shown next to outdated rows
+      setDiscovered(null);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFetching(false);
+    }
   };
 
   const submit = async () => {
     setError("");
-    const targetProvider = isNewProvider ? newProviderName.trim() : providerId;
     if (!targetProvider) {
       setError(isNewProvider ? "服务商名称不能为空" : "请选择服务商");
       return;
@@ -389,23 +911,30 @@ export function AddModelDialog() {
       setError("上下文窗口必须为正整数");
       return;
     }
+    // A model picked from the fetched list: leave the window open so the server materializes
+    // the full provider metadata (window / output cap / vision) instead of a bare override
+    const picked = discovered?.find((d) => d.id === modelId.trim());
+    const contextWindowOpen =
+      picked?.context_window !== undefined && String(picked.context_window) === cw;
 
     setBusy(true);
     try {
       await addModel({
         provider_id: targetProvider,
         model_id: modelId.trim(),
-        context_window: cw ? Number(cw) : undefined,
+        context_window: contextWindowOpen ? undefined : cw ? Number(cw) : undefined,
         base_url: needsBaseUrl && baseUrl.trim() ? baseUrl.trim() : undefined,
         api_key: needsApiKey && apiKey.trim() ? apiKey.trim() : undefined,
       });
-      // 成功：store 已关闭弹窗，重置表单
+      // Success: the store already closed the dialog, reset the form
       setProviderId("");
       setModelId("");
       setContextWindow(DEFAULT_CONTEXT_WINDOW);
       setApiKey("");
       setBaseUrl("");
       setNewProviderName("");
+      setDiscovered(null);
+      setDiscoverNote("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -420,7 +949,7 @@ export function AddModelDialog() {
         添加后自动切换到新模型；已配置服务商复用现有凭据
       </p>
 
-      {/* 服务商选择 */}
+      {/* Provider select */}
       <p className="mb-1.5 text-xs font-medium text-muted-foreground">服务商</p>
       <select
         value={providerId}
@@ -438,8 +967,8 @@ export function AddModelDialog() {
         <option value={NEW_PROVIDER}>+ 新建自定义端点</option>
       </select>
 
-      {/* 凭据字段：新建端点 = 名称+地址+Key；未配置预定义服务商 = 仅 Key；
-          已配置服务商复用凭据（对齐 TUI：不显示凭据输入） */}
+      {/* Credential fields: new endpoint = name + URL + key; unconfigured predefined provider = key only;
+          configured providers reuse credentials (mirrors the TUI: no credential inputs) */}
       {isNewProvider && (
         <div className="mt-3 space-y-3">
           <div>
@@ -480,16 +1009,63 @@ export function AddModelDialog() {
         </div>
       )}
 
-      {/* 模型字段 */}
+      {/* Model fields: fetch the provider's list to pick from, or type the id */}
       <div className="mt-3 space-y-3">
         <div>
-          <p className="mb-1.5 text-xs font-medium text-muted-foreground">模型名称 (Model ID)</p>
+          <div className="mb-1.5 flex items-center justify-between">
+            <p className="text-xs font-medium text-muted-foreground">模型名称 (Model ID)</p>
+            {canDiscover && (
+              <button
+                type="button"
+                className={cn(
+                  btnOutline,
+                  "flex items-center gap-1 px-2 py-0.5 text-xs",
+                  discovered && "text-primary",
+                )}
+                title="从服务商的 /models 获取模型列表"
+                disabled={fetching || busy}
+                onClick={() => void doDiscover()}
+              >
+                {fetching ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3" />
+                )}
+                获取模型列表
+              </button>
+            )}
+          </div>
+          {discovered && discovered.length > 0 && (
+            <select
+              value={discovered.some((d) => d.id === modelId.trim()) ? modelId.trim() : ""}
+              className={cn(inputCls, "mb-2 cursor-pointer")}
+              onChange={(e) => {
+                const d = discovered.find((x) => x.id === e.target.value);
+                if (!d) return;
+                setModelId(d.id);
+                if (d.context_window) setContextWindow(String(d.context_window));
+              }}
+            >
+              <option value="" disabled>
+                从服务商列表选择…
+              </option>
+              {discovered.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name && d.name !== d.id ? `${d.name} · ${d.id}` : d.id}
+                  {d.context_window ? ` (${Math.round(d.context_window / 1000)}K)` : ""}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             value={modelId}
             className={inputCls}
             placeholder="例如: qwen3-235b-a22b, llama3-70b"
             onChange={(e) => setModelId(e.target.value)}
           />
+          {discoverNote && (
+            <p className="mt-1 text-xs text-muted-foreground/50">{discoverNote}</p>
+          )}
         </div>
         <div>
           <p className="mb-1.5 text-xs font-medium text-muted-foreground">上下文窗口大小</p>
@@ -497,7 +1073,7 @@ export function AddModelDialog() {
             value={contextWindow}
             className={inputCls}
             inputMode="numeric"
-            placeholder={`留空使用默认值 ${DEFAULT_CONTEXT_WINDOW} (128K)`}
+            placeholder={`留空使用默认值 ${DEFAULT_CONTEXT_WINDOW} (256K)`}
             onChange={(e) => setContextWindow(e.target.value)}
           />
         </div>

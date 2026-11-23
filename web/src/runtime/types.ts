@@ -118,15 +118,15 @@ export interface ModelInfo {
   display: string;
   active: boolean;
   context_window?: number;
-  /** Deletable (user-added custom; predefined models cannot be deleted) */
-  deletable: boolean;
+  /** Output token cap (max_completion_tokens); absent when the model can't be resolved */
+  max_tokens?: number;
+  /** Whether the model accepts image input (effective value) */
+  supports_vision?: boolean;
   /** Whether the provider is predefined (predefined providers cannot be deleted wholesale) */
   provider_predefined: boolean;
-  /** Provider has no API key configured (must be set up before use) */
-  needs_setup: boolean;
 }
 
-/** Configured provider entry (GET /api/providers) */
+/** Provider entry (GET /api/providers): configured ones first, unconfigured predefined after */
 export interface ProviderOption {
   id: string;
   name: string;
@@ -137,14 +137,68 @@ export interface ProviderOption {
   needs_setup: boolean;
 }
 
-/** Add custom model input (POST /api/models/custom); align with TUI AddModelForm */
+/** One model as reported by the provider's `/models` endpoint */
+export interface DiscoveredModel {
+  id: string;
+  name?: string;
+  context_window?: number;
+  max_tokens?: number;
+  supports_vision?: boolean;
+  /** Already in the provider's model table (checkbox disabled) */
+  already_added?: boolean;
+}
+
+/** Fetch a model list (POST /api/models/discover). With api_key the not-yet-saved credentials
+ * of the add-model dialog apply; without one the saved credentials of provider_id are used.
+ * `provider_id` is the cache key (a predefined id, or the custom provider's future name). */
+export interface DiscoverModelsInput {
+  provider_id?: string;
+  base_url?: string;
+  api_key?: string;
+}
+
+export interface DiscoverModelsResult {
+  provider_id: string;
+  models: DiscoveredModel[];
+}
+
+/** Result of adding the checked models to a provider's model table
+ * (POST /api/models/apply-discovered) */
+export interface ApplyDiscoveredResult {
+  /** Ids that were actually added (already-present ones are skipped) */
+  added: string[];
+}
+
+/** Add model input (POST /api/models/custom); align with the TUI setup flow */
 export interface CreateModelInput {
   provider_id: string;
   base_url?: string;
   api_key?: string;
   model_id: string;
-  /** Defaults to 131072 (128K) */
+  /** Absent = take the cached `/models` metadata when present, otherwise 262144 (256K) */
   context_window?: number;
+}
+
+/** Edit an existing model (PUT /api/models/custom); omitted fields keep their effective values */
+export interface UpdateModelInput {
+  /** Existing selector provider/model */
+  selector: string;
+  /** New model id (rename) */
+  model_id?: string;
+  context_window?: number;
+  max_tokens?: number;
+  supports_vision?: boolean;
+}
+
+/** Edit an existing provider (PUT /api/providers); omitted fields keep their current values */
+export interface UpdateProviderInput {
+  provider_id: string;
+  /** New provider id (rename); predefined providers cannot be renamed */
+  new_id?: string;
+  /** New API key (absent = keep current) */
+  api_key?: string;
+  /** New endpoint; empty string clears the override (predefined providers only) */
+  base_url?: string;
 }
 
 /** Slash command entry (GET /api/commands) */

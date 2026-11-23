@@ -149,7 +149,7 @@ impl App {
             self.enter_setup();
             return;
         }
-        // 默认选中当前模型
+        // Default to the current model
         let selected_index = models
             .iter()
             .position(|m| m.display == self.resolved.display)
@@ -157,20 +157,22 @@ impl App {
         self.state = AppState::ModelPicker {
             models,
             selected_index,
+            refreshing: None,
+            refresh_note: None,
         };
     }
 
-    /// 打开 skill 查看器。始终打开（即使为空，也会显示目录说明）。
+    /// Open the skills viewer. Always opens (even when empty, a directory note is shown).
     pub(super) fn open_skills_viewer(&mut self) {
         self.state = AppState::Skills { selected_index: 0 };
     }
 
-    /// 打开 MCP 服务器面板。
+    /// Open the MCP servers panel.
     pub(super) fn open_mcp_viewer(&mut self) {
         self.state = AppState::Mcp { selected_index: 0 };
     }
 
-    /// 打开子代理任务面板。
+    /// Open the subagent tasks panel.
     pub(super) async fn open_tasks_viewer(&mut self) -> Result<()> {
         let entries = self.build_task_entries().await?;
         self.state = AppState::Tasks {
@@ -180,7 +182,7 @@ impl App {
         Ok(())
     }
 
-    /// 打开 token 用量统计全屏页面（默认全部项目 · 近 30 天）。
+    /// Open the full-screen token usage stats page (default: all projects · last 30 days).
     pub(super) async fn open_stats_viewer(&mut self) -> Result<()> {
         let data = self.load_stats_data(None, 30).await?;
         let projects = self.storage.list_work_dirs().await?;
@@ -195,9 +197,6 @@ impl App {
     }
 
     pub(super) fn switch_model(&mut self, entry: &ModelEntry) -> Result<()> {
-        // 如果 provider 的模型还未写入配置，同步写入
-        self.config.ensure_provider_models(&entry.provider_id);
-
         let resolved = self.config.resolve(&entry.display)?;
         self.agent.switch_model(
             resolved.config.clone(),

@@ -11,9 +11,9 @@ use crate::tui::command;
 use crate::tui::event::{AppEvent, CompactUsage, TaskStatus};
 use crate::tui::tasks_viewer::{TaskRecord, TaskRunStatus};
 
-/// 估算压缩后的 prompt token 数。
-/// 公式: old_prompt - compact_prompt + compact_completion
-/// (压缩请求的 prompt 包含系统提示开销，因此结果会偏低估，仅供 UI 展示)
+/// Estimates the post-compaction prompt token count.
+/// Formula: old_prompt - compact_prompt + compact_completion
+/// (the compact request's prompt includes system-prompt overhead, so this skews low; UI display only)
 fn estimate_compact_prompt(old_prompt: u32, usage: CompactUsage) -> u32 {
     old_prompt
         .saturating_sub(usage.prompt_tokens)
@@ -26,8 +26,8 @@ impl App {
             AppEvent::Core(core) => self.handle_core_event(core).await?,
             AppEvent::InputKey(key) => self.handle_chat_key(key).await?,
             AppEvent::InputPaste(text) => {
-                // 空 Event::Paste（Unix 图片剪贴板）：探测图片，命中即拦截；
-                // 非空文本（含空 bracketed paste）走默认流程
+                // Empty Event::Paste (Unix image clipboard): probe for an image and intercept on a hit;
+                // non-empty text (including empty bracketed paste) follows the default flow
                 if text.is_empty() {
                     self.spawn_clipboard_image_probe(false);
                     return Ok(());
@@ -35,9 +35,9 @@ impl App {
                 self.handle_paste(text);
             }
             AppEvent::PasteImageProbe => {
-                // Windows：crossterm WinAPI 输入不产生 Event::Paste，WT 的空
-                // bracketed paste（图片剪贴板 Ctrl+V）以字符按键形态被
-                // handle_paste 的标记配对捕获 → 在此触发剪贴板图片探测
+                // Windows: crossterm's WinAPI input produces no Event::Paste, so WT's empty
+                // bracketed paste (image-clipboard Ctrl+V) arrives as character keys and is caught
+                // by handle_paste's marker pairing → trigger the clipboard image probe here
                 self.spawn_clipboard_image_probe(false);
             }
             AppEvent::PasteImageResult { image, interactive } => {
@@ -67,12 +67,15 @@ impl App {
                 }
             }
             AppEvent::McpReady(_) => {}
+            // Fetch results belong to the model picker / setup form (handle_event routes
+            // them there); ignored here to keep the match exhaustive
+            AppEvent::ModelsRefreshed { .. } => {}
             AppEvent::MouseClick => {}
         }
         Ok(())
     }
 
-    /// 领域事件处理（agent / subagent 产出，UI 无关的 CoreEvent 在此落地为 TUI 状态）
+    /// Domain event handling (agent / subagent output; UI-agnostic CoreEvents land here as TUI state)
     pub(super) async fn handle_core_event(&mut self, event: CoreEvent) -> Result<()> {
         match event {
             CoreEvent::AgentChunk(chunk) => {
@@ -112,7 +115,7 @@ impl App {
                 delay_ms,
                 reason,
             } => {
-                // 失败尝试的部分输出不进入上下文：末尾流式渲染同步清除
+                // Partial output from a failed attempt never enters context: trailing streaming renders are dropped in lockstep
                 while matches!(
                     self.messages.last(),
                     Some(Message::AgentStreaming(_)) | Some(Message::AgentThinking { .. })
@@ -134,11 +137,10 @@ impl App {
                 reasoning_effort,
                 status,
             } => {
-                // 计算最终耗时
                 self.finalize_thinking_ms();
                 self.timing.finish(Instant::now());
-                // 将耗时和模型名写入 runtime_meta（含 status、思考强度，供后续分析）；
-                // model / reasoning_effort 均为流式快照值，轮次中途切换不影响
+                // Write elapsed time and model name into runtime_meta (plus status and reasoning effort, for later analysis);
+                // model / reasoning_effort are streaming snapshot values, unaffected by mid-turn switches
                 if let Some(session_id) = &self.current_session_id
                     && let Some(total_ms) = self.timing.last_total_ms
                 {
@@ -167,7 +169,6 @@ impl App {
                     let text = text.clone();
                     *self.messages.last_mut().unwrap() = Message::Agent(text);
                 }
-                // 添加耗时消息
                 if let Some(total_ms) = self.timing.last_total_ms {
                     self.messages.push(Message::AgentDone {
                         total_ms,
@@ -231,7 +232,7 @@ impl App {
                         stored.completion_tokens = Some(u.completion_tokens as i64);
                         stored.cached_tokens = Some(u.cached_tokens as i64);
                     }
-                    // 用量统计按消息级模型归属（事件携带的流式快照值）
+                    // Usage stats are attributed per message to the model carried by the event (streaming snapshot value)
                     stored.model = Some(model);
                     if let Some(ref d) = display {
                         stored.runtime_meta = Some(d.clone());
@@ -284,7 +285,6 @@ impl App {
                     if name == "task"
                         && let Ok(args_val) = serde_json::from_str::<serde_json::Value>(&arguments)
                     {
-                        // tasks 数组：为每个任务项注册一条 TaskRecord
                         let items: Vec<(String, String)> = args_val["tasks"]
                             .as_array()
                             .map(|arr| {
@@ -331,9 +331,9 @@ impl App {
                 subagent_name,
                 subagent_index,
             } => {
-                // bash 子进程树里的 GUI 程序可能绕过管道直接写控制台屏幕
-                // （见 agent/tools.rs 的 CREATE_NO_WINDOW 注释），执行结束后
-                // 强制一次全量重绘，清掉可能残留的屏幕脏区
+                // GUI programs in the bash subprocess tree may bypass pipes and write straight to the
+                // console screen (see the CREATE_NO_WINDOW comment in agent/tools.rs); once the run
+                // finishes, force a full repaint to clear any leftover dirty screen regions
                 if name == "bash" {
                     self.render.force_clear = true;
                 }
@@ -341,8 +341,8 @@ impl App {
                     let tool_name = name.as_str();
                     let result_summary =
                         crate::tui::history_cell::tool_result_summary(tool_name, &result);
-                    // 并发批次中步骤交错：优先按任务下标匹配（同名 subagent 并发
-                    // 时名称无法区分实例），缺下标的历史数据回退按来源 agent 匹配
+                    // Steps interleave within a concurrent batch: match by task index first (concurrent same-name
+                    // subagents are indistinguishable by name); fall back to source-agent matching for index-less historical data
                     let target_idx = self
                         .messages
                         .iter()
@@ -356,7 +356,7 @@ impl App {
                             )
                         })
                         .or_else(|| {
-                            // 单任务批次（agent=None）或历史数据：取最后一条未完成步骤
+                            // Single-task batch (agent=None) or historical data: take the last unfinished step
                             self.messages.iter().rev().position(
                                 |m| matches!(m, Message::SubagentStep { is_done: false, agent: None, .. }),
                             )
@@ -376,9 +376,9 @@ impl App {
                     if name == "task" {
                         let blocks = parse_task_outcomes(&result);
                         let call_ids = std::mem::take(&mut self.tasks.active_call_ids);
-                        // join_all 保序：结果块顺序 = tasks 数组顺序 = record 创建
-                        // 顺序，按位置一一对位；同名 subagent 并发（含混合成败）
-                        // 也不会错位
+                        // join_all preserves order: result block order = tasks array order = record
+                        // creation order, paired positionally; concurrent same-name subagents
+                        // (even with mixed success/failure) can't be mispaired
                         for (i, call_id) in call_ids.iter().enumerate() {
                             let Some(record) = self
                                 .tasks
@@ -451,14 +451,12 @@ impl App {
                 if compact_session {
                     self.agent.apply_compaction(&summary);
 
-                    // 计算压缩耗时
                     self.timing.finish(Instant::now());
                     let total_ms = self.timing.last_total_ms;
                     self.last_esc_time = None;
                     self.esc_hint_active = false;
 
-                    // 更新 token 估算
-                    // 新上下文 ≈ context_prompt_tokens - compact_prompt_tokens + completion_tokens
+                    // New context ≈ context_prompt_tokens - compact_prompt_tokens + completion_tokens
                     if let Some(usage) = usage {
                         let estimated_prompt =
                             estimate_compact_prompt(self.context_prompt_tokens, usage);
@@ -497,7 +495,7 @@ impl App {
                 self.input.set_processing(false);
                 self.render.dirty = true;
             }
-            // 权限请求在 App::handle_event 顶部统一入队，不会到达此处
+            // Permission requests are enqueued at the top of App::handle_event and never reach here
             CoreEvent::PermissionRequest { .. } => {}
         }
         Ok(())
@@ -507,8 +505,8 @@ impl App {
         match matched {
             command::MatchedCommand::Ui { cmd, args } => {
                 self.input.clear();
-                // 清空输入框的同时清掉 pending 状态，避免残留附件附着到
-                // 后续无关消息（元素已随 clear 一起消失）
+                // Clear pending state along with the input box so leftover attachments don't end up on
+                // unrelated later messages (their elements disappeared with the clear)
                 self.pending_images.clear();
                 self.pending_pastes.clear();
                 self.file_picker.pending_mentions.clear();
@@ -548,8 +546,8 @@ impl App {
                         let label = if yolo_on { "YOLO" } else { "ASK" };
                         self.messages
                             .push(Message::Agent(format!("Permission mode: {label}")));
-                        // 持久化到 config.toml，下次启动 / 新建会话保持当前模式
-                        // （空串 = Normal，save 时不写该字段，保持文件最小化）
+                        // Persist to config.toml so the mode survives restarts / new sessions
+                        // (empty string = Normal; save() omits the field to keep the file minimal)
                         self.config.permission.mode = if yolo_on {
                             "yolo".to_string()
                         } else {
@@ -559,7 +557,7 @@ impl App {
                             self.messages
                                 .push(Message::Agent(format!("保存 YOLO 配置失败: {e}")));
                         }
-                        // 同步到共享配置（TaskTool / subagent 可见）
+                        // Sync to the shared config (visible to TaskTool / subagents)
                         if let Ok(mut shared) = self.shared.config.lock() {
                             *shared = self.config.clone();
                         }
@@ -577,8 +575,8 @@ impl App {
             }
             command::MatchedCommand::Prompt { name, args } => {
                 if let Some(cmd) = self.command_registry.find(&name) {
-                    // /init 需要写入 AGENTS.md，但规划模式会过滤 write/edit 工具，
-                    // 直接执行会导致 LLM 静默失败（只能输出文本，写不了文件）。
+                    // /init needs to write AGENTS.md, but plan mode filters out write/edit tools, so
+                    // running it directly fails silently (the LLM can only emit text, not write files).
                     if name == INIT_COMMAND_NAME && self.plan_mode {
                         self.input.clear();
                         self.cmd_suggestion.show = false;
@@ -606,9 +604,9 @@ impl App {
         self.agent.set_plan_mode(self.plan_mode);
     }
 
-    /// /effort 命令：无参数打开二级菜单，`low|high|max` 直接设置（大小写不敏感）。
-    /// 生效范围对齐 YOLO：当前 Agent 即时生效 + 持久化 config.toml + 同步共享配置
-    /// （subagent 新建时跟随），下一次 LLM 请求生效。
+    /// /effort command: no argument opens the submenu; `low|high|max` sets it directly (case-insensitive).
+    /// Scope mirrors YOLO: applies immediately to the current Agent + persisted to config.toml + synced
+    /// to the shared config (new subagents follow), taking effect on the next LLM request.
     pub(super) fn handle_effort_command(&mut self, args: &str) {
         let trimmed = args.trim();
         if trimmed.is_empty() {
@@ -627,7 +625,7 @@ impl App {
         }
     }
 
-    /// 打开思考强度二级菜单（默认选中当前档位）
+    /// Opens the reasoning effort submenu (current level preselected)
     pub(super) fn open_effort_picker(&mut self) {
         let selected_index = match self.agent.reasoning_effort() {
             crate::agent::models::ReasoningEffort::Low => 0,
@@ -637,7 +635,7 @@ impl App {
         self.state = AppState::EffortPicker { selected_index };
     }
 
-    /// 应用思考强度（Agent 即时生效 + config 持久化 + 共享配置同步 + 回显）
+    /// Applies reasoning effort (immediate on the Agent + config persistence + shared-config sync + echo)
     pub(super) fn apply_effort(&mut self, effort: crate::agent::models::ReasoningEffort) {
         self.agent.set_reasoning_effort(effort);
         self.config.reasoning_effort = effort;
@@ -645,7 +643,7 @@ impl App {
             self.messages
                 .push(Message::Agent(format!("保存思考强度配置失败: {e}")));
         }
-        // 同步到共享配置（subagent 新建时可见）
+        // Sync to the shared config (visible to newly created subagents)
         if let Ok(mut shared) = self.shared.config.lock() {
             shared.reasoning_effort = effort;
         }
@@ -656,7 +654,7 @@ impl App {
         self.render.dirty = true;
     }
 
-    /// 从思考阶段过渡到输出阶段时，冻结当前思考块的耗时。
+    /// Freezes the current thinking block's elapsed time when moving from the thinking phase to output.
     pub(super) fn finalize_thinking_ms(&mut self) {
         if let Some(Message::AgentThinking {
             think_ms,
@@ -763,106 +761,104 @@ impl App {
                 .await?;
         }
 
-        // 检查是否为 @subagent: 语法
-        if let Some((subagent_name, subagent_prompt)) = subagent::parse_subagent_input(&input) {
-            // 查找 subagent 配置
-            if self.subagents.iter().any(|s| s.name == subagent_name) {
-                let task_tool = TaskTool::new(
-                    self.subagents.clone(),
-                    self.skills.clone(),
-                    self.storage.clone(),
-                    self.resolved.display.clone(),
-                    self.work_dir.clone(),
-                    self.shared.current_session.clone(),
-                    self.shared.mcp_backends.clone(),
-                    self.shared.config.clone(),
-                    self.agent.event_hub().clone(),
-                    self.agent.permission().clone(),
-                );
+        if let Some((subagent_name, subagent_prompt)) = subagent::parse_subagent_input(&input)
+            && self.subagents.iter().any(|s| s.name == subagent_name)
+        {
+            let task_tool = TaskTool::new(
+                self.subagents.clone(),
+                self.skills.clone(),
+                self.storage.clone(),
+                self.resolved.display.clone(),
+                self.work_dir.clone(),
+                self.shared.current_session.clone(),
+                self.shared.mcp_backends.clone(),
+                self.shared.config.clone(),
+                self.agent.event_hub().clone(),
+                self.agent.permission().clone(),
+            );
 
-                let task_description = format!(
-                    "@{}: {}",
-                    subagent_name,
-                    subagent_prompt.chars().take(60).collect::<String>()
-                );
+            let task_description = format!(
+                "@{}: {}",
+                subagent_name,
+                subagent_prompt.chars().take(60).collect::<String>()
+            );
 
-                let args = serde_json::json!({
-                    "tasks": [{
-                        "subagent": subagent_name,
-                        "description": task_description.clone(),
-                        "prompt": subagent_prompt,
-                    }]
-                })
-                .to_string();
+            let args = serde_json::json!({
+                "tasks": [{
+                    "subagent": subagent_name,
+                    "description": task_description.clone(),
+                    "prompt": subagent_prompt,
+                }]
+            })
+            .to_string();
 
-                self.messages.push(Message::ToolCall {
-                    name: "task".to_string(),
-                    arguments: args.clone(),
-                });
-                if self.should_auto_scroll {
-                    self.scroll_offset = 0;
-                }
-
-                self.tasks.call_counter += 1;
-                let call_id = self.tasks.call_counter;
-                self.tasks.active_call_ids = vec![call_id];
-                self.tasks.records.push(TaskRecord {
-                    call_id,
-                    session_id: String::new(),
-                    subagent_name: subagent_name.clone(),
-                    description: task_description.clone(),
-                    started_at: std::time::Instant::now(),
-                    status: TaskRunStatus::Running,
-                });
-
-                let result = task_tool.execute_async(&args, &self.work_dir).await;
-                let task_status = if result.is_ok() {
-                    TaskRunStatus::Completed
-                } else {
-                    TaskRunStatus::Error
-                };
-                let result_text = result.unwrap_or_else(|err| err.message);
-
-                let sub_session_id = parse_task_id_from_result(&result_text);
-                self.tasks.active_call_ids.clear();
-                if let Some(record) = self.tasks.records.iter_mut().find(|r| r.call_id == call_id) {
-                    record.session_id = sub_session_id.unwrap_or_default();
-                    record.status = task_status;
-                }
-
-                self.messages.push(Message::ToolResult {
-                    name: "task".to_string(),
-                    result: result_text.clone(),
-                    display: None,
-                });
-
-                // 将 subagent 结果作为 assistant 消息持久化到主 session
-                let assistant_stored = StoredMessage {
-                    role: MessageRole::Assistant,
-                    content: result_text,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    cached_tokens: None,
-                    model: None,
-                    runtime_meta: None,
-                    think_ms: None,
-                    compacted: false,
-                    attachments: None,
-                    mentions: None,
-                };
-                self.storage
-                    .append_message(&session_id, &assistant_stored)
-                    .await?;
-
-                self.is_processing = false;
-                self.input.set_processing(false);
-                self.should_auto_scroll = true;
+            self.messages.push(Message::ToolCall {
+                name: "task".to_string(),
+                arguments: args.clone(),
+            });
+            if self.should_auto_scroll {
                 self.scroll_offset = 0;
-                return Ok(());
             }
+
+            self.tasks.call_counter += 1;
+            let call_id = self.tasks.call_counter;
+            self.tasks.active_call_ids = vec![call_id];
+            self.tasks.records.push(TaskRecord {
+                call_id,
+                session_id: String::new(),
+                subagent_name: subagent_name.clone(),
+                description: task_description.clone(),
+                started_at: std::time::Instant::now(),
+                status: TaskRunStatus::Running,
+            });
+
+            let result = task_tool.execute_async(&args, &self.work_dir).await;
+            let task_status = if result.is_ok() {
+                TaskRunStatus::Completed
+            } else {
+                TaskRunStatus::Error
+            };
+            let result_text = result.unwrap_or_else(|err| err.message);
+
+            let sub_session_id = parse_task_id_from_result(&result_text);
+            self.tasks.active_call_ids.clear();
+            if let Some(record) = self.tasks.records.iter_mut().find(|r| r.call_id == call_id) {
+                record.session_id = sub_session_id.unwrap_or_default();
+                record.status = task_status;
+            }
+
+            self.messages.push(Message::ToolResult {
+                name: "task".to_string(),
+                result: result_text.clone(),
+                display: None,
+            });
+
+            // Persist the subagent result as an assistant message in the main session
+            let assistant_stored = StoredMessage {
+                role: MessageRole::Assistant,
+                content: result_text,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+                model: None,
+                runtime_meta: None,
+                think_ms: None,
+                compacted: false,
+                attachments: None,
+                mentions: None,
+            };
+            self.storage
+                .append_message(&session_id, &assistant_stored)
+                .await?;
+
+            self.is_processing = false;
+            self.input.set_processing(false);
+            self.should_auto_scroll = true;
+            self.scroll_offset = 0;
+            return Ok(());
         }
 
         let tx = self.core_tx.clone();
@@ -880,7 +876,7 @@ impl App {
         }
 
         let non_system_count = self.agent.messages_excluding_system_count();
-        // 少于 4 条非 system 消息（不足 2 轮对话）时，压缩没有意义
+        // Compaction is pointless with fewer than 4 non-system messages (under 2 conversation rounds)
         if non_system_count < 4 {
             self.messages
                 .push(Message::Agent("消息太少，无需压缩".to_string()));
@@ -925,9 +921,9 @@ impl App {
     }
 }
 
-/// 从 task 工具结果文本中解析 sub_session_id。
+/// Parses the sub_session_id from task tool result text.
 ///
-/// 格式: `<task subagent="..." description="..." task_id="UUID" state="completed">`
+/// Format: `<task subagent="..." description="..." task_id="UUID" state="completed">`
 fn parse_task_id_from_result(result: &str) -> Option<String> {
     parse_task_outcomes(result)
         .into_iter()
@@ -935,15 +931,15 @@ fn parse_task_id_from_result(result: &str) -> Option<String> {
         .and_then(|b| b.task_id)
 }
 
-/// task 工具结果中单个 `<task>` 块的解析产出
+/// Parsed outcome of a single `<task>` block in task tool results
 struct TaskOutcome {
     task_id: Option<String>,
     ok: bool,
 }
 
-/// 逐块解析结果中的 `<task ...>` 块（兼容有无 `<tasks>` 包裹两种格式）。
-/// 失败块保留占位（ok=false、无 task_id），返回顺序与 tasks 数组一致，
-/// 供调用方按位置对位
+/// Parses `<task ...>` blocks out of the result (tolerates both wrapped and unwrapped `<tasks>` formats).
+/// Failed blocks keep a placeholder (ok=false, no task_id); the returned order matches the tasks array
+/// so callers can pair by position
 fn parse_task_outcomes(result: &str) -> Vec<TaskOutcome> {
     let mut blocks = Vec::new();
     for line in result.lines() {
@@ -963,7 +959,7 @@ fn parse_task_outcomes(result: &str) -> Vec<TaskOutcome> {
     blocks
 }
 
-/// 在 `<task ...>` 属性行内提取 `key="value"`
+/// Extracts `key="value"` from a `<task ...>` attribute line
 fn extract_task_attr(tag: &str, key: &str) -> Option<String> {
     let marker = format!("{key}=\"");
     let start = tag.find(&marker)? + marker.len();
@@ -1020,7 +1016,7 @@ mod tests {
         assert!(!blocks[1].ok);
         assert_eq!(blocks[2].task_id.as_deref(), Some("id-3"));
         assert!(blocks[2].ok);
-        // 直连路径取第一个成功块的 id（跳过失败块）
+        // The direct path takes the first successful block's id (skipping failed blocks)
         assert_eq!(parse_task_id_from_result(result), Some("id-1".to_string()));
     }
 

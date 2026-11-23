@@ -1,15 +1,19 @@
 use super::toml_serde::config_to_toml;
-use super::{
-    Config, CustomModelEntry, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS, ProviderEntry,
-};
+use super::{Config, CustomModelEntry, DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS};
 
-/// 构造测试配置：deepseek（预定义，含一个自定义模型）+ ollama（自定义 provider，两个模型）
+/// Build a test config: deepseek (predefined provider, endpoint from the built-in table, two
+/// models in the table) + ollama (custom provider, two models)
 fn test_config() -> Config {
     let mut cfg = Config::default();
-    cfg.add_predefined_provider("deepseek", "sk-test");
-    // deepseek 下挂一个自定义模型
+    cfg.add_custom_model(
+        "deepseek",
+        None,
+        Some("sk-test"),
+        "deepseek-flash",
+        393216,
+        1048576,
+    );
     cfg.add_custom_model("deepseek", None, None, "custom-model", 65536, 131072);
-    // 自定义 provider
     cfg.add_custom_model(
         "ollama",
         Some("http://localhost:11434/v1"),
@@ -22,37 +26,69 @@ fn test_config() -> Config {
     cfg
 }
 
+// ── Predefined providers: endpoints only ─────────────
+
 #[test]
-fn resolve_removed_predefined_model_gives_clear_error() {
-    // 模拟老用户残留：自动同步时代写入、后被下架的智谱模型条目
-    let mut cfg = Config::default();
-    cfg.add_predefined_provider("zhipu-coding-plan", "sk-test");
-    cfg.add_custom_model("zhipu-coding-plan", None, None, "GLM-5.1", 131072, 1000000);
-    let err = cfg.resolve("zhipu-coding-plan/GLM-5.1").unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("已从预定义列表移除"), "实际报错: {msg}");
-    assert!(msg.contains("/model"), "实际报错: {msg}");
+fn predefined_provider_supplies_base_url_and_native_reasoning() {
+    let cfg = test_config();
+    // No base_url in the entry: the built-in endpoint applies
+    assert!(cfg.providers["deepseek"].base_url.is_none());
+    assert_eq!(
+        cfg.provider_base_url("deepseek").as_deref(),
+        Some("https://api.deepseek.com")
+    );
+    assert!(
+        cfg.resolve("deepseek/deepseek-flash")
+            .unwrap()
+            .native_reasoning
+    );
+    // Custom providers need their own endpoint and use the standard OpenAI API
+    assert!(!cfg.resolve("ollama/qwen3").unwrap().native_reasoning);
+    // Unconfigured built-in providers are not listed as models (their list needs a key)
+    let displays: Vec<String> = cfg
+        .available_models()
+        .into_iter()
+        .map(|m| m.display)
+        .collect();
+    assert!(!displays.iter().any(|d| d.starts_with("zhipu-coding-plan/")));
 }
 
 #[test]
+fn empty_models_table_roundtrips_without_a_toml_section() {
+    // A freshly enabled provider has no models yet: nothing is written and parsing gives
+    // the empty table back
+    let mut cfg = Config::default();
+    cfg.update_provider("deepseek", None, Some("sk-test"), None)
+        .unwrap();
+    let toml = config_to_toml(&cfg).unwrap();
+    assert!(!toml.contains("models"), "toml:\n{toml}");
+    let parsed: Config = toml::from_str(&toml).unwrap();
+    assert!(parsed.providers["deepseek"].models.is_empty());
+    assert_eq!(parsed.providers["deepseek"].api_key, "sk-test");
+}
+
+// ── Serialization ──────────────────────────────────
+
+#[test]
 fn permission_mode_serialization() {
-    // YOLO 持久化：mode = "yolo" 写入序列化结果
     let mut cfg = test_config();
     cfg.permission.mode = "yolo".to_string();
     let toml = config_to_toml(&cfg).unwrap();
     assert!(toml.contains("mode = \"yolo\""));
 
-    // 关闭 YOLO：mode 清空则不写该字段（空 [permission] 表整体省略）
+    // YOLO off: an empty mode omits the field (the whole empty [permission] table is omitted)
     cfg.permission.mode.clear();
     let toml = config_to_toml(&cfg).unwrap();
     assert!(!toml.contains("mode ="));
     assert!(!toml.contains("[permission]"));
 }
 
+// ── Deleting models / providers ─────────────────────
+
 #[test]
 fn remove_custom_model_deletes_entry() {
     let mut cfg = test_config();
-    // main_model 指向别的模型 → 不迁移
+    // main_model points at another model -> no migration
     cfg.main_model = "ollama/qwen3".to_string();
     assert_eq!(cfg.remove_custom_model("ollama/llama3").unwrap(), None);
     let displays: Vec<String> = cfg
@@ -69,33 +105,10 @@ fn remove_custom_model_migrates_main_model() {
     let mut cfg = test_config();
     cfg.main_model = "ollama/qwen3".to_string();
     let migrated = cfg.remove_custom_model("ollama/qwen3").unwrap();
-    // deepseek 的自定义模型排序在前（BTreeMap 字母序，自定义模型优先列出）
+    // deepseek's custom-model sorts first (BTreeMap alphabetical order)
     assert_eq!(migrated.as_deref(), Some("deepseek/custom-model"));
     assert_eq!(cfg.main_model, "deepseek/custom-model");
     assert!(cfg.resolve_default().is_ok());
-}
-
-#[test]
-fn remove_rejects_predefined_model() {
-    let mut cfg = test_config();
-    cfg.main_model = "ollama/qwen3".to_string();
-    // 未写入 models 表的预定义模型（合并分支）
-    assert!(
-        cfg.remove_custom_model("deepseek/deepseek-v4-flash")
-            .is_err()
-    );
-    // setup 同步写入 models 表的预定义模型同样不可删
-    cfg.ensure_provider_models("deepseek");
-    assert!(
-        cfg.remove_custom_model("deepseek/deepseek-v4-flash")
-            .is_err()
-    );
-    let displays: Vec<String> = cfg
-        .available_models()
-        .into_iter()
-        .map(|m| m.display)
-        .collect();
-    assert!(displays.contains(&"deepseek/deepseek-v4-flash".to_string()));
 }
 
 #[test]
@@ -105,6 +118,9 @@ fn remove_rejects_unknown_model() {
     assert!(cfg.remove_custom_model("ollama/nonexistent").is_err());
     assert!(cfg.remove_custom_model("nobody/model").is_err());
     assert!(cfg.remove_custom_model("bad-format").is_err());
+    // A model known only from the /models cache has no table row to delete
+    cfg.set_discovered_models("ollama", vec![remote_model("vendor-distilled")]);
+    assert!(cfg.remove_custom_model("ollama/vendor-distilled").is_err());
 }
 
 #[test]
@@ -113,49 +129,37 @@ fn remove_last_model_of_custom_provider_removes_provider() {
     cfg.main_model = "deepseek/custom-model".to_string();
     assert!(cfg.remove_custom_model("ollama/qwen3").is_ok());
     assert!(cfg.remove_custom_model("ollama/llama3").is_ok());
-    // provider 整条移除
     assert!(!cfg.providers.contains_key("ollama"));
 }
 
 #[test]
-fn remove_last_custom_model_of_predefined_provider_keeps_provider() {
-    // 手工构造：预定义 provider 的 models 表仅含一个自定义模型（hand-edited 配置场景）
+fn remove_last_model_of_predefined_provider_keeps_provider() {
     let mut cfg = Config::default();
-    let mut models = std::collections::BTreeMap::new();
-    models.insert(
-        "custom-model".to_string(),
-        CustomModelEntry {
-            max_tokens: 65536,
-            context_window: 131072,
-            supports_vision: None,
-        },
+    cfg.add_custom_model("deepseek", None, Some("sk"), "only-model", 65536, 131072);
+    cfg.add_custom_model(
+        "ollama",
+        Some("http://localhost:11434/v1"),
+        Some("sk-ollama"),
+        "qwen3",
+        65536,
+        131072,
     );
-    cfg.providers.insert(
-        "deepseek".to_string(),
-        ProviderEntry {
-            api_key: "sk".to_string(),
-            base_url: None,
-            models: Some(models),
-        },
-    );
-    cfg.main_model = "deepseek/custom-model".to_string();
-    let migrated = cfg.remove_custom_model("deepseek/custom-model").unwrap();
-    // provider 保留，models 重置为 None（回归合并预定义）；main_model 迁移到预定义模型
-    assert_eq!(migrated.as_deref(), Some("deepseek/deepseek-v4-flash"));
+    cfg.main_model = "deepseek/only-model".to_string();
+    let migrated = cfg.remove_custom_model("deepseek/only-model").unwrap();
+    assert_eq!(migrated.as_deref(), Some("ollama/qwen3"));
+    // Credentials kept, table empty: the provider stays available for the add-model flow
     let entry = cfg.providers.get("deepseek").unwrap();
-    assert!(entry.models.is_none());
-    // 预定义模型仍列出可用
-    let displays: Vec<String> = cfg
-        .available_models()
-        .into_iter()
-        .map(|m| m.display)
-        .collect();
-    assert!(displays.contains(&"deepseek/deepseek-v4-flash".to_string()));
+    assert_eq!(entry.api_key, "sk");
+    assert!(entry.models.is_empty());
+    assert!(
+        cfg.configured_providers()
+            .iter()
+            .any(|p| p.id == "deepseek")
+    );
 }
 
 #[test]
 fn remove_last_available_model_rejected() {
-    // 仅剩一个自定义模型时删除 → 拒绝
     let mut cfg = Config::default();
     cfg.add_custom_model(
         "ollama",
@@ -167,7 +171,7 @@ fn remove_last_available_model_rejected() {
     );
     cfg.main_model = "ollama/only-model".to_string();
     assert!(cfg.remove_custom_model("ollama/only-model").is_err());
-    // 配置未被污染：模型仍在
+    // Config untouched: the model is still there
     let displays: Vec<String> = cfg
         .available_models()
         .into_iter()
@@ -181,7 +185,7 @@ fn remove_last_available_model_rejected() {
 fn remove_provider_removes_all_models() {
     let mut cfg = test_config();
     cfg.main_model = "ollama/qwen3".to_string();
-    // 迁移到 deepseek 的第一个可用模型（自定义模型排序在前）
+    // Migrates to deepseek's first available model (custom-model sorts first)
     let migrated = cfg.remove_provider("ollama").unwrap();
     assert_eq!(migrated.as_deref(), Some("deepseek/custom-model"));
     assert!(!cfg.providers.contains_key("ollama"));
@@ -204,227 +208,202 @@ fn remove_provider_rejects_predefined_and_unknown() {
 }
 
 #[test]
-fn available_models_marks_deletable() {
-    let cfg = test_config();
-    let entries = cfg.available_models();
-    // 自定义模型可删
-    assert!(
-        entries
-            .iter()
-            .any(|m| m.display == "ollama/qwen3" && m.deletable)
+fn available_models_lists_only_table_rows() {
+    let mut cfg = test_config();
+    cfg.set_discovered_models(
+        "deepseek",
+        vec![
+            remote_model("deepseek-flash"),
+            remote_model("remote-only-v5"),
+        ],
     );
-    // setup 同步进 models 表的预定义模型不可删（deletable=false，来自第一分支）
-    let ds = entries
-        .iter()
-        .find(|m| m.display == "deepseek/deepseek-v4-flash")
-        .unwrap();
-    assert!(!ds.deletable);
-    // 深度验证：ensure 后仍在表中但 deletable=false
-    let mut cfg2 = test_config();
-    cfg2.ensure_provider_models("deepseek");
-    let ds2 = cfg2
-        .available_models()
-        .into_iter()
-        .find(|m| m.display == "deepseek/deepseek-v4-flash")
-        .unwrap();
-    assert!(!ds2.deletable);
+    // The list is the table: table rows are present, cache-only models are not
+    let entries = cfg.available_models();
+    for display in ["ollama/qwen3", "deepseek/deepseek-flash"] {
+        assert!(
+            entries.iter().any(|m| m.display == display),
+            "missing {display}"
+        );
+    }
+    assert!(
+        !entries
+            .iter()
+            .any(|m| m.display == "deepseek/remote-only-v5")
+    );
 }
 
-// ── 视觉能力解析 ─────────────────────────────────────
+// ── Adding models ───────────────────────────────────
+
+#[test]
+fn add_model_entry_creates_provider_and_carries_metadata() {
+    let mut cfg = Config::default();
+    let mut remote = remote_model("GLM-5.3");
+    remote.context_window = Some(1_000_000);
+    remote.max_output_tokens = Some(131_072);
+    remote.supports_vision = Some(true);
+    let display = cfg.add_model_entry(
+        "zhipu-coding-plan",
+        None,
+        Some("sk-test"),
+        &remote.id,
+        remote.to_model_entry(),
+    );
+    assert_eq!(display, "zhipu-coding-plan/GLM-5.3");
+    let entry = &cfg.providers["zhipu-coding-plan"];
+    assert_eq!(entry.api_key, "sk-test");
+    assert!(entry.base_url.is_none());
+    let model = &entry.models["GLM-5.3"];
+    assert_eq!(model.context_window, 1_000_000);
+    let resolved = cfg.resolve(&display).unwrap();
+    assert_eq!(resolved.context_window, 1_000_000);
+    assert!(resolved.supports_vision);
+    assert!(resolved.native_reasoning);
+}
+
+#[test]
+fn remote_model_to_model_entry_defaults_missing_metadata() {
+    // Providers reporting ids only (GLM) land on the defaults
+    let entry = remote_model("glm-4.5").to_model_entry();
+    assert_eq!(entry.max_tokens, 131072);
+    assert_eq!(entry.context_window, DEFAULT_CONTEXT_WINDOW);
+    assert_eq!(entry.supports_vision, None);
+}
+
+#[test]
+fn add_custom_model_re_adding_keeps_vision_flag() {
+    let mut cfg = Config::default();
+    cfg.add_custom_model(
+        "ollama",
+        Some("http://localhost:11434/v1"),
+        Some("sk"),
+        "qwen3",
+        32768,
+        131072,
+    );
+    let model = &cfg.providers["ollama"].models["qwen3"];
+    assert_eq!(model.supports_vision, None);
+    // Re-adding keeps an existing supports_vision flag but resets the numbers
+    let entry = CustomModelEntry {
+        max_tokens: 4096,
+        context_window: 8192,
+        supports_vision: Some(true),
+    };
+    cfg.add_model_entry("ollama", None, None, "qwen3", entry);
+    cfg.add_custom_model("ollama", None, None, "qwen3", 65536, 262144);
+    let model = &cfg.providers["ollama"].models["qwen3"];
+    assert_eq!(model.supports_vision, Some(true));
+    assert_eq!(model.context_window, 262144);
+}
+
+// ── apply_discovered_models (the fetch dialog's confirm) ──
+
+#[test]
+fn apply_discovered_models_adds_picked_rows_and_skips_existing() {
+    let mut cfg = test_config();
+    let mut reported = remote_model("deepseek-v5");
+    reported.context_window = Some(1_000_000);
+    reported.max_output_tokens = Some(64_000);
+    let plain = remote_model("id-only");
+    cfg.set_discovered_models("deepseek", vec![reported, plain]);
+
+    // deepseek-flash is already configured: skipped and untouched
+    let added = cfg
+        .apply_discovered_models(
+            "deepseek",
+            &[
+                "deepseek-flash".to_string(),
+                "deepseek-v5".to_string(),
+                "id-only".to_string(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        added,
+        vec!["deepseek-v5".to_string(), "id-only".to_string()]
+    );
+
+    // Picked rows carry the provider-reported metadata
+    let v5 = &cfg.providers["deepseek"].models["deepseek-v5"];
+    assert_eq!(v5.context_window, 1_000_000);
+    assert_eq!(v5.max_tokens, 64_000);
+    // Ids missing from the cache land on the defaults
+    let fallback = &cfg.providers["deepseek"].models["id-only"];
+    assert_eq!(fallback.context_window, DEFAULT_CONTEXT_WINDOW);
+    assert_eq!(fallback.max_tokens, 131072);
+    // The already-configured row keeps its own values
+    let flash = &cfg.providers["deepseek"].models["deepseek-flash"];
+    assert_eq!(flash.context_window, 1_048_576);
+    // The rows are usable and listed
+    assert!(cfg.resolve("deepseek/deepseek-v5").is_ok());
+    assert!(
+        cfg.available_models()
+            .iter()
+            .any(|m| m.display == "deepseek/id-only")
+    );
+}
+
+#[test]
+fn apply_discovered_models_requires_configured_provider_and_cache() {
+    let mut cfg = Config::default();
+    // Unknown provider
+    assert!(
+        cfg.apply_discovered_models("ollama", &["m".to_string()])
+            .is_err()
+    );
+    // Provider without a key
+    cfg.update_provider("deepseek", None, Some("sk"), None)
+        .unwrap();
+    cfg.providers.get_mut("deepseek").unwrap().api_key.clear();
+    assert!(
+        cfg.apply_discovered_models("deepseek", &["m".to_string()])
+            .is_err()
+    );
+    // No cached list yet
+    cfg.providers.get_mut("deepseek").unwrap().api_key = "sk".into();
+    assert!(
+        cfg.apply_discovered_models("deepseek", &["m".to_string()])
+            .is_err()
+    );
+}
+
+// ── Vision capability resolution ─────────────────────
 
 #[test]
 fn supports_vision_explicit_true_respected() {
-    // 非视觉模型显式 true 生效
     let mut cfg = Config::default();
-    cfg.add_predefined_provider("deepseek", "sk-test");
-    cfg.add_custom_model("deepseek", None, None, "text-model", 4096, 8192);
+    cfg.add_custom_model("deepseek", None, Some("sk-test"), "text-model", 4096, 8192);
     let entry = cfg.providers.get_mut("deepseek").unwrap();
-    let custom = entry
-        .models
-        .as_mut()
-        .unwrap()
-        .get_mut("text-model")
-        .unwrap();
-    custom.supports_vision = Some(true);
+    entry.models.get_mut("text-model").unwrap().supports_vision = Some(true);
 
     let resolved = cfg.resolve("deepseek/text-model").unwrap();
     assert!(resolved.supports_vision);
 }
 
 #[test]
-fn supports_vision_explicit_false_respected() {
-    // 预定义声明为 true 的模型（GLM-5.3-Flash），显式 false 覆盖声明
+fn supports_vision_defaults_false_and_editable() {
     let mut cfg = Config::default();
-    cfg.add_predefined_provider("zhipu-coding-plan", "sk-test");
-    let entry = cfg.providers.get_mut("zhipu-coding-plan").unwrap();
-    let custom = entry
-        .models
-        .as_mut()
-        .unwrap()
-        .get_mut("GLM-5.3-Flash")
+    cfg.add_custom_model("deepseek", None, Some("sk-test"), "deepseek-v5", 4096, 8192);
+    // Unset vision flag resolves to false
+    assert!(!cfg.resolve("deepseek/deepseek-v5").unwrap().supports_vision);
+
+    cfg.update_model("deepseek/deepseek-v5", None, None, None, Some(false))
         .unwrap();
-    assert_eq!(custom.supports_vision, Some(true));
-    custom.supports_vision = Some(false);
-
-    let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3-Flash").unwrap();
-    assert!(!resolved.supports_vision);
-}
-
-#[test]
-fn supports_vision_predefined_declaration_fallback() {
-    // 存量场景：手写 config 中 GLM-5.3-Flash 条目 supports_vision 缺省（None），
-    // resolve 回退到预定义声明 true
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "zhipu-coding-plan".to_string(),
-        ProviderEntry {
-            api_key: "sk-test".to_string(),
-            base_url: None,
-            models: Some(std::collections::BTreeMap::from([(
-                "GLM-5.3-Flash".to_string(),
-                CustomModelEntry {
-                    max_tokens: 131072,
-                    context_window: 1000000,
-                    supports_vision: None,
-                },
-            )])),
-        },
-    );
-
-    let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3-Flash").unwrap();
-    assert!(resolved.supports_vision);
+    assert!(!cfg.resolve("deepseek/deepseek-v5").unwrap().supports_vision);
+    cfg.update_model("deepseek/deepseek-v5", None, None, None, Some(true))
+        .unwrap();
+    assert!(cfg.resolve("deepseek/deepseek-v5").unwrap().supports_vision);
 }
 
 #[test]
 fn supports_vision_unknown_model_defaults_false() {
     let cfg = test_config();
-    // 未命中预定义表且未配置 → false
     let resolved = cfg.resolve("deepseek/custom-model").unwrap();
     assert!(!resolved.supports_vision);
-    // 预定义声明 false → false
-    let resolved = cfg.resolve("deepseek/deepseek-v4-flash").unwrap();
+    let resolved = cfg.resolve("deepseek/deepseek-flash").unwrap();
     assert!(!resolved.supports_vision);
 }
 
-#[test]
-fn predefined_model_vision_flag_propagates() {
-    // 预定义模型的 supports_vision 声明直通 resolve（GLM-5.3-Flash 支持图片输入）
-    let mut cfg = Config::default();
-    cfg.add_predefined_provider("zhipu-coding-plan", "sk-test");
-
-    let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3-Flash").unwrap();
-    assert!(resolved.supports_vision);
-    let resolved = cfg.resolve("zhipu-coding-plan/GLM-5.3").unwrap();
-    assert!(!resolved.supports_vision);
-}
-
-#[test]
-fn migrate_writes_predefined_vision_flag() {
-    // 模拟手写 config：缺省 None 且命中预定义表 → 补写声明值；
-    // 显式 false 与自定义 provider 下的模型不动
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "zhipu-coding-plan".to_string(),
-        ProviderEntry {
-            api_key: "sk-test".to_string(),
-            base_url: None,
-            models: Some(std::collections::BTreeMap::from([
-                (
-                    "GLM-5.3".to_string(),
-                    CustomModelEntry {
-                        max_tokens: 131072,
-                        context_window: 1000000,
-                        supports_vision: None,
-                    },
-                ),
-                (
-                    "GLM-5.3-Flash".to_string(),
-                    CustomModelEntry {
-                        max_tokens: 131072,
-                        context_window: 1000000,
-                        supports_vision: Some(false),
-                    },
-                ),
-            ])),
-        },
-    );
-    cfg.add_custom_model("deepseek", None, None, "text-model", 4096, 8192);
-
-    assert!(cfg.migrate_predefined_vision_flags());
-
-    let models = cfg
-        .providers
-        .get("zhipu-coding-plan")
-        .unwrap()
-        .models
-        .as_ref()
-        .unwrap();
-    // GLM-5.3（声明 false）：None → Some(false)
-    assert_eq!(models.get("GLM-5.3").unwrap().supports_vision, Some(false));
-    // 显式 false 未被改写
-    assert_eq!(
-        models.get("GLM-5.3-Flash").unwrap().supports_vision,
-        Some(false)
-    );
-    // 自定义 provider 下的模型不命中预定义表，保持 None
-    let custom = cfg
-        .providers
-        .get("deepseek")
-        .unwrap()
-        .models
-        .as_ref()
-        .unwrap()
-        .get("text-model")
-        .unwrap();
-    assert_eq!(custom.supports_vision, None);
-
-    // 幂等：再次迁移无变更
-    assert!(!cfg.migrate_predefined_vision_flags());
-}
-
-#[test]
-fn migrate_resolves_none_to_declared_true() {
-    // GLM-5.3-Flash（声明 true）缺省 None → 迁移为 Some(true)
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "zhipu-coding-plan".to_string(),
-        ProviderEntry {
-            api_key: "sk-test".to_string(),
-            base_url: None,
-            models: Some(std::collections::BTreeMap::from([(
-                "GLM-5.3-Flash".to_string(),
-                CustomModelEntry {
-                    max_tokens: 131072,
-                    context_window: 1000000,
-                    supports_vision: None,
-                },
-            )])),
-        },
-    );
-
-    assert!(cfg.migrate_predefined_vision_flags());
-    let models = cfg
-        .providers
-        .get("zhipu-coding-plan")
-        .unwrap()
-        .models
-        .as_ref()
-        .unwrap();
-    assert_eq!(
-        models.get("GLM-5.3-Flash").unwrap().supports_vision,
-        Some(true)
-    );
-}
-
-#[test]
-fn migrate_no_change_when_all_explicit() {
-    // 全部条目显式配置 → 无变更（不触发 save）
-    let mut cfg = Config::default();
-    cfg.add_predefined_provider("deepseek", "sk-test");
-    assert!(!cfg.migrate_predefined_vision_flags());
-}
-
-// ── 重试配置 ─────────────────────────────────────────
+// ── Retry config ────────────────────────────────────
 
 #[test]
 fn retry_defaults_applied() {
@@ -439,7 +418,7 @@ fn retry_defaults_applied() {
 #[test]
 fn retry_section_parsed_and_converted() {
     let content = r#"
-main_model = "deepseek/deepseek-v4-flash"
+main_model = "deepseek/deepseek-flash"
 
 [providers.deepseek]
 api_key = "sk-test"
@@ -460,7 +439,7 @@ multiplier = 1.5
 
 #[test]
 fn retry_partial_section_uses_field_defaults() {
-    // 只覆盖部分字段，其余取默认
+    // Only some fields overridden, the rest defaulted
     let content = r#"
 [providers.deepseek]
 api_key = "sk-test"
@@ -471,42 +450,43 @@ max_retries = 0
     let cfg: Config = toml::from_str(content).unwrap();
     assert_eq!(cfg.retry.max_retries, 0);
     assert_eq!(cfg.retry.initial_delay_ms, 1000);
-    // max_retries=0 = 禁用重试，转换后直接生效
     assert_eq!(cfg.retry_config().max_retries, 0);
 }
 
 #[test]
 fn retry_default_detection_controls_save_section() {
-    // is_default 决定 save_config 是否写入 [retry] 段
-    // （save_config 直接写 ~/.hailux/config.toml，此处只测判定逻辑）
+    // is_default decides whether save_config writes the [retry] section
+    // (save_config writes ~/.hailux/config.toml directly; only the predicate is tested here)
     let mut cfg = Config::default();
-    assert!(cfg.retry.is_default(), "默认配置不应写入 [retry]");
+    assert!(
+        cfg.retry.is_default(),
+        "default config must not write the [retry] section"
+    );
     cfg.retry.max_retries = 7;
-    assert!(!cfg.retry.is_default(), "非默认值应写入 [retry]");
+    assert!(
+        !cfg.retry.is_default(),
+        "non-default values must write the [retry] section"
+    );
 }
 
-// ── 思考强度 ─────────────────────────────────────────
+// ── Reasoning effort ────────────────────────────────
 
 #[test]
 fn native_reasoning_predefined_true_custom_false() {
     let cfg = test_config();
-    // 预定义 DeepSeek/GLM：原生推理接口
-    let resolved = cfg.resolve("deepseek/deepseek-v4-pro").unwrap();
+    let resolved = cfg.resolve("deepseek/deepseek-flash").unwrap();
     assert!(resolved.native_reasoning);
-    // 自定义 provider：按 OpenAI 标准接口（不带 thinking、reasoning_effort 直传）
     let resolved = cfg.resolve("ollama/qwen3").unwrap();
     assert!(!resolved.native_reasoning);
 }
 
 #[test]
 fn reasoning_effort_default_and_toml_minimization() {
-    // 默认 high：不写入序列化结果（保持文件最小化）
     let cfg = test_config();
     assert_eq!(cfg.reasoning_effort, crate::agent::ReasoningEffort::High);
     let toml = config_to_toml(&cfg).unwrap();
     assert!(!toml.contains("reasoning_effort"));
 
-    // 非默认值写入
     let mut cfg = test_config();
     cfg.reasoning_effort = crate::agent::ReasoningEffort::Max;
     let toml = config_to_toml(&cfg).unwrap();
@@ -515,7 +495,7 @@ fn reasoning_effort_default_and_toml_minimization() {
 
 #[test]
 fn reasoning_effort_toml_roundtrip() {
-    // root 键须位于表头之前
+    // Root keys must precede any table header
     let content = r#"
 reasoning_effort = "low"
 
@@ -525,7 +505,6 @@ api_key = "sk-test"
     let cfg: Config = toml::from_str(content).unwrap();
     assert_eq!(cfg.reasoning_effort, crate::agent::ReasoningEffort::Low);
 
-    // 缺省字段回退默认 high
     let cfg: Config = toml::from_str(
         r#"[providers.deepseek]
 api_key = "sk-test""#,
@@ -534,9 +513,366 @@ api_key = "sk-test""#,
     assert_eq!(cfg.reasoning_effort, crate::agent::ReasoningEffort::High);
 }
 
-// 引用默认常量，防止未使用告警（它们在 types/providers 中被引用）
+// Reference the default constants to avoid unused warnings (they are used in types/providers)
 #[test]
 fn default_constants() {
     assert_eq!(DEFAULT_OUTPUT_TOKENS, 65536);
-    assert_eq!(DEFAULT_CONTEXT_WINDOW, 131072);
+    assert_eq!(DEFAULT_CONTEXT_WINDOW, 262144);
+}
+
+// ── Editing existing models / providers ─────────────
+
+#[test]
+fn update_model_overrides_effective_values() {
+    let mut cfg = test_config();
+    cfg.main_model = "ollama/qwen3".to_string();
+
+    // Window only: the other fields keep their effective values
+    let selector = cfg
+        .update_model("ollama/qwen3", None, Some(200_000), None, None)
+        .unwrap();
+    assert_eq!(selector, "ollama/qwen3");
+    let resolved = cfg.resolve(&selector).unwrap();
+    assert_eq!(resolved.context_window, 200_000);
+    assert_eq!(resolved.max_tokens, 65536);
+
+    cfg.update_model("ollama/qwen3", None, None, None, Some(true))
+        .unwrap();
+    assert!(cfg.resolve("ollama/qwen3").unwrap().supports_vision);
+    cfg.update_model("ollama/qwen3", None, None, None, Some(false))
+        .unwrap();
+    assert!(!cfg.resolve("ollama/qwen3").unwrap().supports_vision);
+}
+
+#[test]
+fn update_model_rename_migrates_main_model() {
+    let mut cfg = test_config();
+    cfg.main_model = "ollama/llama3".to_string();
+    let selector = cfg
+        .update_model("ollama/llama3", Some("llama3-70b"), None, None, None)
+        .unwrap();
+    assert_eq!(selector, "ollama/llama3-70b");
+    assert_eq!(cfg.main_model, "ollama/llama3-70b");
+    let displays: Vec<String> = cfg
+        .available_models()
+        .into_iter()
+        .map(|m| m.display)
+        .collect();
+    assert!(displays.contains(&"ollama/llama3-70b".to_string()));
+    assert!(!displays.contains(&"ollama/llama3".to_string()));
+}
+
+#[test]
+fn update_model_rejects_invalid_edits() {
+    let mut cfg = test_config();
+    // Renaming onto an existing sibling
+    assert!(
+        cfg.update_model("ollama/qwen3", Some("llama3"), None, None, None)
+            .is_err()
+    );
+    assert!(
+        cfg.update_model("ollama/qwen3", None, Some(0), None, None)
+            .is_err()
+    );
+    assert!(
+        cfg.update_model("ollama/nope", None, Some(1), None, None)
+            .is_err()
+    );
+    // A rejected edit must not mutate the config
+    assert_eq!(cfg.resolve("ollama/qwen3").unwrap().context_window, 131072);
+}
+
+#[test]
+fn model_ids_match_case_insensitively_with_one_canonical_row() {
+    let mut cfg = test_config();
+
+    // Lookup paths (resolve / remove / update) hit the table's canonical key
+    let resolved = cfg.resolve("ollama/QWEN3").unwrap();
+    assert_eq!(resolved.model_id, "qwen3");
+    assert_eq!(resolved.display, "ollama/qwen3");
+    assert_eq!(
+        cfg.remove_custom_model("ollama/QWEN3").unwrap(),
+        None,
+        "removing via a differently-cased selector still deletes the row"
+    );
+    assert!(cfg.resolve("ollama/qwen3").is_err());
+
+    // Re-adding with a different casing replaces the row instead of duplicating it
+    cfg.add_custom_model("ollama", None, None, "Qwen3", 8192, 16384);
+    let rows: Vec<&String> = cfg.providers["ollama"].models.keys().collect();
+    assert_eq!(rows, [&"Qwen3".to_string(), &"llama3".to_string()]);
+    assert!(!cfg.providers["ollama"].models.contains_key("qwen3"));
+    assert_eq!(cfg.resolve("ollama/qwen3").unwrap().max_tokens, 8192);
+
+    // A pure-casing rename is allowed (it targets one row) and migrates main_model
+    cfg.main_model = "ollama/llama3".to_string();
+    let selector = cfg
+        .update_model("ollama/LLAMA3", Some("Llama3"), None, None, None)
+        .unwrap();
+    assert_eq!(selector, "ollama/Llama3");
+    assert_eq!(cfg.main_model, "ollama/Llama3");
+    assert!(cfg.resolve("ollama/llama3").is_ok());
+}
+
+#[test]
+fn remove_last_custom_model_drops_discovered_cache() {
+    let mut cfg = test_config();
+    cfg.set_discovered_models("ollama", vec![remote_model("vendor-distilled")]);
+    cfg.main_model = "deepseek/deepseek-flash".to_string();
+
+    // Removing ollama's last model removes the whole custom provider; the discovery
+    // entry must not linger in the cache (same contract as remove_provider)
+    cfg.remove_custom_model("ollama/qwen3").unwrap();
+    cfg.remove_custom_model("ollama/llama3").unwrap();
+    assert!(!cfg.providers.contains_key("ollama"));
+    assert!(!cfg.discovered.contains_key("ollama"));
+
+    // Predefined providers keep credentials and their discovery cache on deletion
+    cfg.set_discovered_models("deepseek", vec![remote_model("deepseek-x")]);
+    cfg.remove_custom_model("deepseek/deepseek-flash").unwrap();
+    assert!(cfg.providers.contains_key("deepseek"));
+    assert_eq!(cfg.providers["deepseek"].api_key, "sk-test");
+    assert!(cfg.discovered.contains_key("deepseek"));
+}
+
+#[test]
+fn update_provider_credentials_and_rename() {
+    let mut cfg = test_config();
+    cfg.main_model = "ollama/qwen3".to_string();
+
+    let id = cfg
+        .update_provider("ollama", None, None, Some("http://localhost:1234/v1"))
+        .unwrap();
+    assert_eq!(id, "ollama");
+    assert_eq!(
+        cfg.providers["ollama"].base_url.as_deref(),
+        Some("http://localhost:1234/v1")
+    );
+
+    // Rename: the main_model prefix follows
+    let id = cfg
+        .update_provider("ollama", Some("local"), None, None)
+        .unwrap();
+    assert_eq!(id, "local");
+    assert!(!cfg.providers.contains_key("ollama"));
+    assert_eq!(cfg.main_model, "local/qwen3");
+    assert!(cfg.resolve("local/qwen3").is_ok());
+}
+
+#[test]
+fn update_provider_predefined_endpoint_reset() {
+    let mut cfg = Config::default();
+    cfg.add_custom_model(
+        "deepseek",
+        None,
+        Some("sk-test"),
+        "deepseek-flash",
+        393216,
+        1048576,
+    );
+    cfg.update_provider("deepseek", None, None, Some("https://proxy.local/v1"))
+        .unwrap();
+    assert_eq!(
+        cfg.provider_base_url("deepseek").as_deref(),
+        Some("https://proxy.local/v1")
+    );
+    // Empty string clears the override → built-in endpoint comes back
+    cfg.update_provider("deepseek", None, None, Some(""))
+        .unwrap();
+    assert!(cfg.providers["deepseek"].base_url.is_none());
+    assert_eq!(
+        cfg.provider_base_url("deepseek").as_deref(),
+        Some("https://api.deepseek.com")
+    );
+}
+
+#[test]
+fn update_provider_rejects_invalid_edits() {
+    let mut cfg = test_config();
+    assert!(
+        cfg.update_provider("deepseek", Some("ds"), None, None)
+            .is_err()
+    );
+    // Clearing the endpoint of a custom provider
+    assert!(
+        cfg.update_provider("ollama", None, None, Some(" "))
+            .is_err()
+    );
+    // Empty key / non-http endpoint
+    assert!(cfg.update_provider("ollama", None, Some(""), None).is_err());
+    assert!(
+        cfg.update_provider("ollama", None, None, Some("localhost:11434"))
+            .is_err()
+    );
+    assert!(cfg.update_provider("nope", None, None, None).is_err());
+}
+
+#[test]
+fn update_provider_enables_unconfigured_predefined() {
+    // An unconfigured predefined provider has no config entry: supplying a key enables it
+    // (empty model table, endpoint from the built-in table)
+    let mut cfg = Config::default();
+    assert!(!cfg.providers.contains_key("deepseek"));
+    assert!(cfg.update_provider("deepseek", None, None, None).is_err());
+    let id = cfg
+        .update_provider("deepseek", None, Some("sk-test"), None)
+        .unwrap();
+    assert_eq!(id, "deepseek");
+    assert!(cfg.providers["deepseek"].models.is_empty());
+    assert!(
+        cfg.configured_providers()
+            .iter()
+            .any(|p| p.id == "deepseek")
+    );
+    // An unconfigured custom provider still counts as missing
+    assert!(
+        cfg.update_provider("ollama", None, Some("sk-x"), None)
+            .is_err()
+    );
+}
+
+// ── Provider model discovery ───────────────────────
+
+use super::model_discovery::RemoteModel;
+
+fn remote_model(id: &str) -> RemoteModel {
+    RemoteModel {
+        id: id.to_string(),
+        name: None,
+        context_window: None,
+        max_output_tokens: None,
+        supports_vision: None,
+    }
+}
+
+#[test]
+fn parse_models_response_reads_optional_metadata() {
+    let body = r#"{"object":"list","data":[
+        {"id":"deepseek-flash","name":"DeepSeek-V4.1-Flash","context_window":1048576,
+         "max_output_tokens":393216,"input_modalities":["text","image"]},
+        {"id":"glm-5.3","object":"model","owned_by":"z-ai"}
+    ]}"#;
+    let models = super::model_discovery::parse_models_response(body).unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "deepseek-flash");
+    assert_eq!(models[0].name.as_deref(), Some("DeepSeek-V4.1-Flash"));
+    assert_eq!(models[0].context_window, Some(1_048_576));
+    assert_eq!(models[0].max_output_tokens, Some(393_216));
+    assert_eq!(models[0].supports_vision, Some(true));
+    // Providers that only report ids leave the metadata empty
+    assert_eq!(models[1].context_window, None);
+    assert_eq!(models[1].max_output_tokens, None);
+    assert_eq!(models[1].supports_vision, None);
+}
+
+#[test]
+fn resolve_uses_only_the_configured_row() {
+    // Cache-only models cannot be resolved and never show up in the list
+    let mut cfg = Config::default();
+    cfg.add_custom_model("deepseek", None, Some("sk-test"), "other", 4096, 8192);
+    let mut discovered = remote_model("deepseek-v4-pro");
+    discovered.context_window = Some(2_000_000);
+    discovered.max_output_tokens = Some(64_000);
+    discovered.supports_vision = Some(true);
+    cfg.set_discovered_models("deepseek", vec![discovered]);
+
+    assert!(cfg.resolve("deepseek/deepseek-v4-pro").is_err());
+    assert!(
+        !cfg.available_models()
+            .iter()
+            .any(|m| m.display == "deepseek/deepseek-v4-pro")
+    );
+
+    // Picking it materializes the reported metadata, which resolve then serves
+    cfg.apply_discovered_models("deepseek", &["deepseek-v4-pro".to_string()])
+        .unwrap();
+    let resolved = cfg.resolve("deepseek/deepseek-v4-pro").unwrap();
+    assert_eq!(resolved.context_window, 2_000_000);
+    assert_eq!(resolved.max_tokens, 64_000);
+    assert!(resolved.supports_vision);
+}
+
+#[test]
+fn resolve_unknown_model_is_rejected() {
+    // A selector that was never picked cannot be used (no silent defaults)
+    let cfg = test_config();
+    assert!(cfg.resolve("deepseek/never-seen").is_err());
+}
+
+// ── Discovery cache bookkeeping ─────────────────────
+
+#[test]
+fn provider_rename_keeps_discovered_cache_reachable() {
+    // The discovery cache is keyed by provider id; a rename must re-key it or the
+    // fetch dialog silently loses the cached list
+    let mut cfg = test_config();
+    let mut remote_only = remote_model("vendor-distilled");
+    remote_only.context_window = Some(200_000);
+    cfg.set_discovered_models("ollama", vec![remote_only]);
+
+    cfg.update_provider("ollama", Some("local"), None, None)
+        .unwrap();
+    assert!(cfg.remote_model("local", "vendor-distilled").is_some());
+    assert!(cfg.remote_model("ollama", "vendor-distilled").is_none());
+}
+
+#[test]
+fn provider_removal_drops_discovered_cache() {
+    let mut cfg = test_config();
+    cfg.set_discovered_models("ollama", vec![remote_model("vendor-distilled")]);
+    cfg.main_model = "deepseek/custom-model".to_string();
+
+    cfg.remove_provider("ollama").unwrap();
+    assert!(!cfg.discovered.contains_key("ollama"));
+    let displays: Vec<String> = cfg
+        .available_models()
+        .into_iter()
+        .map(|m| m.display)
+        .collect();
+    assert!(!displays.contains(&"ollama/vendor-distilled".to_string()));
+}
+
+#[test]
+fn legacy_config_with_missing_models_table_parses() {
+    // Older configs could carry a provider without a models table (None); it reads as empty
+    let content = r#"
+main_model = "deepseek/deepseek-flash"
+
+[providers.deepseek]
+api_key = "sk-test"
+
+[providers.deepseek.models.deepseek-flash]
+max_tokens = 393216
+context_window = 1048576
+supports_vision = true
+
+[providers.ollama]
+api_key = "sk-ollama"
+base_url = "http://localhost:11434/v1"
+"#;
+    let cfg: Config = toml::from_str(content).unwrap();
+    assert_eq!(cfg.providers["deepseek"].models.len(), 1);
+    assert!(cfg.providers["ollama"].models.is_empty());
+    assert_eq!(
+        cfg.providers["deepseek"].models["deepseek-flash"].supports_vision,
+        Some(true)
+    );
+}
+
+#[test]
+fn parse_models_response_accepts_vendor_field_aliases() {
+    let body = r#"{"data":[
+        {"id":"qwen3","max_model_len":262144,"max_tokens":32768,"capabilities":{"vision":true}},
+        {"id":"llama4","context_length":131072,"supports_vision":false},
+        {"id":"plain"}
+    ]}"#;
+    let models = super::model_discovery::parse_models_response(body).unwrap();
+    assert_eq!(models[0].context_window, Some(262_144));
+    assert_eq!(models[0].max_output_tokens, Some(32_768));
+    assert_eq!(models[0].supports_vision, Some(true));
+    assert_eq!(models[1].context_window, Some(131_072));
+    assert_eq!(models[1].supports_vision, Some(false));
+    // Nothing reported stays unknown so the type defaults apply
+    assert_eq!(models[2].context_window, None);
+    assert_eq!(models[2].supports_vision, None);
 }

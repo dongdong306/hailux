@@ -6,7 +6,6 @@ use crate::config::ModelEntry;
 use crate::mcp::SharedMcpBackends;
 use crate::storage::SessionSummary;
 use crate::tui::event::{self, TaskStatus};
-use crate::tui::model_picker::AddModelForm;
 use crate::tui::setup::SetupForm;
 use crate::tui::tasks_viewer::TaskEntry;
 
@@ -15,7 +14,7 @@ pub enum Message {
     User {
         text: String,
         plan_mode: bool,
-        /// @ 提及展示区间（text 中的字节偏移；空 = 无提及元数据）
+        /// @ mention display ranges (byte offsets in text; empty = no mention metadata)
         mentions: Vec<std::ops::Range<usize>>,
     },
     Agent(String),
@@ -39,16 +38,16 @@ pub enum Message {
         result: String,
         display: Option<String>,
     },
-    /// subagent 执行过程中的一步（工具调用+结果）
+    /// One step during subagent execution (tool call + result)
     SubagentStep {
         summary: String,
         is_done: bool,
-        /// 多 subagent 并发时记录步骤来源名称
+        /// Source agent name when multiple subagents run concurrently
         agent: Option<String>,
-        /// 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例）
+        /// Index of the source task in the tasks array (distinguishes same-named concurrent subagent instances)
         index: Option<usize>,
     },
-    /// 上下文压缩分隔标记（UI 可见，不进入 LLM 上下文）
+    /// Context compaction separator marker (visible in the UI, not fed into the LLM context)
     CompactMarker {
         compacted_count: usize,
         total_ms: Option<u64>,
@@ -67,6 +66,8 @@ pub(super) enum ModelPickerAction {
     Close,
     Switch(ModelEntry),
     AddModel,
+    /// Fetch the selected provider's `/models` list and open the multi-select dialog
+    Refresh(String),
 }
 
 pub(crate) enum AppState {
@@ -80,12 +81,16 @@ pub(crate) enum AppState {
     ModelPicker {
         models: Vec<ModelEntry>,
         selected_index: usize,
+        /// Provider id whose `/models` list is being fetched right now (at most one fetch in flight)
+        refreshing: Option<String>,
+        /// Outcome of the last fetch shown in the footer: (ok, text)
+        refresh_note: Option<(bool, String)>,
     },
-    /// 思考强度二级菜单（/effort 无参数时打开）
+    /// Reasoning effort submenu (opened by /effort without arguments)
     EffortPicker {
         selected_index: usize,
     },
-    AddModel(AddModelForm),
+    /// Form shared by first-run setup and add-model (append_only distinguishes the two)
     Setup(SetupForm),
     Skills {
         selected_index: usize,
@@ -113,11 +118,11 @@ pub(crate) enum AppState {
     Stats {
         data: crate::tui::stats_viewer::StatsData,
         selected_index: usize,
-        /// 项目筛选；None = 全部项目
+        /// Project filter; None = all projects
         work_dir: Option<String>,
-        /// 已知项目列表（供项目选择器）
+        /// Known project list (for the project picker)
         projects: Vec<crate::storage::WorkDirInfo>,
-        /// 项目选择器打开时的选中项（0 = 全部项目，i = projects[i-1]）
+        /// Selected entry when the project picker is open (0 = all projects, i = projects[i-1])
         picker_index: Option<usize>,
     },
     TaskDetail {
@@ -143,9 +148,9 @@ pub(crate) enum AppState {
     },
 }
 
-/// 排队等待用户回复的权限请求。
-/// 主 agent 与 subagent 的请求汇聚到同一队列，按 `subagent_name` 分组处理
-/// （None = 主 agent，Some(name) = 对应 subagent）。
+/// Permission requests queued for the user's reply.
+/// Requests from the main agent and subagents converge into one queue, grouped by
+/// `subagent_name` (None = main agent, Some(name) = the corresponding subagent).
 pub(crate) struct PermissionPending {
     pub request: crate::permission::PermissionRequest,
     pub response_tx: tokio::sync::oneshot::Sender<crate::permission::PermissionReply>,
@@ -176,7 +181,7 @@ pub(crate) fn locate_mentions(text: &str, values: &[String]) -> Vec<std::ops::Ra
     hits
 }
 
-/// 把各 `@value` 命中段替换为 `@display`，返回 (新文本, 提及段字节区间)
+/// Replace each `@value` match with `@display`; returns (new text, byte ranges of the mention spans)
 pub(crate) fn rewrite_mentions(
     text: &str,
     mentions: &[(String, String)],
@@ -199,7 +204,7 @@ pub(crate) fn rewrite_mentions(
     (out, spans)
 }
 
-/// 字节区间 → Unicode 码点区间
+/// Byte range → Unicode code point range
 pub(crate) fn byte_range_to_char_range(
     text: &str,
     range: &std::ops::Range<usize>,
@@ -209,7 +214,7 @@ pub(crate) fn byte_range_to_char_range(
     start..start + len
 }
 
-/// Unicode 码点区间 → 字节区间（越界返回 None）
+/// Unicode code point range → byte range (returns None when out of bounds)
 pub(crate) fn char_range_to_byte_range(
     text: &str,
     start_cp: usize,
@@ -224,6 +229,13 @@ pub(crate) fn char_range_to_byte_range(
     } else {
         None
     }
+}
+
+/// Shared state passed between App, TaskTool and subagents
+pub struct AppSharedState {
+    pub current_session: Arc<Mutex<Option<String>>>,
+    pub mcp_backends: SharedMcpBackends,
+    pub config: SharedConfig,
 }
 
 #[cfg(test)]
@@ -271,11 +283,4 @@ mod tests {
         assert_eq!(out, "@D:/x/a.rs");
         assert!(spans.is_empty());
     }
-}
-
-/// 共享状态（在 App、TaskTool、subagent 之间传递）
-pub struct AppSharedState {
-    pub current_session: Arc<Mutex<Option<String>>>,
-    pub mcp_backends: SharedMcpBackends,
-    pub config: SharedConfig,
 }
