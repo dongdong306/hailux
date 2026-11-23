@@ -40,6 +40,7 @@ export const useApp = create<AppState>((set, get) => ({
   sessionId: null,
   workDir: "",
   items: [],
+  scrollBottomSignal: 0,
   isRunning: false,
   runStartedAt: null,
   promptTokens: 0,
@@ -350,6 +351,7 @@ export const useApp = create<AppState>((set, get) => ({
       set({
         sessionId: id,
         items: rebuilt.items,
+        scrollBottomSignal: Date.now(),
         isRunning: false,
         runStartedAt: null,
         workDir: target?.work_dir ?? get().workDir,

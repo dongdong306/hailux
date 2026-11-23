@@ -1,5 +1,13 @@
-// 聊天消息流：assistant-ui 官方 base 样式（GroupedParts + 两层分组 + Reasoning/ToolFallback/ToolGroup）
-import { useEffect, useMemo, useRef, useState } from "react";
+// Chat message stream: assistant-ui base styling (GroupedParts, two-level grouping,
+// Reasoning/ToolFallback/ToolGroup) + hand-rolled scroll-to-bottom button
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import {
   ActionBarPrimitive,
   MessagePrimitive,
@@ -22,9 +30,8 @@ import {
 } from "../../runtime/hailux-runtime";
 import { ThreadNav, USER_MSG_ATTR } from "./thread-nav";
 
-/** 自定义分组：reasoning 连续段 → 思考组；连续普通工具调用 → 工具合并卡；
- *  todo_write（todo 卡片）、ask_user（问答卡）与 task（subagent 委派卡）不分组。
- *  模块级定义保持函数引用稳定，GroupedParts 树 memo 不失效 */
+/** todo_write/ask_user/task stay ungrouped — they render dedicated cards.
+ *  Module-level so the reference stays stable and the GroupedParts tree memo holds */
 const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[] => {
   if (part.type === "reasoning") return ["group-reasoning"];
   if (
@@ -37,7 +44,7 @@ const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[
   return [];
 };
 
-/* ── 用户消息：官方 base（bg-muted 气泡，图片附件渲染缩略图）──── */
+/* ── User message: official base (bg-muted bubble, image thumbnails) ──── */
 function UserMessage({ mentions }: { mentions?: ChatMention[] }) {
   const workDir = useApp((s) => s.workDir);
   return (
@@ -88,7 +95,7 @@ function UserMessage({ mentions }: { mentions?: ChatMention[] }) {
   );
 }
 
-/* ── 系统提示行：通知/错误/压缩 ──────────────────────────────── */
+/* ── System rows: notices / errors / compaction ──────────────── */
 const TONE_CLASS: Record<string, string> = {
   info: "text-muted-foreground/60",
   success: "text-foreground/70",
@@ -114,9 +121,9 @@ function SystemRowView({ row }: { row: SystemRow }) {
   );
 }
 
-/* ── 助手消息：官方 base（无气泡 + GroupedParts 两层分组）────── */
+/* ── Assistant message: official base (no bubble + GroupedParts) ── */
 
-/** 本轮结束元信息（挂在每轮最后一条助手消息上） */
+/** Per-turn end metadata (attached to the last assistant message of each turn) */
 interface TurnMeta {
   model?: string;
   totalMs?: number;
@@ -125,8 +132,7 @@ interface TurnMeta {
   ctxCompletionTokens?: number;
 }
 
-/** 上下文占用：仅 session 最后一条助手消息展示（输出进行中隐藏）
- *  本轮最后请求的输入+输出（≈当前上下文大小）/ 上下文窗口 */
+/** Context usage: last request's input+output (≈ current context size) over the context window */
 function ContextUsage({
   meta,
   show,
@@ -159,7 +165,7 @@ function ContextUsage({
   );
 }
 
-/** 每轮助手消息底部操作栏：复制 + 模型/耗时（+ 最后一条的上下文占用） */
+/** Per-turn action bar: copy + model/duration (+ context usage on the last turn) */
 function AssistantActions({
   meta,
   showContext,
@@ -207,8 +213,8 @@ function AssistantActions({
   );
 }
 
-/** 运行中的计时指示器：对齐 TUI 状态横幅
- *  （braille spinner + "Working" shimmer 扫光 + 实时耗时），挂在消息区底部 */
+/** Running timer: mirrors the TUI status banner (braille spinner + "Working"
+ *  shimmer + live duration), pinned below the message list */
 function RunningTimer() {
   const runStartedAt = useApp((s) => s.runStartedAt);
   const isCompacting = useApp((s) =>
@@ -240,6 +246,72 @@ function RunningTimer() {
   );
 }
 
+/* ── Scroll-to-bottom button: hand-rolled instead of ThreadPrimitive.ScrollToBottom
+ * because the library's isAtBottom state misses several cases: it never updates
+ * while scrolling down without reaching the bottom (its debounce against
+ * auto-scroll flicker), so a stale true from a session switch keeps the button
+ * hidden. Positioned against ThreadPrimitive.Root (outside the scrolling
+ * content) — inside the viewport it would scroll away together with the messages. */
+function ScrollToBottomButton({
+  viewportRef,
+  contentRef,
+}: {
+  viewportRef: RefObject<HTMLDivElement | null>;
+  contentRef: RefObject<HTMLDivElement | null>;
+}) {
+  const [visible, setVisible] = useState(false);
+
+  const measure = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const distance = vp.scrollHeight - vp.scrollTop - vp.clientHeight;
+    setVisible(vp.scrollHeight > vp.clientHeight && distance > 8);
+  }, [viewportRef]);
+
+  // Content height can grow without a scroll event (lazy images, collapsed
+  // cards), so pair the scroll listener with a ResizeObserver on the content
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    let raf = 0;
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        measure();
+      });
+    };
+    vp.addEventListener("scroll", schedule, { passive: true });
+    const content = contentRef.current;
+    const ro = content ? new ResizeObserver(schedule) : null;
+    if (content) ro?.observe(content);
+    return () => {
+      vp.removeEventListener("scroll", schedule);
+      ro?.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [viewportRef, contentRef, measure]);
+
+  return (
+    <button
+      type="button"
+      aria-label="滚动到底部"
+      title="滚动到底部"
+      onClick={() => {
+        const vp = viewportRef.current;
+        if (!vp) return;
+        vp.scrollTo({ top: vp.scrollHeight, behavior: "smooth" });
+      }}
+      className={cn(
+        "absolute bottom-4 left-1/2 z-10 flex size-8 -translate-x-1/2 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-lg transition-all hover:text-foreground",
+        visible ? "opacity-100" : "pointer-events-none opacity-0",
+      )}
+    >
+      <ArrowDown className="size-4" />
+    </button>
+  );
+}
+
 function AssistantMessage({
   meta,
   isLast = false,
@@ -263,7 +335,7 @@ function AssistantMessage({
                   </ReasoningGroup>
                 );
               case "group-tools": {
-                // 单次调用无合并意义，退化为独立卡片
+                // A single call has nothing to merge — degrade to a standalone card
                 if (part.indices.length <= 1) return <>{children}</>;
                 return (
                   <ToolGroup
@@ -291,7 +363,7 @@ function AssistantMessage({
                   <TaskToolCard {...part} />
                 ) : (part.toolUI ?? <ToolFallback {...part} />);
               case "indicator":
-                // 运行指示统一由消息区底部的 RunningTimer 展示
+                // Running indicator is unified into RunningTimer below the message list
                 return null;
               default:
                 return null;
@@ -299,7 +371,7 @@ function AssistantMessage({
           }}
         </MessagePrimitive.GroupedParts>
       </div>
-      {/* 每轮结束（done 元信息到达）才展示操作栏；流式进行中不展示 */}
+      {/* Action bar renders once the turn's done metadata arrives; hidden while streaming */}
       {meta && (meta.model || meta.totalMs !== undefined) && (
         <AssistantActions meta={meta} showContext={isLast} />
       )}
@@ -307,7 +379,7 @@ function AssistantMessage({
   );
 }
 
-/* ── 欢迎屏：装饰背景 + Logo ────────────────────────────────── */
+/* ── Welcome screen: decorative background + logo ────────────── */
 function Welcome() {
   return (
     <div className="relative flex h-full flex-col items-center justify-center px-6 py-12">
@@ -336,15 +408,25 @@ function Welcome() {
   );
 }
 
-/* ── Thread 主体 ────────────────────────────────────────────── */
+/* ── Thread body ─────────────────────────────────────────────── */
 export function Thread() {
-  // 最后一条助手消息（非系统行）的 id —— 上下文占用只挂在该消息上
+  // Context usage hangs on this message alone
   const items = useApp((s) => s.items);
   const lastId = useMemo(() => lastAssistantMessageId(items), [items]);
 
-  // 右缘轮次导航：滚动容器与内容容器引用（测量提问位置 / 监听高度变化）
+  // Turn-nav (right rail) needs both containers to measure turn positions / observe height
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+
+  // Session switch jumps to the latest message (scrollBottomSignal set in app-store.switchSession;
+  // assistant-ui only auto-scrolls on its own initialize/run events, which don't fire here)
+  const scrollBottomSignal = useApp((s) => s.scrollBottomSignal);
+  useEffect(() => {
+    if (!scrollBottomSignal) return;
+    const vp = viewportRef.current;
+    if (!vp) return;
+    vp.scrollTo({ top: vp.scrollHeight });
+  }, [scrollBottomSignal]);
 
   return (
     <ThreadPrimitive.Root className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -360,7 +442,7 @@ export function Thread() {
           <div className="space-y-5">
             <ThreadPrimitive.Messages>
               {({ message }) => {
-                // 系统行（row）/ 本轮元信息（model/耗时/状态/上下文占用）都挂在 custom
+                // System rows and per-turn metadata (model/duration/status/context) both ride on metadata.custom
                 const custom = message.metadata?.custom as
                   | ({ row?: SystemRow; mentions?: ChatMention[] } & TurnMeta)
                   | undefined;
@@ -388,13 +470,9 @@ export function Thread() {
             <RunningTimer />
           </div>
         </div>
-
-        <div className="relative h-0 w-full max-w-3xl">
-          <ThreadPrimitive.ScrollToBottom className="absolute -top-12 right-2 mx-auto flex size-8 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-lg transition-all hover:text-foreground disabled:invisible disabled:opacity-0">
-            <ArrowDown className="size-4" />
-          </ThreadPrimitive.ScrollToBottom>
-        </div>
       </ThreadPrimitive.Viewport>
+
+      <ScrollToBottomButton viewportRef={viewportRef} contentRef={contentRef} />
 
       <ThreadNav viewportRef={viewportRef} contentRef={contentRef} />
     </ThreadPrimitive.Root>

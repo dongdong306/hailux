@@ -136,6 +136,10 @@ export interface AppState {
   workdirs: string[];
   // Message stream
   items: ChatItem[];
+  /** Monotonic timestamp bumped on session switch; the chat viewport watches it to
+   *  scroll to bottom (assistant-ui's own auto-scroll hooks don't fire on
+   *  external-store switches — items are swapped in place, hasMessages stays true) */
+  scrollBottomSignal: number;
   isRunning: boolean;
   /** Current run start timestamp (epoch ms); done line shows backend duration on completion */
   runStartedAt: number | null;
