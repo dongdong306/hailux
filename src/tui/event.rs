@@ -18,10 +18,11 @@ pub enum AppEvent {
     Core(CoreEvent),
     InputKey(KeyEvent),
     InputPaste(String),
-    /// 用户提交一条消息，可携带图片附件
+    /// 用户提交一条消息，可携带图片附件与 (绝对路径, 展示相对路径) 提及对
     UserSubmit {
         text: String,
         attachments: Vec<crate::agent::media::Attachment>,
+        mentions: Vec<(String, String)>,
     },
     /// 检测到空 bracketed paste（Windows WT 图片剪贴板 Ctrl+V 的按键流形态），
     /// 触发一次剪贴板图片探测（内部事件，由 handle_paste 的标记配对发出）

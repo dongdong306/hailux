@@ -1,5 +1,5 @@
 // 会话历史加载：StoredMessage[] → ChatItem[] 渲染模型 + token 统计
-import type { ChatAttachment, StoredMessage } from "../runtime/types";
+import type { ChatAttachment, ChatMention, StoredMessage } from "../runtime/types";
 import { compactMarkerText, isToolAttachmentMessage } from "./shared-events";
 import type { ChatItem } from "./types";
 
@@ -70,7 +70,16 @@ export function rebuildSessionItems(
           // 忽略解析失败
         }
       }
-      items.push({ kind: "user", text: msg.content, images });
+      let mentions: ChatMention[] | undefined;
+      if (msg.mentions) {
+        try {
+          const parsed = JSON.parse(msg.mentions) as ChatMention[];
+          if (Array.isArray(parsed) && parsed.length > 0) mentions = parsed;
+        } catch {
+          // 忽略解析失败
+        }
+      }
+      items.push({ kind: "user", text: msg.content, images, mentions });
       turnCtx = null;
     } else if (msg.role === "Assistant") {
       if (msg.prompt_tokens !== null) {

@@ -1,13 +1,12 @@
 // 输入区：wendao Composer 同构卡片 —— Enter 发送 / Shift+Enter 换行 / 粘贴保护 / 输入历史 / 双击 Esc 中断 / Shift+Tab Plan
 // @ 文件提及补全：对齐 TUI 语义（chat_input.rs）—— `@` 前须为行首/空白、query 内不含空白；
-// 选中插入 `@rel `，发送时展开为 `@绝对路径`
+// 目录结果带尾随 `/`，选中插入 `@rel `，发送时展开为 `@绝对路径`
 // / 斜杠命令补全：prompt 型（/init、自定义命令）发送原文由后端展开；
 // ui 型（/compact）本地分发。其余 UI 命令（/new /sessions /skills /mcp 等）Web 端已有界面入口，不提供
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   ClipboardList,
-  FileText,
   Loader2,
   Square,
   Terminal,
@@ -15,9 +14,14 @@ import {
   Zap,
 } from "lucide-react";
 import { anyDialogOpen, useApp } from "../store/app-store";
-import type { ChatAttachment, CommandInfo } from "../runtime/types";
+import type { ChatAttachment, ChatMention, CommandInfo } from "../runtime/types";
 import { cn } from "../lib/utils";
+import { MentionIcon } from "./mention-icon";
 import { ModelEffortMenu } from "./model-effort-menu";
+
+function utf16ToCharIndex(text: string, u16Idx: number): number {
+  return [...text.slice(0, u16Idx)].length;
+}
 
 /** 单张待发送附件大小上限（10 MB，对齐后端 ATTACHMENT_MAX_BYTES） */
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -68,6 +72,31 @@ interface MentionState {
   loading: boolean;
 }
 
+interface MentionRange {
+  start: number;
+  end: number;
+}
+
+function computeMentionRanges(value: string, tokens: Set<string>): MentionRange[] {
+  const ranges: MentionRange[] = [];
+  for (const token of tokens) {
+    let idx = value.indexOf(token);
+    while (idx !== -1) {
+      ranges.push({ start: idx, end: idx + token.length });
+      idx = value.indexOf(token, idx + token.length);
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  const out: MentionRange[] = [];
+  let lastEnd = -1;
+  for (const r of ranges) {
+    if (r.start < lastEnd) continue;
+    out.push(r);
+    lastEnd = r.end;
+  }
+  return out;
+}
+
 interface SlashState {
   query: string;
   items: CommandInfo[];
@@ -96,6 +125,69 @@ export function ChatInput() {
   const slashDismissed = useRef<string | null>(null);
   /** picker 选中记录：`@rel` 展示 → 绝对路径，发送时替换 */
   const pendingMentions = useRef(new Map<string, string>());
+  const mentionTokens = useRef(new Set<string>());
+  const [mentionRanges, setMentionRanges] = useState<MentionRange[]>([]);
+  const [mentionScrollTop, setMentionScrollTop] = useState(0);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [selRange, setSelRange] = useState<{ start: number; end: number } | null>(
+    null,
+  );
+  const mentionMirrorRef = useRef<HTMLDivElement>(null);
+
+  const setTextWithRanges = (value: string) => {
+    setText(value);
+    setMentionRanges(computeMentionRanges(value, mentionTokens.current));
+    setHoverIdx(null);
+    setSelRange(null);
+  };
+
+  const handleMentionHover = (e: React.MouseEvent) => {
+    const mirror = mentionMirrorRef.current;
+    if (!mirror) return;
+    let next: number | null = null;
+    mirror.querySelectorAll<HTMLElement>("[data-mention-idx]").forEach((s) => {
+      if (next !== null) return;
+      const r = s.getBoundingClientRect();
+      if (
+        e.clientX >= r.left &&
+        e.clientX <= r.right &&
+        e.clientY >= r.top &&
+        e.clientY <= r.bottom
+      ) {
+        next = Number(s.dataset.mentionIdx);
+      }
+    });
+    setHoverIdx((prev) => (prev === next ? prev : next));
+  };
+
+  const applyTextEdit = (value: string, cursor: number) => {
+    setTextWithRanges(value);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.selectionStart = el.selectionEnd = cursor;
+        setSelRange(null);
+      }
+    });
+  };
+
+  const mentionSegments = useMemo(() => {
+    const segs: Array<{ key: string; text: string; mention: boolean }> = [];
+    let pos = 0;
+    for (const r of mentionRanges) {
+      if (r.start > pos)
+        segs.push({ key: `p${pos}`, text: text.slice(pos, r.start), mention: false });
+      const body = text.slice(r.start, r.end);
+      const chip = body.endsWith(" ") ? body.slice(0, -1) : body;
+      segs.push({ key: `m${r.start}`, text: chip, mention: true });
+      if (body.length > chip.length)
+        segs.push({ key: `t${r.start}`, text: " ", mention: false });
+      pos = r.end;
+    }
+    if (pos < text.length)
+      segs.push({ key: `p${pos}`, text: text.slice(pos), mention: false });
+    return segs;
+  }, [text, mentionRanges]);
 
   const isRunning = useApp((s) => s.isRunning);
   const planMode = useApp((s) => s.planMode);
@@ -201,16 +293,21 @@ export function ChatInput() {
     const atIdx = before.lastIndexOf("@");
     if (atIdx < 0) return;
     const display = `@${rel}`;
-    const workDir = useApp.getState().workDir.replace(/[\\/]+$/, "");
-    pendingMentions.current.set(
-      display,
-      workDir ? `${workDir}/${rel}` : rel,
-    );
-    setText(text.slice(0, atIdx) + display + " " + text.slice(cursor));
+    const workDirRaw = useApp.getState().workDir.replace(/[\\/]+$/, "");
+    const sep =
+      workDirRaw.includes("\\") || /^[a-zA-Z]:[\\/]/.test(workDirRaw)
+        ? "\\"
+        : "/";
+    let abs = workDirRaw + sep + rel.replace(/\//g, sep);
+    if (sep === "\\") abs = abs.replace(/\//g, "\\");
+    pendingMentions.current.set(display, abs);
+    const element = `${display} `;
+    mentionTokens.current.add(element);
+    setTextWithRanges(text.slice(0, atIdx) + element + text.slice(cursor));
     closeMention();
     requestAnimationFrame(() => {
       el.focus();
-      const pos = atIdx + display.length + 1;
+      const pos = atIdx + element.length;
       el.selectionStart = el.selectionEnd = pos;
     });
   };
@@ -218,7 +315,8 @@ export function ChatInput() {
   /** 选中斜杠命令：输入框替换为 `/name `（尾随空格便于直接输入参数） */
   const applyCommand = (cmd: CommandInfo) => {
     const el = textareaRef.current;
-    setText(`/${cmd.name} `);
+    mentionTokens.current.clear();
+    setTextWithRanges(`/${cmd.name} `);
     setSlash(null);
     slashDismissed.current = null;
     requestAnimationFrame(() => {
@@ -228,19 +326,42 @@ export function ChatInput() {
     });
   };
 
-  /** 发送时把 `@rel` 展示替换为 `@绝对路径`（对齐 TUI expand_file_mentions） */
+  /** 发送时把 `@rel` 展示替换为 `@abs`，并采集提及元数据 */
   const expandMentions = (value: string) => {
     let out = value;
     for (const [display, abs] of pendingMentions.current) {
       out = out.split(display).join(`@${abs}`);
     }
+    const claimed: Array<[number, number]> = [];
+    const mentions: ChatMention[] = [];
+    const ordered = [...new Set([...pendingMentions.current.values()])].sort(
+      (a, b) => b.length - a.length,
+    );
+    for (const abs of ordered) {
+      const token = `@${abs}`;
+      let from = 0;
+      for (;;) {
+        const idx = out.indexOf(token, from);
+        if (idx === -1) break;
+        from = idx + token.length;
+        if (claimed.some(([s, e]) => idx < e && from > s)) continue;
+        claimed.push([idx, from]);
+        mentions.push({
+          start: utf16ToCharIndex(out, idx),
+          end: utf16ToCharIndex(out, from),
+          kind: "file",
+        });
+      }
+    }
+    mentions.sort((a, b) => a.start - b.start);
     pendingMentions.current.clear();
-    return out;
+    return { out, mentions };
   };
 
   const submit = () => {
     if ((!text.trim() && pendingImages.length === 0) || isRunning) return;
-    const value = expandMentions(text.trim());
+    const { out: value, mentions } = expandMentions(text.trim());
+    mentionTokens.current.clear();
 
     // ui 型斜杠命令本地分发（当前仅 /compact）；prompt 型发送原文由后端展开
     const firstWord = value.split(/\s+/, 1)[0] ?? "";
@@ -249,7 +370,7 @@ export function ChatInput() {
         .getState()
         .commands.find((c) => c.name === firstWord.slice(1));
       if (cmd?.kind === "ui") {
-        setText("");
+        setTextWithRanges("");
         setHistoryIndex(null);
         setDraft("");
         if (cmd.name === "compact") runCompact().catch(() => {});
@@ -258,12 +379,12 @@ export function ChatInput() {
     }
 
     const attachments = pendingImages;
-    setText("");
+    setTextWithRanges("");
     setPendingImages([]);
     setImageNotice(null);
     setHistoryIndex(null);
     setDraft("");
-    sendMessage(value, attachments.length > 0 ? attachments : undefined);
+    sendMessage(value, attachments.length > 0 ? attachments : undefined, mentions);
   };
 
   /** 追加粘贴/选择的图片附件（类型/数量/大小校验与后端一致） */
@@ -370,6 +491,53 @@ export function ChatInput() {
       }
     }
 
+    const areaEl = textareaRef.current;
+    if (areaEl && mentionRanges.length > 0) {
+      const ss = areaEl.selectionStart ?? 0;
+      const se = areaEl.selectionEnd ?? 0;
+      if (e.key === "Backspace" || e.key === "Delete") {
+        if (ss < se) {
+          let start = ss;
+          let end = se;
+          for (const r of mentionRanges) {
+            if (r.start < end && r.end > start) {
+              start = Math.min(start, r.start);
+              end = Math.max(end, r.end);
+            }
+          }
+          if (start !== ss || end !== se) {
+            e.preventDefault();
+            applyTextEdit(text.slice(0, start) + text.slice(end), start);
+            return;
+          }
+        } else {
+          const r =
+            e.key === "Backspace"
+              ? mentionRanges.find((x) => ss > x.start && ss <= x.end)
+              : mentionRanges.find((x) => ss >= x.start && ss < x.end);
+          if (r) {
+            e.preventDefault();
+            applyTextEdit(text.slice(0, r.start) + text.slice(r.end), r.start);
+            return;
+          }
+        }
+      } else if (e.key === "ArrowLeft" && ss === se) {
+        const r = mentionRanges.find((x) => ss > x.start && ss <= x.end);
+        if (r) {
+          e.preventDefault();
+          areaEl.selectionStart = areaEl.selectionEnd = r.start;
+          return;
+        }
+      } else if (e.key === "ArrowRight" && ss === se) {
+        const r = mentionRanges.find((x) => ss >= x.start && ss < x.end);
+        if (r) {
+          e.preventDefault();
+          areaEl.selectionStart = areaEl.selectionEnd = r.end;
+          return;
+        }
+      }
+    }
+
     // 中断（处理中双击 Esc，5 秒窗口）
     if (e.key === "Escape") {
       // 全局弹窗打开时 Esc 只关弹窗，不进入中断计时
@@ -409,7 +577,8 @@ export function ChatInput() {
         const next = historyIndex === null ? history.length - 1 : Math.max(0, historyIndex - 1);
         if (historyIndex === null) setDraft(text);
         setHistoryIndex(next);
-        setText(history[next]!);
+        mentionTokens.current.clear();
+        setTextWithRanges(history[next]!);
         return;
       }
       if (e.key === "ArrowDown" && historyIndex !== null && atLastLine) {
@@ -417,10 +586,12 @@ export function ChatInput() {
         const next = historyIndex + 1;
         if (next >= history.length) {
           setHistoryIndex(null);
-          setText(draft);
+          mentionTokens.current.clear();
+          setTextWithRanges(draft);
         } else {
           setHistoryIndex(next);
-          setText(history[next]!);
+          mentionTokens.current.clear();
+          setTextWithRanges(history[next]!);
         }
         return;
       }
@@ -505,7 +676,7 @@ export function ChatInput() {
                         : "text-foreground/80 hover:bg-muted",
                     )}
                   >
-                    <FileText className="size-3.5 shrink-0 text-muted-foreground/50" />
+                    <MentionIcon rel={rel} />
                     <span className="truncate font-mono text-xs">{rel}</span>
                   </button>
                 ))}
@@ -514,7 +685,11 @@ export function ChatInput() {
           )}
 
           {/* 外层圆角裁剪，内层滚动 —— 滚动条不戳出圆角 */}
-          <div className="overflow-hidden rounded-t-3xl">
+          <div
+            className="relative overflow-hidden rounded-t-3xl"
+            onMouseMove={handleMentionHover}
+            onMouseLeave={() => setHoverIdx(null)}
+          >
             <textarea
               ref={textareaRef}
               value={text}
@@ -524,9 +699,30 @@ export function ChatInput() {
                   ? "处理中…（双击 Esc 中断）"
                   : "给 hailux 发送消息..."
               }
-              className="hlx-input-scroll w-full resize-none overflow-y-auto bg-transparent px-4 pb-1 pt-3.5 text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground/40"
+              className={cn(
+                "relative hlx-input-scroll w-full resize-none overflow-y-auto bg-transparent px-4 pb-1 pt-3.5 text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground/40 [scrollbar-gutter:stable]",
+                "selection:bg-blue-500/15",
+                hoverIdx !== null && "cursor-pointer",
+              )}
+              onSelect={() => {
+                const el = textareaRef.current;
+                if (!el) return;
+                const ss = el.selectionStart ?? 0;
+                const se = el.selectionEnd ?? 0;
+                setSelRange(ss !== se ? { start: ss, end: se } : null);
+                if (ss !== se) return;
+                const pos = ss;
+                const r = mentionRanges.find(
+                  (x) => pos > x.start && pos < x.end,
+                );
+                if (r) {
+                  const target = pos - r.start <= r.end - pos ? r.start : r.end;
+                  el.selectionStart = el.selectionEnd = target;
+                }
+              }}
+              onScroll={(e) => setMentionScrollTop(e.currentTarget.scrollTop)}
               onChange={(e) => {
-                setText(e.target.value);
+                setTextWithRanges(e.target.value);
                 setHistoryIndex(null);
                 const beforeCursor = e.target.value.slice(
                   0,
@@ -580,6 +776,62 @@ export function ChatInput() {
               }}
               onKeyDown={onKeyDown}
             />
+            {/* chip 镜像层：padding 与 scrollbar-gutter 须与 textarea 一致，换行点才同步 */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 z-10 overflow-hidden px-4 pb-1 pt-3.5 text-base leading-6 [scrollbar-gutter:stable]"
+            >
+              <div
+                ref={mentionMirrorRef}
+                className="whitespace-pre-wrap break-words text-transparent"
+                style={{ transform: `translateY(-${mentionScrollTop}px)` }}
+              >
+                {(() => {
+                  let chipIdx = -1;
+                  return mentionSegments.map((seg, i) => {
+                    if (!seg.mention) {
+                      return <span key={seg.key}>{seg.text}</span>;
+                    }
+                    chipIdx++;
+                    const range = mentionRanges[chipIdx];
+                    const selected =
+                      !!range &&
+                      !!selRange &&
+                      selRange.start < range.end &&
+                      selRange.end > range.start;
+                    // chip 本体零 padding：与原生字形逐像素对齐，图标按 `@` 字形位置定位
+                    return (
+                      <span
+                        key={seg.key}
+                        data-mention-idx={i}
+                        className={cn(
+                          "relative rounded-md text-blue-600 dark:text-blue-400",
+                          selected
+                            ? "bg-[color-mix(in_srgb,var(--color-blue-500)_15%,var(--background))]"
+                            : "bg-background",
+                        )}
+                      >
+                        {hoverIdx === i && (
+                          <span
+                            aria-hidden
+                            className="absolute -inset-x-1 -inset-y-0.5 rounded-md bg-blue-500/10 dark:bg-blue-400/10"
+                          />
+                        )}
+                        <span aria-hidden className="relative rounded-md">
+                          <span className="text-transparent">{seg.text[0]}</span>
+                          {seg.text.slice(1)}
+                        </span>
+                        <MentionIcon
+                          rel={seg.text.slice(1)}
+                          mono
+                          className="absolute -left-0.5 top-[3px] size-3.5"
+                        />
+                      </span>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
           </div>
 
           {/* 图片附件 chips：缩略图 + 移除按钮 */}

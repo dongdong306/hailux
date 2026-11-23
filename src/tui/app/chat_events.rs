@@ -43,11 +43,16 @@ impl App {
             AppEvent::PasteImageResult { image, interactive } => {
                 self.handle_clipboard_image_result(image, interactive);
             }
-            AppEvent::UserSubmit { text, attachments } => {
+            AppEvent::UserSubmit {
+                text,
+                attachments,
+                mentions,
+            } => {
                 if let Some(matched) = command::match_command(&text, &self.command_registry) {
                     self.handle_command(matched).await?;
                 } else {
-                    self.handle_user_message(text, attachments).await?;
+                    self.handle_user_message(text, attachments, mentions)
+                        .await?;
                 }
             }
             AppEvent::Resize => {}
@@ -588,7 +593,8 @@ impl App {
                     self.input.clear();
                     self.cmd_suggestion.show = false;
                     self.cmd_suggestion.items.clear();
-                    self.handle_user_message(rendered, Vec::new()).await?;
+                    self.handle_user_message(rendered, Vec::new(), Vec::new())
+                        .await?;
                 }
             }
         }
@@ -668,6 +674,7 @@ impl App {
         &mut self,
         input: String,
         attachments: Vec<crate::agent::media::Attachment>,
+        mention_display: Vec<(String, String)>,
     ) -> Result<()> {
         self.is_processing = true;
         self.input.set_processing(true);
@@ -678,9 +685,12 @@ impl App {
         self.file_picker.reset();
         self.should_auto_scroll = true;
         self.scroll_offset = 0;
+        let (display_text, mention_spans) =
+            super::types::rewrite_mentions(&input, &mention_display);
         self.messages.push(Message::User {
-            text: input.clone(),
+            text: display_text,
             plan_mode: self.plan_mode,
+            mentions: mention_spans,
         });
 
         let new_session = self.current_session_id.is_none();
@@ -702,6 +712,24 @@ impl App {
         } else {
             serde_json::to_string(&attachments).ok()
         };
+        let mentions_json = if mention_display.is_empty() {
+            None
+        } else {
+            let values: Vec<String> = mention_display.iter().map(|(abs, _)| abs.clone()).collect();
+            let list: Vec<serde_json::Value> =
+                crate::tui::app::types::locate_mentions(&input, &values)
+                    .iter()
+                    .map(|r| crate::tui::app::types::byte_range_to_char_range(&input, r))
+                    .map(|r| {
+                        serde_json::json!({
+                            "start": r.start,
+                            "end": r.end,
+                            "kind": "file",
+                        })
+                    })
+                    .collect();
+            serde_json::to_string(&list).ok()
+        };
         let stored = StoredMessage {
             role: MessageRole::User,
             content: input.clone(),
@@ -720,6 +748,7 @@ impl App {
             think_ms: None,
             compacted: false,
             attachments: attachments_json,
+            mentions: mentions_json,
         };
         self.storage.append_message(&session_id, &stored).await?;
 
@@ -822,6 +851,7 @@ impl App {
                     think_ms: None,
                     compacted: false,
                     attachments: None,
+                    mentions: None,
                 };
                 self.storage
                     .append_message(&session_id, &assistant_stored)

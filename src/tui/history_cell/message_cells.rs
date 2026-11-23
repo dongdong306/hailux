@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::event::TaskStatus;
 use crate::tui::markdown;
 
-use super::{CHAT_FG, HistoryCell, PLAN_BADGE, finish_hasher, wrap_text};
+use super::{CHAT_FG, CHAT_FILE_MENTION, HistoryCell, PLAN_BADGE, finish_hasher, wrap_text};
 
 /// 会话头部卡片：圆角边框显示模型名、工作目录
 pub(crate) struct SessionHeaderCell {
@@ -81,10 +81,49 @@ impl HistoryCell for SessionHeaderCell {
     }
 }
 
-/// 用户消息：> 前缀 + 白色文本
+/// 用户消息：> 前缀 + 白色文本，mentions 区间以提及高亮渲染
 pub(crate) struct UserMessageCell {
     pub text: String,
     pub plan_mode: bool,
+    pub mentions: Vec<std::ops::Range<usize>>,
+}
+
+impl UserMessageCell {
+    fn in_mention(&self, off: usize) -> bool {
+        self.mentions.iter().any(|r| off >= r.start && off < r.end)
+    }
+
+    fn wrap_with_mentions(&self, max_width: u16) -> Vec<Vec<(&str, bool)>> {
+        let mut lines: Vec<Vec<(&str, bool)>> = vec![Vec::new()];
+        let mut cur_w: u16 = 0;
+        let mut chunk_start = 0usize;
+        let mut chunk_mention = self.in_mention(0);
+        for (off, ch) in self.text.char_indices() {
+            let mention = self.in_mention(off);
+            let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            let wrap = cur_w + ch_w > max_width && cur_w > 0;
+            if mention != chunk_mention || wrap {
+                lines
+                    .last_mut()
+                    .expect("至少存在一行")
+                    .push((&self.text[chunk_start..off], chunk_mention));
+                chunk_start = off;
+                chunk_mention = mention;
+            }
+            if wrap {
+                lines.push(Vec::new());
+                cur_w = 0;
+            }
+            cur_w += ch_w;
+        }
+        if chunk_start < self.text.len() {
+            lines
+                .last_mut()
+                .expect("至少存在一行")
+                .push((&self.text[chunk_start..], chunk_mention));
+        }
+        lines
+    }
 }
 
 impl HistoryCell for UserMessageCell {
@@ -92,6 +131,7 @@ impl HistoryCell for UserMessageCell {
         let mut h = DefaultHasher::new();
         self.text.hash(&mut h);
         self.plan_mode.hash(&mut h);
+        self.mentions.hash(&mut h);
         finish_hasher(h)
     }
 
@@ -103,29 +143,24 @@ impl HistoryCell for UserMessageCell {
         let bar_color = if self.plan_mode { PLAN_BADGE } else { CHAT_FG };
 
         let mut lines = Vec::new();
-        let wrapped = wrap_text(&self.text, content_w);
-
-        for (i, line) in wrapped.iter().enumerate() {
+        for (i, chunks) in self.wrap_with_mentions(content_w).into_iter().enumerate() {
+            let mut spans = Vec::new();
             if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        line.clone(),
-                        Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                spans.push(Span::styled(
+                    prefix.to_string(),
+                    Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+                ));
             } else {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        line.clone(),
-                        Style::default().fg(CHAT_FG).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                spans.push(Span::raw("  "));
             }
+            for (chunk, mention) in chunks {
+                let fg = if mention { CHAT_FILE_MENTION } else { CHAT_FG };
+                spans.push(Span::styled(
+                    chunk.to_string(),
+                    Style::default().fg(fg).add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
         lines
     }

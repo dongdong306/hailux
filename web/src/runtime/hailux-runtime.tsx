@@ -329,6 +329,9 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
             role: "user",
             id: `u-${messages.length}`,
             content,
+            metadata: item.mentions?.length
+              ? { custom: { mentions: item.mentions } }
+              : undefined,
           });
         } else {
           const row: SystemRow =

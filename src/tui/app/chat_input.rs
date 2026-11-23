@@ -192,13 +192,14 @@ impl App {
                     let input = self.expand_pending_pastes(&raw);
                     // @图片提及在 expand 前基于 display 文本检测，读文件内联为附件
                     let mut attachments = self.take_mention_images(&input);
-                    let input = self.expand_file_mentions(&input);
+                    let (input, mention_display) = self.expand_file_mentions(&input);
                     attachments.extend(self.take_pending_images());
                     if !input.trim().is_empty() || !attachments.is_empty() {
                         self.cmd_suggestion.show = false;
                         let _ = self.events.0.try_send(AppEvent::UserSubmit {
                             text: input,
                             attachments,
+                            mentions: mention_display,
                         });
                     }
                 }
@@ -521,18 +522,22 @@ impl App {
         result
     }
 
-    pub(super) fn expand_file_mentions(&mut self, text: &str) -> String {
-        if self.file_picker.pending_mentions.is_empty() {
-            return text.to_string();
+    /// 把 `@rel` 展示替换为 `@abs`（持久化/发送形态），返回 (展开文本, (绝对路径, 展示相对路径) 对)
+    pub(super) fn expand_file_mentions(&mut self, text: &str) -> (String, Vec<(String, String)>) {
+        let pending = std::mem::take(&mut self.file_picker.pending_mentions);
+        if pending.is_empty() {
+            return (text.to_string(), Vec::new());
         }
         let mut result = text.to_string();
-        for (display, abs) in &self.file_picker.pending_mentions {
-            let abs_spaced = format!("{} ", abs);
-            result = result.replace(&format!("{} ", display), &abs_spaced);
+        let mut display_map = Vec::with_capacity(pending.len());
+        for (display, abs) in &pending {
+            let abs_spaced = format!("{abs} ");
+            result = result.replace(&format!("{display} "), &abs_spaced);
             result = result.replace(display, &abs_spaced);
+            let value = abs.strip_prefix('@').unwrap_or(abs);
+            display_map.push((value.to_string(), display[1..].to_string()));
         }
-        self.file_picker.pending_mentions.clear();
-        result
+        (result, display_map)
     }
 
     fn snapshot_elements(&self) -> Vec<String> {
@@ -603,6 +608,7 @@ impl App {
                 let _ = self.events.0.try_send(AppEvent::UserSubmit {
                     text: format!("/{}", cmd.name),
                     attachments: Vec::new(),
+                    mentions: Vec::new(),
                 });
             }
         }

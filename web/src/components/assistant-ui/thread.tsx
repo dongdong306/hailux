@@ -8,6 +8,9 @@ import {
 } from "@assistant-ui/react";
 import { ArrowDown, Check, Copy, Gauge, Loader2, Terminal } from "lucide-react";
 import { cn, fmtTokens } from "../../lib/utils";
+import { splitByMentions, mentionDisplayPath } from "../../lib/mentions";
+import { MentionIcon } from "../mention-icon";
+import type { ChatMention } from "../../runtime/types";
 import { useApp } from "../../store/app-store";
 import { MarkdownText } from "./markdown-text";
 import { ReasoningGroup } from "./reasoning";
@@ -35,14 +38,36 @@ const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[
 };
 
 /* ── 用户消息：官方 base（bg-muted 气泡，图片附件渲染缩略图）──── */
-function UserMessage() {
+function UserMessage({ mentions }: { mentions?: ChatMention[] }) {
+  const workDir = useApp((s) => s.workDir);
   return (
     <MessagePrimitive.Root className="flex justify-end">
       <div className="bg-muted text-foreground max-w-[80%] rounded-xl px-4 py-2">
         <MessagePrimitive.Parts
           components={{
             Text: ({ text }) => (
-              <p className="whitespace-pre-wrap leading-relaxed">{text}</p>
+              <p className="whitespace-pre-wrap leading-relaxed">
+                {splitByMentions(text, mentions).map((seg, i) => {
+                  if (!seg.kind) {
+                    return <span key={i}>{seg.text}</span>;
+                  }
+                  const rel = mentionDisplayPath((seg.value ?? "").slice(1), workDir);
+                  return (
+                    <span
+                      key={i}
+                      title={seg.value}
+                      className="mx-0.5 rounded-md px-1 py-0.5 text-blue-600 hover:bg-blue-500/10 dark:text-blue-400 dark:hover:bg-blue-400/10"
+                    >
+                      <MentionIcon
+                        rel={rel}
+                        mono
+                        className="mr-1 inline-block size-3.5 align-[-1px]"
+                      />
+                      {rel}
+                    </span>
+                  );
+                })}
+              </p>
             ),
             Image: ({ image }) => (
               <img
@@ -337,7 +362,7 @@ export function Thread() {
               {({ message }) => {
                 // 系统行（row）/ 本轮元信息（model/耗时/状态/上下文占用）都挂在 custom
                 const custom = message.metadata?.custom as
-                  | ({ row?: SystemRow } & TurnMeta)
+                  | ({ row?: SystemRow; mentions?: ChatMention[] } & TurnMeta)
                   | undefined;
                 if (custom?.row) {
                   return <SystemRowView key={message.id} row={custom.row} />;
@@ -345,7 +370,7 @@ export function Thread() {
                 if (message.role === "user") {
                   return (
                     <div key={message.id} {...{ [USER_MSG_ATTR]: "" }}>
-                      <UserMessage />
+                      <UserMessage mentions={custom?.mentions} />
                     </div>
                   );
                 }
