@@ -1,4 +1,4 @@
-// 状态与视图模型类型：ChatItem 渲染模型、技能/MCP 条目、AppState 契约
+// State and view-model types: ChatItem render model, skill/MCP entries, AppState contract
 import type {
   ChatAttachment,
   ChatMention,
@@ -27,62 +27,62 @@ export interface ChatItem {
     | "done"
     | "error";
   text?: string;
-  name?: string; // tool 名称
+  name?: string; // tool name
   arguments?: string;
   result?: string;
-  display?: string; // 工具展示数据（如 diff）
+  display?: string; // Tool display data (e.g. diff)
   subagent?: string;
-  subagentIndex?: number; // 来源任务在 tasks 数组中的下标（同名并发区分实例）
-  status?: string; // done 状态
+  subagentIndex?: number; // Index of source task in tasks array (distinguishes same-name concurrent instances)
+  status?: string; // done status
   totalMs?: number;
   model?: string;
-  ctxPromptTokens?: number; // 本轮上下文占用快照（最后一次请求输入 token；done 行携带）
-  ctxCompletionTokens?: number; // 本轮上下文占用快照（最后一次请求输出 token）
-  thinkMs?: number; // 思考耗时（最终）
-  thinkStartedAt?: number; // 思考计时起点（进行中，epoch ms）
-  /** 用户消息的图片附件（data URL，用于气泡内缩略图） */
+  ctxPromptTokens?: number; // Context usage snapshot this run (last request input tokens; carried by done line)
+  ctxCompletionTokens?: number; // Context usage snapshot this run (last request output tokens)
+  thinkMs?: number; // Thinking duration (final)
+  thinkStartedAt?: number; // Thinking timer start (in progress, epoch ms)
+  /** Image attachments of the user message (data URLs for inline bubble thumbnails) */
   images?: ChatAttachment[];
-  /** 用户消息的 @ 提及元数据 */
+  /** @ mention metadata of the user message */
   mentions?: ChatMention[];
 }
 
-/** 全局模式状态（GET /api/mode 及 yolo/plan-mode/reasoning-effort 设置响应体）。
- *  后端契约：src/web/protocol.rs 的 `ModeStatus` */
+/** Global mode state (GET /api/mode and yolo/plan-mode/reasoning-effort set response body).
+ *  Backend contract: `ModeStatus` in src/web/protocol.rs */
 export interface ModeStatus {
   yolo: boolean;
   plan_mode: boolean;
   reasoning_effort: ReasoningEffort;
 }
 
-/** 思考强度档位（请求体顶层 reasoning_effort；后端契约 ReasoningEffort 枚举） */
+/** Reasoning effort level (top-level reasoning_effort in request body; backend contract ReasoningEffort enum) */
 export type ReasoningEffort = "low" | "high" | "max";
 
-/** 技能目录内文件条目 */
+/** File entry inside a skill directory */
 export interface SkillFileEntry {
-  /** 相对技能目录的路径（`/` 分隔） */
+  /** Path relative to the skill directory (`/` separated) */
   path: string;
-  /** 字节大小 */
+  /** Size in bytes */
   size: number;
 }
 
-/** 技能条目（GET /api/skills 返回结构） */
+/** Skill entry (GET /api/skills response structure) */
 export interface SkillEntry {
   name: string;
   description: string;
-  /** SKILL.md 绝对路径 */
+  /** Absolute path of SKILL.md */
   location: string;
-  /** "global"（~/.hailux/skills）| "project"（<work_dir>/.hailux/skills） */
+  /** "global" (~/.hailux/skills) | "project" (<work_dir>/.hailux/skills) */
   scope: "global" | "project";
-  /** SKILL.md 正文（frontmatter 之后） */
+  /** SKILL.md body (after frontmatter) */
   content: string;
-  /** 技能目录内全部文件（含 SKILL.md） */
+  /** All files inside the skill directory (including SKILL.md) */
   files: SkillFileEntry[];
 }
 
-/** 主区域视图：聊天 / 技能管理 / MCP 管理 / 用量统计 / 设置 */
+/** Main area view: chat / skills / MCP / usage stats / settings */
 export type ActiveView = "chat" | "skills" | "mcp" | "stats" | "settings";
 
-/** JSON Schema 片段（工具参数 schema / 子属性） */
+/** JSON Schema fragment (tool parameter schema / sub-properties) */
 export interface JsonSchemaNode {
   type?: string;
   description?: string;
@@ -93,14 +93,14 @@ export interface JsonSchemaNode {
   [key: string]: unknown;
 }
 
-/** MCP 工具条目（名称 + 描述 + 参数 schema） */
+/** MCP tool entry (name + description + parameter schema) */
 export interface McpToolEntry {
   name: string;
   description: string;
   schema?: JsonSchemaNode;
 }
 
-/** MCP 服务器条目（GET /api/mcp 返回结构）：配置 + 连接状态 */
+/** MCP server entry (GET /api/mcp response structure): config + connection status */
 export interface McpServerEntry {
   name: string;
   connected: boolean;
@@ -116,7 +116,7 @@ export interface McpServerEntry {
   tool_details: McpToolEntry[];
 }
 
-/** MCP 服务器表单字段（创建/更新共用） */
+/** MCP server form fields (shared by create/update) */
 export interface McpServerInput {
   name: string;
   transport: "stdio" | "http";
@@ -128,37 +128,37 @@ export interface McpServerInput {
 }
 
 export interface AppState {
-  // 会话
+  // Sessions
   sessions: SessionInfo[];
   sessionId: string | null;
   workDir: string;
-  // 项目目录列表（workdir picker 用）
+  // Project directory list (for workdir picker)
   workdirs: string[];
-  // 消息流
+  // Message stream
   items: ChatItem[];
   isRunning: boolean;
-  /** 本轮请求计时起点（epoch ms），完成后由 done 行展示后端耗时 */
+  /** Current run start timestamp (epoch ms); done line shows backend duration on completion */
   runStartedAt: number | null;
-  /** 本会话累计输入 token（当前 session 全部 LLM 请求之和；顶栏展示） */
+  /** Cumulative input tokens for this session (sum of all LLM requests; shown in top bar) */
   promptTokens: number;
-  /** 本会话累计输出 token */
+  /** Cumulative output tokens for this session */
   completionTokens: number;
-  /** 本会话累计缓存命中 token（顶栏展示） */
+  /** Cumulative cache-hit tokens for this session (shown in top bar) */
   cachedTokens: number;
-  /** 最后一次请求的输入 token（≈ 当前上下文大小；消息底部上下文计量用） */
+  /** Input tokens of the last request (≈ current context size; for the context meter below messages) */
   contextPromptTokens: number;
-  /** 最后一次请求的输出 token */
+  /** Output tokens of the last request */
   contextCompletionTokens: number;
-  /** 模型上下文窗口大小（token）；0 = 未知 */
+  /** Model context window size (tokens); 0 = unknown */
   contextWindow: number;
-  // 模式
+  // Modes
   planMode: boolean;
   yolo: boolean;
-  /** 思考强度（服务器级全局，syncMode 对账） */
+  /** Reasoning effort (server-level global, reconciled by syncMode) */
   effort: ReasoningEffort;
-  // 输入历史（光标在首行 ↑ 上一条）
+  // Input history (↑ at first line goes to previous entry)
   inputHistory: string[];
-  // 弹窗
+  // Dialogs
   permission: {
     requestId: string;
     description: string;
@@ -166,54 +166,54 @@ export interface AppState {
     subagent?: string;
   } | null;
   askUser: { requestId: string; questions: QuestionInfo[] } | null;
-  // 选择器
+  // Pickers
   models: ModelInfo[];
-  /** provider 列表（含未配置的预定义 provider；添加模型表单用） */
+  /** Provider list (incl. unconfigured predefined providers; for the add-model form) */
   providers: ProviderOption[];
-  /** 添加模型弹窗；打开时可带预设（provider 卡片 / 需配置模型入口） */
+  /** Add-model dialog; may open with a preset (provider card / needs-setup model entry) */
   showAddModel: boolean;
   addModelPreset: { provider: string; modelId?: string } | null;
-  /** 斜杠命令列表（随 workDir 变化刷新） */
+  /** Slash command list (refreshed when workDir changes) */
   commands: CommandInfo[];
   showWorkdirPicker: boolean;
-  /** 模型 + 推理等级组合菜单（输入区胶囊控件）开合状态 */
+  /** Open state of the model + reasoning-effort combo menu (input area pill control) */
   showModelMenu: boolean;
-  /** 主区域视图（技能/MCP 为内联面板，替换聊天区） */
+  /** Main area view (skills/MCP are inline panels replacing the chat area) */
   activeView: ActiveView;
   skills: SkillEntry[];
-  /** 技能列表加载失败信息（面板内展示 + 重试） */
+  /** Skill list load failure message (shown in panel + retry) */
   skillsError: string | null;
   mcpServers: McpServerEntry[];
-  /** MCP 列表加载失败信息（面板内展示 + 重试） */
+  /** MCP list load failure message (shown in panel + retry) */
   mcpError: string | null;
-  // 用量统计
+  // Usage stats
   stats: StatsResponse | null;
-  /** 统计的项目筛选（"" = 全部项目） */
+  /** Project filter for stats ("" = all projects) */
   statsFilter: string;
-  /** 统计窗口天数 */
+  /** Stats window in days */
   statsDays: number;
   statsLoading: boolean;
   statsError: string | null;
-  // 中断提示（双击 Esc 语义）
+  // Interrupt hint (double-Esc semantics)
   escHint: boolean;
 
   sse: SseSession | null;
 
   // actions
-  /** 启动初始化：确定初始项目目录（上次访问 > 服务器默认目录）并拉取会话 */
+  /** Startup init: determine initial project dir (last visited > server default) and fetch sessions */
   initWorkDir: () => Promise<void>;
   loadSessions: () => Promise<void>;
   loadModels: () => Promise<void>;
   loadProviders: () => Promise<void>;
-  /** 添加自定义模型并自动切换到新模型 */
+  /** Add a custom model and auto-switch to it */
   addModel: (input: CreateModelInput) => Promise<void>;
-  /** 删除自定义模型（删除当前模型时后端自动迁移） */
+  /** Delete a custom model (backend auto-migrates when the current model is deleted) */
   deleteModel: (selector: string) => Promise<void>;
-  /** 删除自定义 provider（整条含凭据与全部模型） */
+  /** Delete a custom provider (entire entry incl. credentials and all its models) */
   deleteProvider: (providerId: string) => Promise<void>;
   loadWorkdirs: () => Promise<void>;
   loadCommands: () => Promise<void>;
-  /** 切换主区域视图；skills/mcp 进入时刷新列表 */
+  /** Switch main area view; refresh list when entering skills/mcp */
   setView: (view: ActiveView) => void;
   reloadSkills: () => Promise<void>;
   createSkill: (input: {
@@ -233,7 +233,7 @@ export interface AppState {
   createMcpServer: (input: McpServerInput) => Promise<void>;
   updateMcpServer: (name: string, input: McpServerInput) => Promise<void>;
   deleteMcpServer: (name: string) => Promise<void>;
-  /** 拉取用量统计（statsFilter/statsDays 为当前筛选） */
+  /** Fetch usage stats (statsFilter/statsDays as the current filters) */
   loadStats: () => Promise<void>;
   setStatsFilter: (dir: string) => void;
   setStatsDays: (days: number) => void;
@@ -245,21 +245,21 @@ export interface AppState {
     attachments?: ChatAttachment[],
     mentions?: ChatMention[],
   ) => Promise<void>;
-  /** 手动压缩当前会话上下文（POST /api/compact，SSE 响应） */
+  /** Manually compact the current session context (POST /api/compact, SSE response) */
   runCompact: () => Promise<void>;
   interrupt: () => Promise<void>;
   replyPermission: (allow: boolean, always: boolean) => Promise<void>;
   replyAsk: (answer: string) => Promise<void>;
   setPlanMode: (on: boolean) => Promise<void>;
   setYolo: (on: boolean) => Promise<void>;
-  /** 设置思考强度（POST /api/reasoning-effort，失败回滚 + syncMode 对账） */
+  /** Set reasoning effort (POST /api/reasoning-effort, rollback on failure + syncMode reconciliation) */
   setEffort: (effort: ReasoningEffort) => Promise<void>;
-  /** 从服务器对账全局模式（yolo / planMode / effort），失败静默（下次时机重试） */
+  /** Reconcile global modes from server (yolo / planMode / effort); fail silently (retry next chance) */
   syncMode: () => Promise<void>;
   switchModel: (selector: string) => Promise<void>;
-  /** show=true 打开添加模型弹窗；preset 为预填项（provider / 模型 id） */
+  /** show=true opens the add-model dialog; preset is the prefill (provider / model id) */
   setAddModel: (show: boolean, preset?: { provider: string; modelId?: string } | null) => void;
-  /** 切换项目目录：中断运行中的请求，重置会话上下文并拉取该项目会话列表 */
+  /** Switch project dir: interrupt running request, reset session context, fetch that project's sessions */
   setWorkDir: (dir: string) => Promise<void>;
   setWorkdirPicker: (show: boolean) => void;
   setModelMenu: (show: boolean) => void;

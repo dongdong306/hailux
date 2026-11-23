@@ -1,6 +1,7 @@
-// 对应 src/web/protocol.rs 的前端类型定义
+// Frontend type definitions corresponding to src/web/protocol.rs
 
 export type ServerEvent =
+  | { type: "SessionStarted"; session_id: string }
   | { type: "AgentChunk"; text: string }
   | { type: "AgentReasoningChunk"; text: string }
   | { type: "AgentComplete"; status: string; total_ms: number; model: string }
@@ -16,7 +17,7 @@ export type ServerEvent =
       name: string;
       arguments: string;
       subagent?: string;
-      /** 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例） */
+      /** Index of source task in tasks array (distinguishes same-name concurrent subagents) */
       subagent_index?: number;
     }
   | {
@@ -41,24 +42,24 @@ export type ServerEvent =
     }
   | { type: "Notice"; text: string }
   | {
-      /** 一次 LLM 请求失败，即将自动重试（前端丢弃末尾流式内容并提示） */
+      /** An LLM request failed and will auto-retry (frontend drops trailing streamed content and notifies) */
       type: "AgentRetry";
-      /** 即将进行的重试序号（1 起始） */
+      /** Sequence number of the upcoming retry (1-based) */
       attempt: number;
-      /** 重试次数上限 */
+      /** Max retry count */
       max_retries: number;
-      /** 重试前退避等待（ms） */
+      /** Backoff wait before retry (ms) */
       delay_ms: number;
-      /** 失败原因摘要 */
+      /** Failure reason summary */
       reason: string;
     }
   | { type: "CompactStart"; text: string }
   | {
       type: "CompactComplete";
       compacted_count: number;
-      /** 压缩耗时（ms） */
+      /** Compaction duration (ms) */
       total_ms: number;
-      /** 压缩后上下文 token 估算（无 usage 数据时缺省，前端跳过上下文计量更新） */
+      /** Estimated context tokens after compaction (omitted without usage data; frontend skips context meter update) */
       context_tokens?: number;
     }
   | { type: "Error"; message: string };
@@ -95,9 +96,9 @@ export interface StoredMessage {
   runtime_meta: string | null;
   think_ms: number | null;
   compacted: boolean;
-  /** 图片附件 JSON（[{mime, data_url}]）；仅用户消息使用 */
+  /** Image attachment JSON ([{mime, data_url}]); used by user messages only */
   attachments: string | null;
-  /** @ 提及元数据 JSON（[{start, end, kind}]，码点偏移）；仅用户消息使用 */
+  /** @ mention metadata JSON ([{start, end, kind}], code point offsets); used by user messages only */
   mentions?: string | null;
 }
 
@@ -117,40 +118,40 @@ export interface ModelInfo {
   display: string;
   active: boolean;
   context_window?: number;
-  /** 可删除（用户自定义添加；预定义模型不可删） */
+  /** Deletable (user-added custom; predefined models cannot be deleted) */
   deletable: boolean;
-  /** provider 是否为预定义（预定义 provider 不可整条删除） */
+  /** Whether the provider is predefined (predefined providers cannot be deleted wholesale) */
   provider_predefined: boolean;
-  /** provider 未配置 API Key（需 setup 后才可使用） */
+  /** Provider has no API key configured (must be set up before use) */
   needs_setup: boolean;
 }
 
-/** 已配置 provider 条目（GET /api/providers） */
+/** Configured provider entry (GET /api/providers) */
 export interface ProviderOption {
   id: string;
   name: string;
   base_url: string;
-  /** 预定义 provider（新建模型时无需填 base_url） */
+  /** Predefined provider (no base_url needed when creating a model) */
   predefined: boolean;
-  /** 未配置 API Key（选择后仅需填写 api_key 即可启用） */
+  /** No API key configured (after selecting, only api_key is needed to enable) */
   needs_setup: boolean;
 }
 
-/** 添加自定义模型入参（POST /api/models/custom）；对齐 TUI AddModelForm */
+/** Add custom model input (POST /api/models/custom); align with TUI AddModelForm */
 export interface CreateModelInput {
   provider_id: string;
   base_url?: string;
   api_key?: string;
   model_id: string;
-  /** 缺省 131072 (128K) */
+  /** Defaults to 131072 (128K) */
   context_window?: number;
 }
 
-/** 斜杠命令条目（GET /api/commands） */
+/** Slash command entry (GET /api/commands) */
 export interface CommandInfo {
   name: string;
   description: string;
-  /** "prompt"（后端展开为完整提示词）| "ui"（前端本地处理） */
+  /** "prompt" (expanded into full prompt by backend) | "ui" (handled locally by frontend) */
   kind: "prompt" | "ui";
 }
 
@@ -165,13 +166,13 @@ export interface McpServerInfo {
   tools: number;
 }
 
-/** 用户消息携带的图片附件（data URL 上传；后端校验类型/大小/空载荷） */
+/** Image attachments carried by user messages (uploaded as data URLs; backend validates type/size/empty payload) */
 export interface ChatAttachment {
   mime: string;
   data_url: string;
 }
 
-/** @ 提及元数据：start/end 为 content 中的 Unicode 码点偏移（后端契约 protocol.rs `ChatMention`） */
+/** @ mention metadata: start/end are Unicode code point offsets in content (backend contract `ChatMention` in protocol.rs) */
 export interface ChatMention {
   start: number;
   end: number;
@@ -186,9 +187,9 @@ export interface ChatRequest {
   work_dir?: string;
 }
 
-// ── 用量统计（GET /api/stats）────────────────────────────────
+// ── Usage stats (GET /api/stats)────────────────────────────────
 
-/** 用量汇总（基于 messages 表中带 usage 的 assistant 行 = 一次 LLM 请求） */
+/** Usage summary (assistant rows with usage in the messages table = one LLM request each) */
 export interface UsageSummary {
   requests: number;
   prompt_tokens: number;
@@ -196,9 +197,9 @@ export interface UsageSummary {
   completion_tokens: number;
 }
 
-/** 按日聚合的用量 */
+/** Usage aggregated by day */
 export interface DailyUsage {
-  /** YYYY-MM-DD（本地时区） */
+  /** YYYY-MM-DD (local timezone) */
   date: string;
   requests: number;
   prompt_tokens: number;
@@ -206,7 +207,7 @@ export interface DailyUsage {
   completion_tokens: number;
 }
 
-/** 按模型聚合的用量 */
+/** Usage aggregated by model */
 export interface ModelUsage {
   model: string;
   requests: number;
@@ -215,7 +216,7 @@ export interface ModelUsage {
   completion_tokens: number;
 }
 
-/** 最近一次请求的用量明细 */
+/** Usage details of the most recent request */
 export interface UsageRecord {
   created_at: string;
   model: string;
