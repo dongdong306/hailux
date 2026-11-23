@@ -1,12 +1,14 @@
-//! SSE handler：`POST /api/chat`、`POST /api/compact`。
+//! SSE handler: `POST /api/chat`, `POST /api/compact`.
 //!
-//! 每个请求创建独立的 `CoreEvent` 通道；事件循环把领域事件映射为
-//! `ServerEvent` JSON 推送，同时完成 TUI 侧等价的持久化工作
-//! （PersistMessage 落库、AgentComplete 写 runtime_meta、自动压缩）。
+//! Each request creates an independent `CoreEvent` channel; the event loop maps
+//! domain events into `ServerEvent` JSON pushes while performing persistence
+//! equivalent to the TUI side (PersistMessage to DB, AgentComplete writes
+//! runtime_meta, auto-compaction).
 //!
-//! 断连语义：客户端断开 → 流被 drop → `ConnectionGuard` 兜底拒绝
-//! pending 权限/提问；`DropInterrupt` 中断仍在运行的 agent，防止
-//! 上下文与 DB 脱钩（正常结束时 `completed = true`，不触发中断）。
+//! Disconnect semantics: client disconnects → stream is dropped → `ConnectionGuard`
+//! rejects pending permission/question requests as a fallback; `DropInterrupt`
+//! interrupts a still-running agent, preventing context from diverging from the
+//! DB (on normal completion `completed = true`, no interrupt is triggered).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,19 +30,23 @@ use super::protocol::{self, ServerEvent};
 use super::state::WebServerState;
 use super::task_registry::ConnectionGuard;
 
-/// 工具结果推送前端的长度上限（字符）
+/// Max length of a tool result pushed to the frontend (in chars)
 const TOOL_RESULT_MAX_CHARS: usize = 100_000;
 
-/// 聊天接口请求体上限。axum `Json` 提取器默认 2MB body limit，
-/// 附件 base64 膨胀 4/3 后原图 >~1.4MB 即触发 413，使 10MB 上限形同
-/// 虚设——路由层必须用本常量显式放开（见 web/mod.rs）。
-/// 取满额附件（数量上限 × 单附件 base64 后大小）+ JSON 结构余量。
+/// Body limit for the chat endpoint. The axum `Json` extractor defaults to a
+/// 2MB body limit; with the 4/3 base64 inflation an original image >~1.4MB
+/// already triggers 413, making the 10MB cap useless — the router layer must
+/// explicitly raise it with this constant (see web/mod.rs).
+/// Sized for a full attachment set (count cap × per-attachment base64 size)
+/// plus JSON structure headroom.
 pub(super) const CHAT_BODY_LIMIT: usize =
     media::MAX_ATTACHMENT_COUNT * (media::MAX_IMAGE_BYTES / 3 * 4) + 64 * 1024;
 
-/// 校验并转换前端上传的图片附件：剥 data URL 前缀（严格匹配 mime）→
-/// base64 解码（顺带校验字符集与 padding）→ 精确大小校验 → 魔数嗅探并以
-/// 嗅探结果覆盖 mime。校验失败返回 Err(原因)，由调用方回送 SSE Error 事件。
+/// Validate and convert image attachments uploaded by the frontend: strip the
+/// data URL prefix (strict mime match) → base64 decode (also validating charset
+/// and padding) → exact size check → magic-number sniff, overriding the mime
+/// with the sniff result. Returns Err(reason) on failure; the caller sends it
+/// back as an SSE Error event.
 fn convert_attachments(
     attachments: &[protocol::ChatAttachment],
 ) -> Result<Vec<media::Attachment>, String> {
@@ -77,7 +83,8 @@ fn convert_attachments(
             let Some(mime) = media::sniff_image_mime(&bytes) else {
                 return Err(format!("第 {idx} 个附件内容不是受支持的图片格式"));
             };
-            // 用魔数嗅探结果重建附件（规范化 data_url，入库与发送同构）
+            // Rebuild the attachment from the sniffed mime (normalizes the data_url;
+            // identical form for DB storage and sending)
             Ok(media::Attachment::from_bytes(mime, &bytes))
         })
         .collect()
@@ -96,7 +103,6 @@ pub async fn chat_handler(
     let (core_tx, mut core_rx) = create_core_event_channel();
     let guard = ConnectionGuard::new(state.registry.clone());
     let message = req.message;
-    // 图片附件：入口处一次性校验（类型/大小/空载荷）
     let attachments = match convert_attachments(&req.attachments) {
         Ok(a) => a,
         Err(e) => return error_response(e),
@@ -106,23 +112,25 @@ pub async fn chat_handler(
     let compact_threshold = state.manager.cfg().compact_threshold;
 
     let stream = async_stream::stream! {
-        // per-session 串行化：同一会话的并发请求在此排队
+        // Per-session serialization: concurrent requests for the same session queue here
         let mut session = session_arc.lock().await;
         session.bind_event_channel(core_tx.clone());
 
-        // 模式对账：YOLO/Plan/思考强度为服务器级全局状态，广播时持锁中的
-        // 会话会被跳过（见 SessionManager::set_global_plan），每次请求入口
-        // 同步兜底，同时覆盖 invalidate 重建、历史漂移等场景。
+        // Mode reconciliation: YOLO/Plan/reasoning effort are server-level global
+        // state; sessions holding the lock are skipped during broadcast (see
+        // SessionManager::set_global_plan), so sync as a fallback at each request
+        // entry, also covering invalidate-rebuild, history drift, and similar cases.
         session.set_yolo(state.manager.global_yolo());
         session.set_plan_mode(state.manager.global_plan());
         session.set_reasoning_effort(state.manager.global_effort());
 
-        // ── prompt 型斜杠命令展开（/init、自定义命令）────────
-        // UI 型命令（/compact 等）由前端拦截，不经过此接口。
-        // 对齐 TUI：展开后的完整提示词用于持久化与发送。
+        // ── Prompt-style slash command expansion (/init, custom commands)────────
+        // UI-style commands (/compact etc.) are intercepted by the frontend and
+        // never reach this endpoint.
+        // Align with TUI: the fully expanded prompt is used for persistence and sending.
         let message = match session.command_registry.render_prompt_command(&message) {
             Some(rendered) => {
-                // /init 需要写 AGENTS.md，规划模式会过滤写工具，提前拒绝（对齐 TUI 守卫）
+                // /init writes AGENTS.md and plan mode filters out write tools, so reject early (align with TUI guard)
                 let cmd_name = crate::agent::parse_slash_input(&message).map(|(n, _)| n);
                 if session.plan_mode()
                     && cmd_name.as_deref() == Some(crate::agent::command_def::INIT_COMMAND_NAME)
@@ -136,7 +144,7 @@ pub async fn chat_handler(
             None => message,
         };
 
-        // ── 会话准备（对齐 TUI handle_user_message）──────────
+        // ── Session preparation (align with TUI handle_user_message)──────────
         let session_id = match ensure_session(&mut session, &resolved.display, requested_session_id).await {
             Ok(id) => id,
             Err(e) => {
@@ -145,6 +153,8 @@ pub async fn chat_handler(
             }
         };
 
+        yield sse_event(&ServerEvent::SessionStarted { session_id: session_id.clone() });
+
         if let Err(e) =
             persist_user_message(&session, &session_id, &message, &attachments, &req.mentions).await
         {
@@ -152,7 +162,7 @@ pub async fn chat_handler(
             return;
         }
 
-        // 标题为空时用首条用户消息生成（对齐 TUI handle_user_message：截取前 50 字符）
+        // Generate the title from the first user message when empty (align with TUI handle_user_message: take first 50 chars)
         match session.storage().get_session_title(&session_id).await {
             Ok(Some(title)) if !title.is_empty() => {}
             _ => {
@@ -170,10 +180,10 @@ pub async fn chat_handler(
             }
         }
 
-        // ── 启动流式处理 ────────────────────────────────────
+        // ── Start streaming ────────────────────────────────────
         let started = Instant::now();
-        // 思考计时（对齐 TUI finalize_thinking_ms：思考→输出/工具调用切换时冻结分段，
-        // PersistMessage 时求和写入 think_ms）
+        // Thinking timer (align with TUI finalize_thinking_ms: freeze the segment
+        // on thinking→output/tool-call switch, sum into think_ms at PersistMessage)
         let mut thinking_started: Option<Instant> = None;
         let mut think_total_ms: u64 = 0;
         if let Err(e) = session.send_message(&message, attachments, core_tx.clone()) {
@@ -181,12 +191,12 @@ pub async fn chat_handler(
             return;
         }
 
-        // 断连时中断 agent（正常结束置 completed = true 跳过）
+        // Interrupt the agent on disconnect (skipped by setting completed = true on normal completion)
         let mut interrupt_on_drop = DropInterrupt { session: session_arc.clone(), completed: false };
 
         let mut last_prompt: u32 = 0;
         let mut last_completion: u32 = 0;
-        // 自动压缩起始时间（CompactComplete 时计算耗时）
+        // Auto-compaction start time (elapsed measured at CompactComplete)
         let mut compact_started = Instant::now();
 
         while let Some(event) = core_rx.recv().await {
@@ -205,8 +215,9 @@ pub async fn chat_handler(
                     delay_ms,
                     reason,
                 } => {
-                    // 失败尝试的思考时间随其内容一起丢弃（对齐 TUI：
-                    // pop 掉 AgentThinking cell 不结算 think_ms）
+                    // Thinking time of failed attempts is discarded along with their
+                    // content (align with TUI: pop the AgentThinking cell without
+                    // settling think_ms)
                     finalize_thinking(&mut thinking_started, &mut think_total_ms);
                     think_total_ms = 0;
                     yield sse_event(&ServerEvent::AgentRetry {
@@ -230,19 +241,19 @@ pub async fn chat_handler(
                     });
                 }
                 CoreEvent::PersistMessage { msg, usage, model, display } => {
-                    // 持久化（对齐 TUI PersistMessage 处理；不推送给前端）
+                    // Persist (align with TUI PersistMessage handling; not pushed to the frontend)
                     let mut stored = crate::storage::to_stored_message(&msg);
                     if let Some(u) = usage {
                         stored.prompt_tokens = Some(u.prompt_tokens as i64);
                         stored.completion_tokens = Some(u.completion_tokens as i64);
                         stored.cached_tokens = Some(u.cached_tokens as i64);
                     }
-                    // 用量统计按消息级模型归属（事件携带的流式快照值）
+                    // Usage stats attributed to the per-message model (streaming snapshot values carried by the event)
                     stored.model = Some(model);
                     if let Some(d) = display {
                         stored.runtime_meta = Some(d);
                     }
-                    // 思考耗时求和写入（对齐 TUI：仅带 reasoning 的 assistant 消息）
+                    // Write the summed thinking time (align with TUI: only assistant messages with reasoning)
                     finalize_thinking(&mut thinking_started, &mut think_total_ms);
                     if stored.role == crate::storage::MessageRole::Assistant
                         && stored.reasoning_content.is_some()
@@ -285,12 +296,12 @@ pub async fn chat_handler(
                     yield sse_event(&ServerEvent::AskUser { request_id, questions });
                 }
                 CoreEvent::AgentComplete { messages, status, model, reasoning_effort, .. } => {
-                    // 同步 in-memory 上下文（对齐 TUI AgentComplete 处理）
+                    // Sync the in-memory context (align with TUI AgentComplete handling)
                     if !messages.is_empty() {
                         session.sync_messages(messages);
                     }
                     let total_ms = started.elapsed().as_millis() as u64;
-                    // runtime_meta 用事件携带的快照模型/挡位（轮次中途切换不影响）
+                    // runtime_meta uses the snapshot model/effort carried by the event (mid-turn switches have no effect)
                     let _ = session.storage()
                         .update_last_assistant_runtime_meta(
                             &session_id,
@@ -304,7 +315,7 @@ pub async fn chat_handler(
                         model,
                     });
 
-                    // 自动压缩检查（对齐 TUI 阈值逻辑）；启动后继续消费压缩事件
+                    // Auto-compaction check (align with TUI threshold logic); after starting, keep consuming compaction events
                     if maybe_start_compaction(
                         &mut session, &core_tx, &session_id,
                         last_prompt + last_completion, resolved.context_window, compact_threshold,
@@ -321,14 +332,14 @@ pub async fn chat_handler(
                     }
                 }
                 CoreEvent::CompactChunk(_) => {
-                    // 对齐 TUI：摘要流仅用于驱动状态动画，不展示内容
+                    // Align with TUI: the summary stream only drives the status animation; its content is not displayed
                 }
                 CoreEvent::CompactComplete { summary, session_id: compact_sid, usage } => {
                     let compacted_count = session.storage()
                         .count_active_messages(&compact_sid).await.unwrap_or(0) as usize;
                     let _ = session.storage().mark_messages_compacted(&compact_sid).await;
                     let _ = session.storage().set_compact_summary(&compact_sid, &summary).await;
-                    // 压缩后上下文估算（对齐 TUI：context_prompt - compact_prompt + compact_completion）
+                    // Post-compaction context estimate (align with TUI: context_prompt - compact_prompt + compact_completion)
                     let mut context_tokens: Option<u32> = None;
                     if compact_sid == session_id {
                         session.apply_compaction_result(&summary);
@@ -356,9 +367,9 @@ pub async fn chat_handler(
             }
         }
 
-        // 正常走完事件循环（或前置于 send 的 early return 不经过此处）
+        // Event loop finished normally (early returns before send do not reach here)
         interrupt_on_drop.completed = true;
-        // 请求结束：解绑通道（下一次请求重新绑定）
+        // Request finished: unbind the channel (rebound by the next request)
         session.unbind_event_channel();
     };
 
@@ -367,7 +378,7 @@ pub async fn chat_handler(
         .into_response()
 }
 
-/// 手动压缩（POST /api/compact，SSE 响应）
+/// Manual compaction (POST /api/compact, SSE response)
 pub async fn compact_handler(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<super::protocol::CompactRequest>,
@@ -398,8 +409,9 @@ pub async fn compact_handler(
             return;
         }
 
-        // 对齐 TUI compact_conversation：先落一条压缩状态行（CompactStreaming），
-        // 摘要流不展示，完成后整条替换为完成标记
+        // Align with TUI compact_conversation: first emit a compaction status line
+        // (CompactStreaming); the summary stream is not shown and the whole line is
+        // replaced by the completion marker when done
         let compact_started = Instant::now();
         yield sse_event(&ServerEvent::CompactStart { text: "正在压缩上下文...".to_string() });
         if let Err(e) = session.request_compaction(core_tx.clone(), requested_session_id.clone()) {
@@ -410,18 +422,18 @@ pub async fn compact_handler(
         while let Some(event) = core_rx.recv().await {
             match event {
                 CoreEvent::CompactChunk(_) => {
-                    // 对齐 TUI：摘要流仅用于驱动状态动画，不展示内容
+                    // Align with TUI: the summary stream only drives the status animation; its content is not displayed
                 }
                 CoreEvent::CompactComplete { summary, session_id: sid, usage } => {
                     let compacted_count = session.storage()
                         .count_active_messages(&sid).await.unwrap_or(0) as usize;
                     let _ = session.storage().mark_messages_compacted(&sid).await;
                     let _ = session.storage().set_compact_summary(&sid, &summary).await;
-                    // 压缩后上下文估算（对齐 TUI：session_prompt - compact_prompt + compact_completion）
+                    // Post-compaction context estimate (align with TUI: session_prompt - compact_prompt + compact_completion)
                     let mut context_tokens: Option<u32> = None;
                     if sid == requested_session_id {
                         session.apply_compaction_result(&summary);
-                        // 依据压缩请求自身的 usage 修正会话用量估算
+                        // Refine the session usage estimate using the compaction request's own usage
                         if let (Some(u), Ok((pt, _))) = (
                             usage,
                             session.storage().get_session_usage(&sid).await,
@@ -473,10 +485,11 @@ pub async fn compact_handler(
         .into_response()
 }
 
-// ── 内部辅助 ─────────────────────────────────────────────────
+// ── Internal helpers ─────────────────────────────────────────────────
 
-/// 流被 drop 时中断 agent（客户端断开且事件循环未正常结束）。
-/// 中断在后台 task 中执行（Drop 不能等待异步锁）。
+/// Interrupt the agent when the stream is dropped (client disconnected and the
+/// event loop did not finish normally).
+/// The interrupt runs in a background task (Drop cannot wait on async locks).
 struct DropInterrupt {
     session: Arc<tokio::sync::Mutex<ChatSession>>,
     completed: bool,
@@ -494,11 +507,15 @@ impl Drop for DropInterrupt {
                 s.interrupt();
                 s.unbind_event_channel();
             }
-            // 对齐 TUI cleanup_on_quit 的 2s 收尾窗口：中断后 agent 会为悬挂的
-            // tool_calls 补发 stub，但事件通道已随断连关闭，PersistMessage 无法
-            // 落库——这里延迟后做幂等修复，避免恢复会话时 Provider 400。
-            // 安全前提：unbind 后 agent 不再直接写 DB（落库只走事件消费方），
-            // 且期间新请求会持有会话锁，修复被串行化到该轮结束后执行
+            // Align with TUI cleanup_on_quit's 2s wrap-up window: after the
+            // interrupt the agent emits stubs for dangling tool_calls, but the
+            // event channel was closed on disconnect, so PersistMessage cannot
+            // reach the DB — hence this delayed idempotent repair to avoid a
+            // Provider 400 when resuming the session.
+            // Safety precondition: after unbind the agent no longer writes the DB
+            // directly (persisting only goes through the event consumer), and new
+            // requests in the meantime hold the session lock, serializing the
+            // repair to run after that round ends.
             tokio::time::sleep(Duration::from_secs(2)).await;
             let s = session.lock().await;
             if let Some(session_id) = s.current_session_id()
@@ -515,7 +532,7 @@ pub(crate) async fn resolve_session(
     session_id: Option<&str>,
     work_dir: Option<&str>,
 ) -> Result<Arc<tokio::sync::Mutex<ChatSession>>, String> {
-    // 优先级：显式 work_dir > session 归属目录 > 服务器默认目录
+    // Priority: explicit work_dir > the session's owning directory > server default directory
     let dir = if let Some(d) = work_dir {
         std::path::PathBuf::from(d)
     } else if let Some(sid) = session_id
@@ -533,7 +550,7 @@ pub(crate) async fn resolve_session(
         .map_err(|e| e.to_string())
 }
 
-/// 确保存在当前会话 ID：请求带 session_id → 切换；否则沿用当前或新建
+/// Ensure a current session ID exists: switch if the request carries session_id; otherwise reuse the current one or create a new session
 async fn ensure_session(
     session: &mut ChatSession,
     model_display: &str,
@@ -607,14 +624,14 @@ fn runtime_meta_json(total_ms: u64, model: &str, reasoning_effort: &str, status:
     .to_string()
 }
 
-/// 冻结当前思考分段耗时（对齐 TUI finalize_thinking_ms：思考→输出/工具调用切换时结算）
+/// Freeze the current thinking segment duration (align with TUI finalize_thinking_ms: settled on thinking→output/tool-call switches)
 fn finalize_thinking(thinking_started: &mut Option<Instant>, think_total_ms: &mut u64) {
     if let Some(t) = thinking_started.take() {
         *think_total_ms += t.elapsed().as_millis() as u64;
     }
 }
 
-/// 超过阈值时启动压缩（返回 true = 已启动，调用方继续消费事件）
+/// Start compaction when over the threshold (returns true = started; the caller keeps consuming events)
 async fn maybe_start_compaction(
     session: &mut ChatSession,
     core_tx: &CoreEventTx,
@@ -688,11 +705,11 @@ mod tests {
 
     #[test]
     fn rejects_malformed_data_url() {
-        // 前缀与 mime 不匹配
+        // prefix does not match the mime
         let err = convert_attachments(&[att("image/png", "data:image/jpeg;base64,iVBORw0KGgo")])
             .unwrap_err();
         assert!(err.contains("data URL 格式非法"));
-        // 完全没有 data URL 前缀
+        // no data URL prefix at all
         let err = convert_attachments(&[att("image/png", "iVBORw0KGgo")]).unwrap_err();
         assert!(err.contains("data URL 格式非法"));
     }
@@ -712,7 +729,7 @@ mod tests {
 
     #[test]
     fn rejects_non_image_content() {
-        // 合法 base64 但内容不是图片（魔数嗅探失败）
+        // valid base64 but the content is not an image (magic-number sniff fails)
         let err =
             convert_attachments(&[att("image/png", "data:image/png;base64,aGVsbG8=")]).unwrap_err();
         assert!(err.contains("不是受支持的图片格式"));

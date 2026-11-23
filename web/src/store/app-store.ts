@@ -1,4 +1,4 @@
-// 应用状态：会话/消息/权限请求/模式（Zustand）
+// App state: sessions/messages/permission requests/modes (Zustand)
 import { create } from "zustand";
 import type {
   ChatRequest,
@@ -19,10 +19,10 @@ import type {
   SkillEntry,
 } from "./types";
 
-/** localStorage：上次访问的项目目录 key */
+/** localStorage key: last visited project directory */
 const LAST_WORKDIR_KEY = "hailux.lastWorkDir";
 
-// 组件沿用 `../store/app-store` 导入路径；类型实际定义在 ./types
+// Components keep importing from `../store/app-store`; types are actually defined in ./types
 export type {
   ActiveView,
   ChatItem,
@@ -76,12 +76,12 @@ export const useApp = create<AppState>((set, get) => ({
   sse: null,
 
   async initWorkDir() {
-    // 优先上次访问的项目目录，fallback 到服务器默认目录（后端启动目录）
+    // Prefer the last visited project directory, falling back to the server default (backend startup dir)
     let dir = "";
     try {
       dir = localStorage.getItem(LAST_WORKDIR_KEY) ?? "";
     } catch {
-      // localStorage 不可用（隐私模式等）→ 用默认目录
+      // localStorage unavailable (private mode etc.) → use default directory
     }
     if (!dir) {
       const resp = await getJson<{ path: string }>("/api/default-workdir");
@@ -90,12 +90,12 @@ export const useApp = create<AppState>((set, get) => ({
     set({ workDir: dir });
     await get().loadSessions();
     get().loadCommands().catch(() => {});
-    // 页面加载/刷新后从服务器恢复真实模式（全局模式与 work_dir 无关）
+    // Restore real modes from the server after page load/refresh (global modes are independent of work_dir)
     await get().syncMode();
   },
 
   async loadSessions() {
-    // 按当前项目目录拉取（未初始化时后端按默认目录返回）
+    // Fetch by current project directory (backend returns default dir when not initialized)
     const workDir = get().workDir;
     const query = workDir ? `?work_dir=${encodeURIComponent(workDir)}` : "";
     const sessions = await getJson<SessionInfo[]>(`/api/sessions${query}`);
@@ -158,11 +158,11 @@ export const useApp = create<AppState>((set, get) => ({
       const commands = await getJson<CommandInfo[]>(`/api/commands${query}`);
       set({ commands });
     } catch {
-      // 命令列表加载失败不阻塞主流程（补全降级为无提示）
+      // Command list load failure must not block the main flow (completion degrades to no hints)
     }
   },
 
-  /** 切换主区域视图；进入 skills/mcp/stats/settings 时刷新对应列表（错误写入 xxxError，不阻止切换） */
+  /** Switch the main area view; refresh the matching list when entering skills/mcp/stats/settings (errors go into xxxError, without blocking the switch) */
   setView(view) {
     set({ activeView: view });
     if (view === "skills") get().reloadSkills().catch(() => {});
@@ -256,7 +256,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   async updateMcpServer(name, input) {
-    // name 定位原服务器；input.name 不同即改名（后端按 new_name 处理）
+    // name identifies the original server; a different input.name renames it (backend handles it as new_name)
     const { name: newName, ...rest } = input;
     const resp = await fetch("/api/mcp", {
       method: "PUT",
@@ -287,7 +287,7 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       const params = new URLSearchParams();
       if (statsFilter) params.set("work_dir", statsFilter);
-      // 无条件发送：days=0（全部时间）是 falsy，条件发送会被后端默认 30 天覆盖
+      // Send unconditionally: days=0 (all time) is falsy, so conditional sending would be overridden by the backend default of 30 days
       params.set("days", String(statsDays));
       const qs = params.toString();
       const stats = await getJson<StatsResponse>(
@@ -336,35 +336,45 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   async switchSession(id) {
-    const detail = await getJson<{
-      messages: import("../runtime/types").StoredMessage[];
-      compact_summary?: string;
-    }>(`/api/sessions/${id}`);
-    const rebuilt = rebuildSessionItems(
-      detail.messages,
-      Boolean(detail.compact_summary),
-    );
-    // 会话携带其所属工作目录 —— 切换会话即切换目录上下文
-    const target = get().sessions.find((s) => s.id === id);
-    set({
-      sessionId: id,
-      items: rebuilt.items,
-      isRunning: false,
-      runStartedAt: null,
-      workDir: target?.work_dir ?? get().workDir,
-      promptTokens: rebuilt.promptTokens,
-      completionTokens: rebuilt.completionTokens,
-      cachedTokens: rebuilt.cachedTokens,
-      contextPromptTokens: rebuilt.contextPromptTokens,
-      contextCompletionTokens: rebuilt.contextCompletionTokens,
-    });
+    try {
+      const detail = await getJson<{
+        messages: import("../runtime/types").StoredMessage[];
+        compact_summary?: string;
+      }>(`/api/sessions/${id}`);
+      const rebuilt = rebuildSessionItems(
+        detail.messages,
+        Boolean(detail.compact_summary),
+      );
+      // Sessions carry their own working directory — switching a session switches the directory context
+      const target = get().sessions.find((s) => s.id === id);
+      set({
+        sessionId: id,
+        items: rebuilt.items,
+        isRunning: false,
+        runStartedAt: null,
+        workDir: target?.work_dir ?? get().workDir,
+        promptTokens: rebuilt.promptTokens,
+        completionTokens: rebuilt.completionTokens,
+        cachedTokens: rebuilt.cachedTokens,
+        contextPromptTokens: rebuilt.contextPromptTokens,
+        contextCompletionTokens: rebuilt.contextCompletionTokens,
+      });
+    } catch (e) {
+      // No silent failure: an unset sessionId makes /compact report "no
+      // active session"; surface the error so the user can retry.
+      set((s) => ({
+        items: [
+          ...s.items,
+          { kind: "error", text: `切换会话失败: ${String(e)}` },
+        ],
+      }));
+    }
   },
 
   async deleteSession(id) {
     const resp = await fetch(`/api/sessions/${id}`, { method: "DELETE" });
     if (!resp.ok) return;
     if (get().sessionId === id) {
-      // 删除的是当前会话 → 回到空状态
       set({
         sessionId: null,
         items: [],
@@ -389,9 +399,7 @@ export const useApp = create<AppState>((set, get) => ({
       work_dir: get().workDir || undefined,
     };
 
-    // 本地立刻显示用户消息 + 记录输入历史 + 启动本地请求计时
-    // （完成后由 done 行展示后端返回的 total_ms）
-    // 顶栏计量 = 本会话累计：跨对话轮持续累加；context 字段保留旧值直到首个 UsageUpdate
+    // Top bar counters = this session's cumulative totals: keep accumulating across turns; context fields keep old values until the first UsageUpdate
     set((s) => ({
       isRunning: true,
       runStartedAt: Date.now(),
@@ -402,15 +410,15 @@ export const useApp = create<AppState>((set, get) => ({
       ],
     }));
 
-    // 本轮最近一次 UsageUpdate 快照：AgentComplete 时随 done 行落进消息底部操作栏
-    // （闭包变量随每次请求重建，避免快照到上一轮的旧值）
+    // Snapshot of the latest UsageUpdate in this turn: attached to the done row at AgentComplete in the message footer action bar
+    // (the closure variable is rebuilt per request, avoiding a stale snapshot left over from the previous turn)
     let turnCtx: { prompt: number; completion: number } | null = null;
 
     const handleEvent = (event: ServerEvent) => {
       const ops = itemOps(get, set);
       const { items, push, patchLast } = ops;
       if (handleSharedEvent(event, ops, set)) return;
-      // 思考→输出/工具调用切换：冻结思考计时（对齐 TUI finalize_thinking_ms）
+      // Thinking → output/tool call transition: freeze the thinking timer (align with TUI finalize_thinking_ms)
       const freezeThinking = () => {
         const last = items[items.length - 1];
         if (last?.kind === "reasoning-streaming") {
@@ -449,8 +457,8 @@ export const useApp = create<AppState>((set, get) => ({
           break;
         }
         case "AgentRetry": {
-          // 失败尝试的部分输出不进入上下文：末尾流式 items 同步清除
-          //（对齐 TUI pop 语义），notice 结束当前 acc，重试内容另起新消息
+          // Partial output of failed attempts must not enter context: clear the trailing streaming items in sync
+          // (align with TUI pop semantics); the notice ends the current acc, retried content starts a new message
           const cur = [...items];
           while (
             cur.length > 0 &&
@@ -488,7 +496,7 @@ export const useApp = create<AppState>((set, get) => ({
           });
           break;
         case "UsageUpdate":
-          // 会话累计（顶栏）+ 记录最后请求（消息底部上下文占用近似）
+          // Session cumulative (top bar) + record the last request (approximate context usage in the message footer)
           turnCtx = {
             prompt: event.prompt_tokens,
             completion: event.completion_tokens,
@@ -521,8 +529,8 @@ export const useApp = create<AppState>((set, get) => ({
           });
           break;
         case "AgentComplete": {
-          // ctx 依赖事件顺序：后端保证 UsageUpdate 先于 AgentComplete；
-          // 本轮无任何 usage（如首个请求即失败）时 ctx 为 null → 不展示上下文占用
+          // ctx depends on event order: the backend guarantees UsageUpdate precedes AgentComplete;
+          // when the turn has no usage at all (e.g. the first request fails), ctx is null → no context usage shown
           freezeThinking();
           const last = items[items.length - 1];
           if (last?.kind === "assistant-streaming") {
@@ -553,12 +561,12 @@ export const useApp = create<AppState>((set, get) => ({
         }));
       }
     } finally {
-      // 仅当该流仍是活跃流时清理；被 setWorkDir 接管（切项目）时跳过，
-      // 避免用旧目录重拉会话列表覆盖新项目
+      // Only clean up if this stream is still the active one; skip when taken over by setWorkDir (project switch),
+      // so the session list is not re-fetched with the old directory and overwritten onto the new project
       if (get().sse === sse) {
         set({ isRunning: false, sse: null, runStartedAt: null });
         get().loadSessions().catch(() => {});
-        // 每轮对话结束后低成本对账（兜底运行期间的任何模式漂移）
+        // Low-cost reconcile after each turn ends (safety net for any mode drift during the run)
         get().syncMode();
       }
     }
@@ -649,11 +657,11 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       const resp = await postJson("/api/plan-mode", { enabled: on });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      // 以后端返回的最终状态为准（不依赖本地猜测）
+      // Trust the final state returned by the backend (no local guesswork)
       const mode = (await resp.json()) as ModeStatus;
       set({ yolo: mode.yolo, planMode: mode.plan_mode });
     } catch {
-      // 回滚乐观值；请求可能已到达服务器，syncMode 对账真实状态
+      // Roll back the optimistic value; the request may have reached the server, so syncMode reconciles the real state
       set({ planMode: !on });
       get().syncMode();
     }
@@ -681,7 +689,7 @@ export const useApp = create<AppState>((set, get) => ({
         effort: mode.reasoning_effort,
       });
     } catch {
-      // 静默失败：下次对账时机（对话结束 / 页面可见 / 切项目）重试
+      // Fail silently: retry at the next reconcile point (turn end / page visible / project switch)
     }
   },
 
@@ -718,9 +726,9 @@ export const useApp = create<AppState>((set, get) => ({
       set({ showWorkdirPicker: false });
       return;
     }
-    // 运行中的请求先中断，避免事件串台到新项目视图。
-    // 先断开 store 里的 sse 引用再 abort：sendMessage 的 finally 检测到
-    // 非活跃流即跳过清理与重拉（见 sendMessage）
+    // Interrupt any in-flight request first, avoiding events leaking into the new project view.
+    // Detach the sse reference in the store before aborting: sendMessage's finally detects
+    // a non-active stream and skips cleanup and re-fetch (see sendMessage)
     const active = get().sse;
     if (active) {
       set({ isRunning: false, sse: null, runStartedAt: null });
@@ -746,11 +754,11 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       localStorage.setItem(LAST_WORKDIR_KEY, dir);
     } catch {
-      // 忽略持久化失败
+      // Ignore persistence failure
     }
     await get().loadSessions();
     get().loadCommands().catch(() => {});
-    // 切项目后对账全局模式（模式跨项目保持，由服务器保证一致）
+    // Reconcile global modes after switching projects (modes persist across projects, consistency is guaranteed by the server)
     get().syncMode();
   },
 
@@ -769,8 +777,8 @@ export const useApp = create<AppState>((set, get) => ({
   },
 }));
 
-/** 是否有全局弹窗打开（权限确认 / 提问 / 模型与推理等级菜单 / 添加模型 / 项目选择）。
- *  视图级 Esc 处理需让位于弹窗关闭，避免一次 Esc 同时关弹窗和切换视图 */
+/** Whether any global dialog is open (permission confirm / ask user / model & reasoning effort menu / add model / project picker).
+ *  View-level Esc handling must yield to closing dialogs, so a single Esc never both closes a dialog and switches views */
 export function anyDialogOpen(): boolean {
   const s = useApp.getState();
   return (

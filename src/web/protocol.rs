@@ -1,17 +1,23 @@
-//! Web 前后端 JSON 协议（前端契约）。
+//! Web frontend/backend JSON protocol (frontend contract).
 //!
-//! `ServerEvent` = SSE 推送（后端 → 前端），`#[serde(tag = "type")]`；
-//! 请求体结构对应各 REST 端点。
+//! `ServerEvent` = SSE push events (backend → frontend), with `#[serde(tag = "type")]`;
+//! Request body structs correspond to the REST endpoints.
 
 use serde::{Deserialize, Serialize};
 
 use crate::agent::event::{QuestionInfo, TaskStatus};
 
-// ── SSE 推送事件（后端 → 前端）───────────────────────────────
+// ── SSE push events (backend → frontend) ───────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    /// Effective session ID of this turn. Emitted when the request omits
+    /// session_id and the backend creates/reuses one, so the frontend can
+    /// sync its session state.
+    SessionStarted {
+        session_id: String,
+    },
     AgentChunk {
         text: String,
     },
@@ -27,7 +33,7 @@ pub enum ServerEvent {
         prompt_tokens: u32,
         completion_tokens: u32,
         cached_tokens: u32,
-        /// 模型上下文窗口大小（供前端展示上下文占用比例）
+        /// Model context window size (lets the frontend display context usage ratio)
         context_window: u32,
     },
     ToolCallStart {
@@ -35,7 +41,7 @@ pub enum ServerEvent {
         arguments: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent: Option<String>,
-        /// 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例）
+        /// Index of the source task in the tasks array (distinguishes instances when same-named subagents run concurrently)
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_index: Option<usize>,
     },
@@ -60,33 +66,33 @@ pub enum ServerEvent {
         request_id: String,
         questions: Vec<QuestionInfo>,
     },
-    /// 会话内信息性提示
+    /// Informational notice within the session
     Notice {
         text: String,
     },
-    /// 一次 LLM 请求失败，即将自动重试。
-    /// 前端语义：丢弃末尾流式渲染内容（失败尝试的部分输出不进入上下文），
-    /// 显示重试提示；重试成功后新内容从头流式输出。
+    /// An LLM request failed and is about to be retried automatically.
+    /// Frontend semantics: discard the trailing streamed content (partial output from the failed attempt
+    /// does not enter the context) and show a retry notice; after a successful retry, new content streams from scratch.
     AgentRetry {
-        /// 即将进行的重试序号（1 起始）
+        /// 1-based sequence number of the upcoming retry
         attempt: u32,
-        /// 重试次数上限
+        /// Maximum retry count
         max_retries: u32,
-        /// 重试前退避等待（ms）
+        /// Backoff wait before retry (ms)
         delay_ms: u64,
-        /// 失败原因摘要
+        /// Summary of the failure reason
         reason: String,
     },
-    /// 压缩开始（对应 TUI 的 CompactStreaming 状态行）
+    /// Compaction started (maps to the TUI CompactStreaming status line)
     CompactStart {
         text: String,
     },
     CompactComplete {
         compacted_count: usize,
-        /// 压缩耗时（ms）
+        /// Compaction duration (ms)
         total_ms: u64,
-        /// 压缩后上下文 token 估算（对齐 TUI set_session_usage(estimated, 0)；
-        /// 无 usage 数据时为 None，前端跳过上下文计量更新）
+        /// Estimated context tokens after compaction (align with TUI set_session_usage(estimated, 0);
+        /// None when no usage data, in which case the frontend skips the context usage update)
         #[serde(skip_serializing_if = "Option::is_none")]
         context_tokens: Option<u32>,
     },
@@ -103,39 +109,39 @@ pub fn status_str(status: &TaskStatus) -> &'static str {
     }
 }
 
-// ── 用量统计（GET /api/stats）────────────────────────────────
+// ── Usage stats (GET /api/stats) ────────────────────────────────
 
-/// 用量统计响应：窗口内汇总 + 全量汇总 + 分维度聚合。
-/// 复用 storage 层的 Serialize 结构（UsageSummary/DailyUsage/ModelUsage/UsageRecord）。
+/// Usage stats response: in-window summary + all-time summary + per-dimension aggregation.
+/// Reuses the storage layer's Serialize structs (UsageSummary/DailyUsage/ModelUsage/UsageRecord).
 #[derive(Debug, Serialize)]
 pub struct StatsResponse {
-    /// 统计窗口（天；0 = 全部）
+    /// Stats window (days; 0 = all)
     pub days: u32,
-    /// 窗口内汇总
+    /// In-window summary
     pub summary: crate::storage::UsageSummary,
-    /// 全量汇总（不受 days 限制）
+    /// All-time summary (not limited by days)
     pub total: crate::storage::UsageSummary,
     pub daily: Vec<crate::storage::DailyUsage>,
     pub by_model: Vec<crate::storage::ModelUsage>,
     pub recent: Vec<crate::storage::UsageRecord>,
 }
 
-// ── 请求体（前端 → 后端）─────────────────────────────────────
+// ── Request bodies (frontend → backend) ──────────────────────────
 
-/// 用户消息携带的图片附件（前端以 data URL 上传）。
+/// Image attachments carried by the user message (uploaded by the frontend as data URLs).
 #[derive(Debug, Deserialize)]
 pub struct ChatAttachment {
     pub mime: String,
-    /// `data:<mime>;base64,<data>` 完整 data URL
+    /// Full data URL in the form `data:<mime>;base64,<data>`
     pub data_url: String,
 }
 
-/// @ 提及元数据：`start`/`end` 为 content 中的 Unicode 码点偏移
+/// @ mention metadata: `start`/`end` are Unicode code point offsets into content
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChatMention {
-    /// 起始码点偏移（token 含前缀 `@`）
+    /// Start code point offset (token includes the `@` prefix)
     pub start: usize,
-    /// 结束码点偏移（不含）
+    /// End code point offset (exclusive)
     pub end: usize,
     pub kind: String,
 }
@@ -190,8 +196,8 @@ pub struct YoloRequest {
     pub enabled: bool,
 }
 
-/// 全局模式状态（`GET /api/mode` 及 yolo/plan-mode/reasoning-effort 设置响应体）。
-/// 前端契约：`web/src/runtime/types.ts` 的 `ModeStatus` 接口。
+/// Global mode status (response body of `GET /api/mode` and of the yolo/plan-mode/reasoning-effort setters).
+/// Frontend contract: the `ModeStatus` interface in `web/src/runtime/types.ts`.
 #[derive(Debug, Serialize)]
 pub struct ModeStatus {
     pub yolo: bool,
@@ -199,7 +205,7 @@ pub struct ModeStatus {
     pub reasoning_effort: crate::agent::ReasoningEffort,
 }
 
-/// 设置思考强度（POST /api/reasoning-effort）
+/// Set reasoning effort (POST /api/reasoning-effort)
 #[derive(Debug, Deserialize)]
 pub struct EffortRequest {
     pub effort: crate::agent::ReasoningEffort,
@@ -212,37 +218,37 @@ pub struct ValidateWorkdirRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SwitchModelRequest {
-    /// 模型选择器，格式 provider/model（全局切换，写回 config.toml）
+    /// Model selector, format provider/model (global switch, written back to config.toml)
     pub selector: String,
 }
 
-/// 添加自定义模型（POST /api/models/custom）。对齐 TUI AddModelForm：
-/// 已配置 provider 复用凭据（base_url/api_key 可省），新建 provider 两者必填。
+/// Add a custom model (POST /api/models/custom). Align with TUI AddModelForm:
+/// an existing provider reuses its credentials (base_url/api_key optional); a new provider requires both.
 #[derive(Debug, Deserialize)]
 pub struct CreateModelRequest {
-    /// 目标 provider id；已存在时复用其凭据，不存在时新建（需 base_url + api_key）
+    /// Target provider id; reuses its credentials if it exists, creates it otherwise (needs base_url + api_key)
     pub provider_id: String,
-    /// 仅新建 provider 时需要；预定义 provider 可省（用预定义 base_url）
+    /// Only needed when creating a new provider; optional for predefined providers (their predefined base_url is used)
     #[serde(default)]
     pub base_url: Option<String>,
-    /// 仅新建 provider 时需要
+    /// Only needed when creating a new provider
     #[serde(default)]
     pub api_key: Option<String>,
-    /// 模型 ID（如 qwen3-235b-a22b）
+    /// Model ID (e.g. qwen3-235b-a22b)
     pub model_id: String,
-    /// 上下文窗口大小，缺省 131072 (128K)
+    /// Context window size, defaults to 131072 (128K)
     #[serde(default)]
     pub context_window: Option<u32>,
 }
 
-/// 删除自定义模型（DELETE /api/models/custom）
+/// Delete a custom model (DELETE /api/models/custom)
 #[derive(Debug, Deserialize)]
 pub struct DeleteModelRequest {
-    /// 模型选择器，格式 provider/model
+    /// Model selector, format provider/model
     pub selector: String,
 }
 
-/// 删除自定义 provider（DELETE /api/providers，整条含凭据与全部模型）
+/// Delete a custom provider (DELETE /api/providers, the whole entry including credentials and all models)
 #[derive(Debug, Deserialize)]
 pub struct DeleteProviderRequest {
     pub provider_id: String,
@@ -254,10 +260,10 @@ pub struct CreateSkillRequest {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// SKILL.md 正文（frontmatter 之后）
+    /// SKILL.md body (after frontmatter)
     #[serde(default)]
     pub content: String,
-    /// "global"（默认，~/.hailux/skills）| "project"（<work_dir>/.hailux/skills）
+    /// "global" (default, ~/.hailux/skills) | "project" (<work_dir>/.hailux/skills)
     #[serde(default)]
     pub scope: String,
 }
@@ -265,9 +271,9 @@ pub struct CreateSkillRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateSkillRequest {
     pub work_dir: Option<String>,
-    /// 目标 SKILL.md 绝对路径（GET /api/skills 返回的 location）
+    /// Absolute path of the target SKILL.md (the location returned by GET /api/skills)
     pub location: String,
-    /// 新名称（写入 frontmatter；发现机制按 frontmatter name 索引）
+    /// New name (written into frontmatter; the discovery mechanism indexes by frontmatter name)
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -278,11 +284,11 @@ pub struct UpdateSkillRequest {
 #[derive(Debug, Deserialize)]
 pub struct DeleteSkillRequest {
     pub work_dir: Option<String>,
-    /// 目标 SKILL.md 绝对路径（删除其所在技能目录）
+    /// Absolute path of the target SKILL.md (its skill directory gets deleted)
     pub location: String,
 }
 
-// ── 响应体（后端 → 前端）─────────────────────────────────────
+// ── Response bodies (backend → frontend) ─────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct SessionInfo {
@@ -305,35 +311,35 @@ pub struct ModelInfo {
     pub model_id: String,
     pub display: String,
     pub active: bool,
-    /// 上下文窗口大小（解析失败如未配置 provider 时缺省）
+    /// Context window size (absent when parsing fails, e.g. provider not configured)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-    /// 可删除（用户自定义添加；预定义模型不可删，会被自动合并回来）
+    /// Deletable (user-added; predefined models cannot be deleted and are merged back automatically)
     pub deletable: bool,
-    /// provider 是否为预定义（预定义 provider 不可整条删除）
+    /// Whether the provider is predefined (predefined providers cannot be deleted as a whole)
     pub provider_predefined: bool,
-    /// provider 未配置 API Key（需 setup 后才可使用）
+    /// Provider has no API Key configured (must be set up before use)
     pub needs_setup: bool,
 }
 
-/// 已配置 provider 条目（GET /api/providers；添加模型时选择目标 provider 用）
+/// Configured provider entry (GET /api/providers; used to pick a target provider when adding a model)
 #[derive(Debug, Serialize)]
 pub struct ProviderInfoDto {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    /// 预定义 provider（base_url 来自预定义表，新建模型时无需填写）
+    /// Predefined provider (base_url comes from the predefined table; no need to fill it in when adding a model)
     pub predefined: bool,
-    /// 未配置 API Key（选择后仅需填写 api_key 即可启用）
+    /// No API Key configured (after selecting, just fill in api_key to enable)
     pub needs_setup: bool,
 }
 
-/// 斜杠命令条目（GET /api/commands）
+/// Slash command entry (GET /api/commands)
 #[derive(Debug, Serialize)]
 pub struct CommandInfoDto {
     pub name: String,
     pub description: String,
-    /// "prompt"（后端展开为完整提示词）| "ui"（前端本地处理）
+    /// "prompt" (expanded into the full prompt by the backend) | "ui" (handled locally by the frontend)
     pub kind: String,
 }
 
@@ -341,42 +347,42 @@ pub struct CommandInfoDto {
 pub struct SkillInfoDto {
     pub name: String,
     pub description: String,
-    /// SKILL.md 绝对路径（已剥离 Windows verbatim 前缀）
+    /// Absolute path of SKILL.md (Windows verbatim prefix stripped)
     pub location: String,
-    /// "global"（~/.hailux/skills）| "project"（<work_dir>/.hailux/skills）
+    /// "global" (~/.hailux/skills) | "project" (<work_dir>/.hailux/skills)
     pub scope: String,
-    /// SKILL.md 正文（frontmatter 之后）
+    /// SKILL.md body (after frontmatter)
     pub content: String,
-    /// 技能目录内全部文件（含 SKILL.md，相对路径 + 字节大小）
+    /// All files in the skill directory (including SKILL.md; relative path + byte size)
     #[serde(default)]
     pub files: Vec<SkillFileDto>,
 }
 
-/// 技能目录内的文件条目
+/// A file entry inside the skill directory
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillFileDto {
-    /// 相对于技能目录的路径（`/` 分隔）
+    /// Path relative to the skill directory (`/`-separated)
     pub path: String,
-    /// 字节大小
+    /// Size in bytes
     pub size: u64,
 }
 
-/// GET /api/skills/file 响应体
+/// Response body of GET /api/skills/file
 #[derive(Debug, Serialize)]
 pub struct SkillFileContentDto {
-    /// 相对于技能目录的路径
+    /// Path relative to the skill directory
     pub path: String,
-    /// 文件文本内容（非 UTF-8 文件为有损转换）
+    /// File text content (lossy conversion for non-UTF-8 files)
     pub content: String,
 }
 
-/// MCP 工具摘要（名称 + 描述 + 参数 JSON Schema）
+/// MCP tool summary (name + description + parameter JSON Schema)
 #[derive(Debug, Clone, Serialize)]
 pub struct McpToolInfo {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// 参数 JSON Schema（object 类型，含 properties / required）；可能缺失
+    /// Parameter JSON Schema (object type with properties / required); may be missing
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub schema: serde_json::Value,
 }
@@ -398,16 +404,16 @@ pub struct McpServerInfo {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: std::collections::BTreeMap<String, String>,
-    /// 未连接时的错误信息（连接中 / 失败原因）
+    /// Error message when not connected (connecting / failure reason)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// 已连接服务器的工具列表（名称 + 描述）
+    /// Tool list of the connected server (name + description)
     #[serde(default)]
     pub tool_details: Vec<McpToolInfo>,
 }
 
-/// 创建 MCP 服务器（POST /api/mcp）。
-/// transport = "stdio" 时须提供 command；"http" 时须提供 url。
+/// Create an MCP server (POST /api/mcp).
+/// command is required when transport = "stdio"; url is required when "http".
 #[derive(Debug, Deserialize)]
 pub struct CreateMcpServerRequest {
     pub name: String,
@@ -424,7 +430,7 @@ pub struct CreateMcpServerRequest {
     pub headers: std::collections::BTreeMap<String, String>,
 }
 
-/// 更新 MCP 服务器（PUT /api/mcp）。按 name 定位；new_name 可选改名。
+/// Update an MCP server (PUT /api/mcp). Located by name; new_name optionally renames it.
 #[derive(Debug, Deserialize)]
 pub struct UpdateMcpServerRequest {
     pub name: String,
@@ -443,7 +449,7 @@ pub struct UpdateMcpServerRequest {
     pub headers: std::collections::BTreeMap<String, String>,
 }
 
-/// 删除 MCP 服务器（DELETE /api/mcp）
+/// Delete an MCP server (DELETE /api/mcp)
 #[derive(Debug, Deserialize)]
 pub struct DeleteMcpServerRequest {
     pub name: String,
