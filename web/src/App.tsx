@@ -23,19 +23,24 @@ import { McpManager } from "./components/mcp-manager";
 import { StatsView } from "./components/stats-view";
 import { cn, fmtTokens } from "./lib/utils";
 
+/** 占用环与百分比的共用配色：≥90% 红 / ≥80% 黄 / 正常计量绿 */
+function ringColor(pct: number | null): string {
+  const ratio = pct === null ? 0 : Math.min(pct, 1);
+  return pct === null
+    ? "text-muted-foreground/40"
+    : ratio >= 0.9
+      ? "text-destructive"
+      : ratio >= 0.8
+        ? "text-warning"
+        : "text-meter-cache";
+}
+
 /** 上下文占用环形指示（16px）：底环 muted + 进度环 accent，中心不留字（数值在旁边） */
 function ContextRing({ pct }: { pct: number | null }) {
   const r = 6;
   const c = 2 * Math.PI * r;
   const ratio = pct === null ? 0 : Math.min(pct, 1);
-  const color =
-    pct === null
-      ? "text-muted-foreground/40"
-      : ratio >= 0.9
-        ? "text-destructive"
-        : ratio >= 0.8
-          ? "text-warning"
-          : "text-meter-cache";
+  const color = ringColor(pct);
   return (
     <svg
       viewBox="0 0 16 16"
@@ -193,10 +198,15 @@ export default function App() {
                 {fmtTokens(completionTokens)}
               </span>
               <span
-                className="flex cursor-default items-center"
+                className="flex cursor-default items-center gap-1"
                 title={`上下文占用 ${fmtTokens(contextUsed)}${contextWindow > 0 ? ` / ${fmtTokens(contextWindow)} · ${Math.round((contextPct ?? 0) * 100)}%` : ""}`}
               >
                 <ContextRing pct={contextPct} />
+                {contextPct !== null && (
+                  <span className={ringColor(contextPct)}>
+                    {Math.round(contextPct * 100)}%
+                  </span>
+                )}
               </span>
             </span>
           </div>
