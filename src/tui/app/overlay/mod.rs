@@ -11,6 +11,7 @@ use crate::tui::event::AppEvent;
 mod effort;
 mod mcp;
 mod model;
+pub(super) mod queue;
 mod setup;
 mod skills;
 mod stats;

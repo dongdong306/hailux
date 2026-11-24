@@ -14,7 +14,10 @@ use async_openai::{
 };
 use futures_util::StreamExt;
 
-use super::event::{CompactUsage, CoreEvent, CoreEventTx, TaskStatus};
+use super::event::{
+    CompactUsage, CoreEvent, CoreEventTx, InterjectSlot, Interjection, TaskStatus,
+    deliver_interjection,
+};
 use super::media::Attachment;
 use super::models::{
     CompatibleChatCompletionRequestMessage, CompatibleCreateChatCompletionRequestArgs,
@@ -34,34 +37,30 @@ pub use messages::build_user_message;
 use messages::{ensure_tool_call_parity, strip_media_for_compaction};
 use stream::{AgentStreamState, finalize_messages, run_stream_loop};
 
-/// 取消标志轮询间隔。通过定时 sleep 轮询 `AtomicBool` 实现取消，
-/// 该间隔即为取消响应的最大延迟上限。
+/// Bounds the worst-case cancel latency (cancel is a polled `AtomicBool`)
 pub(super) const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Agent，封装了与 LLM 交互的核心逻辑
 pub struct Agent {
     client: Client<OpenAIConfig>,
     tool_registry: ToolRegistry,
     messages: Vec<SharedMessage>,
-    /// API 请求使用的模型 ID（如 `deepseek-chat`）
     model: String,
-    /// 展示用模型名（`provider/model`，与用量统计口径一致）
+    /// Usage stats are keyed by this, not `model`
     model_display: String,
     max_tokens: u32,
-    /// 当前模型是否支持视觉（图片）输入；不支持时附件在请求组装层降级为提示文本
     supports_vision: bool,
-    /// 是否为 DeepSeek/GLM 原生推理接口（决定是否发送私有 `thinking`
-    /// 开关；切换模型时随 resolved 更新）
     native_reasoning: bool,
-    /// 思考强度（请求体顶层 reasoning_effort；跨模型切换保留用户偏好）
     reasoning_effort: ReasoningEffort,
     plan_mode: bool,
     cancel: Arc<AtomicBool>,
     permission: crate::permission::PermissionManager,
     work_dir: String,
     event_hub: super::event::EventHub,
-    /// 瞬态错误（网络/429/5xx/流中断）自动重试策略
     retry: RetryConfig,
+    /// Swapped per chat_stream; a stale sender fails once its run task drops
+    /// the receiver. Shared with SessionManager so delivery skips the session
+    /// lock the runner holds for the whole run.
+    interject_slot: InterjectSlot,
 }
 
 impl Agent {
@@ -94,10 +93,10 @@ impl Agent {
             work_dir: work_dir.to_string(),
             event_hub: super::event::EventHub::new(),
             retry,
+            interject_slot: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
-    /// 事件通道句柄（ask_user / subagent 转发等无法在构造期拿到通道的场景）
     pub fn event_hub(&self) -> &super::event::EventHub {
         &self.event_hub
     }
@@ -106,18 +105,34 @@ impl Agent {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// 取消标志句柄（Web 中断端点不经过会话锁，直接置位）
+    /// Web interrupt endpoint sets this without the session lock
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel.clone()
     }
 
-    /// 开关规划模式。开启后，发给 LLM 的工具列表会过滤掉 edit/write，
-    /// 并在用户消息中注入规划模式只读提示词。
+    pub(crate) fn interject_slot(&self) -> InterjectSlot {
+        self.interject_slot.clone()
+    }
+
+    /// False = no active chat run (channel unset, receiver dropped, run
+    /// cancelling, or the bounded queue is full). Delivery is best-effort:
+    /// `true` only means the interjection was buffered; it is confirmed by
+    /// the `CoreEvent::UserMessage` echo once actually injected, and reported
+    /// via `CoreEvent::InterjectDropped` if the run ends before that.
+    pub fn interject(&self, interjection: Interjection) -> bool {
+        // A cancelling run never drains at a boundary again; rejecting here
+        // lets the caller fall back (TUI keeps the item queued, web turns the
+        // request into a normal send) instead of silently dropping it
+        if self.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        deliver_interjection(&self.interject_slot, interjection)
+    }
+
     pub fn set_plan_mode(&mut self, on: bool) {
         self.plan_mode = on;
     }
 
-    /// 当前是否处于规划模式
     pub fn plan_mode(&self) -> bool {
         self.plan_mode
     }
@@ -139,12 +154,10 @@ impl Agent {
         self.native_reasoning = native_reasoning;
     }
 
-    /// 设置思考强度（下一次 LLM 请求生效）
     pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.reasoning_effort = effort;
     }
 
-    /// 当前思考强度
     pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
     }
@@ -153,9 +166,8 @@ impl Agent {
         &self.permission
     }
 
-    /// 注册一个工具。
-    /// config 中该工具权限类别被 `*` + deny 禁用时直接跳过注册，
-    /// 使工具对模型完全不可见（不可被会话级 always 绕过）。
+    /// Denied by a `*` config rule = never registered: invisible to the
+    /// model and not re-enableable by session-level "always" grants
     pub fn register_tool(&mut self, tool: Box<dyn super::tools::Tool>) {
         if self.permission.is_disabled(tool.permission_category()) {
             return;
@@ -182,7 +194,6 @@ impl Agent {
         );
     }
 
-    /// 提取当前的 system prompt（用于切换会话后恢复）
     pub fn take_system_prompt(&self) -> Option<String> {
         self.messages.iter().find_map(|m| {
             if let CompatibleChatCompletionRequestMessage::System(sys) = m.as_ref() {
@@ -196,13 +207,10 @@ impl Agent {
         })
     }
 
-    /// 清空消息历史（保留 system prompt 的能力交给调用方）
     pub fn clear_messages(&mut self) {
         self.messages.clear();
     }
 
-    /// 流式聊天，通过事件通道将输出发送给 TUI
-    /// 在独立 tokio task 中运行，完成后通过 AgentComplete 事件回传最终消息
     pub fn chat_stream(
         &mut self,
         user_input: &str,
@@ -218,6 +226,16 @@ impl Agent {
         let permission = self.permission.clone();
         let work_dir = self.work_dir.clone();
 
+        // Fresh bounded channel per run: unconsumed interjections from a
+        // previous run are dropped with its receiver (and reported as
+        // `InterjectDropped` by the run's exit paths); the bound keeps a
+        // runaway client from buffering unbounded memory mid-run
+        let (interject_tx, interject_rx) =
+            tokio::sync::mpsc::channel::<Interjection>(super::event::INTERJECT_QUEUE_LIMIT);
+        if let Ok(mut slot) = self.interject_slot.lock() {
+            *slot = Some(interject_tx);
+        }
+
         let mut state = AgentStreamState {
             client,
             tool_registry,
@@ -232,6 +250,8 @@ impl Agent {
             permission,
             work_dir,
             retry: self.retry.clone(),
+            interject_rx,
+            delivered_interject_ids: std::collections::HashSet::new(),
         };
 
         let tx_clone = event_tx.clone();
@@ -255,12 +275,10 @@ impl Agent {
         Ok(())
     }
 
-    /// 流式聊天完成后，同步消息历史
     pub fn sync_messages(&mut self, messages: Vec<SharedMessage>) {
         self.messages = messages;
     }
 
-    /// 返回非 System 消息的数量（用于判断是否可以压缩）
     pub fn messages_excluding_system_count(&self) -> usize {
         self.messages
             .iter()
@@ -273,7 +291,6 @@ impl Agent {
             .count()
     }
 
-    /// 应用压缩结果：保留 System 消息，替换其余为摘要 User 消息
     pub fn apply_compaction(&mut self, summary: &str) {
         self.messages.retain(|m| {
             matches!(
@@ -292,8 +309,6 @@ impl Agent {
         ));
     }
 
-    /// 启动压缩 LLM 调用（无工具），流式输出摘要。
-    /// 摘要 chunk 通过 `CompactChunk` 事件发送，完成后发送 `CompactComplete`。
     pub fn request_compaction(
         &self,
         event_tx: CoreEventTx,
@@ -314,9 +329,10 @@ impl Agent {
             })
             .map(strip_media_for_compaction)
             .collect();
-        // 压缩请求虽不带 tools，但严格 Provider 仍校验 tool_calls/tool 配对：
-        // 悬挂序列会让 /compact 直接 400。复用与对话请求相同的净化
-        //（宽松 Provider 时代遗留的中段悬挂，DB 修复只扫尾部，覆盖不到这里）
+        // No tools on the compaction request, but strict providers still
+        // validate tool_calls/tool pairing — a dangling sequence would 400
+        // the whole /compact. The DB repair sweep only covers the tail, so
+        // mid-sequence danglers must be fixed here.
         let conversation = ensure_tool_call_parity(&conversation);
 
         if conversation.len() < 2 {
@@ -346,9 +362,10 @@ impl Agent {
         ));
 
         let tx = event_tx.clone();
-        // 安全约定：chat_stream 与 request_compaction 共享同一个 cancel 标志。
-        // 不会并发运行：TUI 层 compact_conversation() 会检查 is_processing，
-        // 确保流式对话进行中不会触发压缩，反之亦然。
+        // Safety contract: chat_stream and request_compaction share one
+        // cancel flag and never run concurrently — compact_conversation()
+        // checks is_processing in the UI layer so neither can start while
+        // the other is active.
         self.cancel.store(false, Ordering::Relaxed);
         let cancel = self.cancel.clone();
         let retry_cfg = self.retry.clone();
@@ -363,8 +380,9 @@ impl Agent {
                 b
             };
 
-            // 压缩请求静默重试（无 UI 重置语义）：失败尝试的部分摘要丢弃，
-            // 全部用尽才上报 CompactError
+            // Silent retry for the compaction request (no UI reset semantics):
+            // partial summaries of failed attempts are dropped; CompactError
+            // is reported only when all attempts are exhausted
             let mut retry_no: u32 = 0;
             let outcome: Result<(String, Option<CompactUsage>), String> = loop {
                 let request = match builder.build() {
@@ -448,8 +466,9 @@ impl Agent {
     }
 }
 
-/// 压缩请求的瞬态错误重试：可重试且未超限时退避等待后返回 `None`
-/// （调用方 `continue` 重发）；否则返回错误消息（不可重试 / 次数用尽 / 取消）。
+/// Retry a transient compaction error: back off and return `None` (caller
+/// re-issues the request) while retryable and under the limit; otherwise
+/// return the error message (non-retryable / exhausted / cancelled).
 async fn compact_retry(
     cfg: &RetryConfig,
     retry_no: &mut u32,

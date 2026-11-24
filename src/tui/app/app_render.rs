@@ -114,6 +114,17 @@ impl App {
             should_auto_scroll: self.should_auto_scroll,
             last_total_lines: self.last_total_lines,
             is_processing: self.is_processing,
+            queued: self
+                .queue
+                .iter()
+                .map(|q| q.text.replace('\n', " "))
+                .collect::<Vec<_>>(),
+            cursor_row: cursor_visual_row,
+            cursor_col: cursor_visual_col,
+            cursor_blink_on: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| (d.as_millis() % 1000) < 500)
+                .unwrap_or(true),
             model_name: &self.resolved.display,
             input_scroll_row: self.input.input_scroll_row(),
             input_area_height,
@@ -137,8 +148,32 @@ impl App {
         self.scroll_offset = result.scroll_offset;
         self.last_total_lines = result.total_lines;
 
+        // IME anchor: move the (hidden) terminal cursor to the fake input
+        // cursor so the candidate window follows it. Do NOT subtract the
+        // queue strip height here: messages is a Min(3) flex area that the
+        // strip squeezes upward, and the input stays pinned to the bottom
+        self.render.ime_anchor = if matches!(self.state, AppState::Chat) {
+            let gap_height: u16 = 0;
+            let status_height: u16 = 1;
+            let input_content_y = area.y
+                + area
+                    .height
+                    .saturating_sub(input_area_height + gap_height + status_height)
+                + 1;
+            let display_row = cursor_visual_row
+                .saturating_sub(self.input.input_scroll_row())
+                .min(visible_input_rows - 1);
+            let display_col = cursor_visual_col.min(area.width.saturating_sub(3));
+            Some((area.x + 1 + display_col, input_content_y + display_row))
+        } else {
+            None
+        };
+
         let show_cursor = match &self.state {
-            AppState::Chat => !self.is_processing,
+            // Chat uses the fake in-input cursor (native cursor hidden) to
+            // avoid position drift/flicker from the queue strip and prefix
+            // animation
+            AppState::Chat => false,
             AppState::SessionPicker { .. }
             | AppState::ModelPicker { .. }
             | AppState::EffortPicker { .. }
@@ -148,6 +183,7 @@ impl App {
             | AppState::McpDetail { .. }
             | AppState::McpItemDetail { .. }
             | AppState::Tasks { .. }
+            | AppState::QueueManager { .. }
             | AppState::TaskDetail { .. }
             | AppState::Stats { .. }
             | AppState::Setup(_) => false,
@@ -296,6 +332,15 @@ impl App {
                 selected_index: *selected_index,
             };
             viewer.render(area, frame.buffer_mut());
+        }
+
+        if let AppState::QueueManager { selected_index } = &self.state {
+            super::overlay::queue::render_queue_manager(
+                area,
+                frame.buffer_mut(),
+                &self.queue,
+                *selected_index,
+            );
         }
 
         if let AppState::TaskDetail {

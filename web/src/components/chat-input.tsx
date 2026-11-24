@@ -1,20 +1,21 @@
-// 输入区：wendao Composer 同构卡片 —— Enter 发送 / Shift+Enter 换行 / 粘贴保护 / 输入历史 / 双击 Esc 中断 / Shift+Tab Plan
-// @ 文件提及补全：对齐 TUI 语义（chat_input.rs）—— `@` 前须为行首/空白、query 内不含空白；
-// 目录结果带尾随 `/`，选中插入 `@rel `，发送时展开为 `@绝对路径`
-// / 斜杠命令补全：prompt 型（/init、自定义命令）发送原文由后端展开；
-// ui 型（/compact）本地分发。其余 UI 命令（/new /sessions /skills /mcp 等）Web 端已有界面入口，不提供
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  ChevronDown,
   ClipboardList,
+  ListPlus,
   Loader2,
+  MessageCircle,
+  Pencil,
   Square,
   Terminal,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
 import { anyDialogOpen, useApp } from "../store/app-store";
 import type { ChatAttachment, ChatMention, CommandInfo } from "../runtime/types";
+import type { DeferredSettingAction } from "../store/types";
 import { cn } from "../lib/utils";
 import { MentionIcon } from "./mention-icon";
 import { ModelEffortMenu } from "./model-effort-menu";
@@ -23,11 +24,9 @@ function utf16ToCharIndex(text: string, u16Idx: number): number {
   return [...text.slice(0, u16Idx)].length;
 }
 
-/** 单张待发送附件大小上限（10 MB，对齐后端 ATTACHMENT_MAX_BYTES） */
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
-/** 单条消息附件数量上限（对齐后端） */
 const ATTACHMENT_MAX_COUNT = 6;
-/** 受支持的图片类型（对齐后端 is_supported_image_mime，SVG/BMP 等后端会 400） */
+/** Supported image types (mirrors backend is_supported_image_mime; SVG/BMP etc. 400) */
 const SUPPORTED_IMAGE_MIMES = new Set([
   "image/png",
   "image/jpeg",
@@ -35,7 +34,6 @@ const SUPPORTED_IMAGE_MIMES = new Set([
   "image/webp",
 ]);
 
-/** 从文件读取 data URL 附件（仅图片，超出大小上限时返回带错误的结果） */
 function fileToAttachment(file: File): Promise<ChatAttachment> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -46,7 +44,6 @@ function fileToAttachment(file: File): Promise<ChatAttachment> {
   });
 }
 
-/** 解析光标前输入中的 `@query` 片段；无有效触发时返回 null（query 可为空串） */
 function fileMentionQuery(beforeCursor: string): string | null {
   const atIdx = beforeCursor.lastIndexOf("@");
   if (atIdx < 0) return null;
@@ -57,12 +54,25 @@ function fileMentionQuery(beforeCursor: string): string | null {
   return query;
 }
 
-/**
- * 解析斜杠命令触发：输入以 `/` 开头且光标前无空白（正在输入首 token）时返回命令前缀（不含 `/`）。
- */
 function slashCommandQuery(beforeCursor: string): string | null {
   if (!beforeCursor.startsWith("/") || /\s/.test(beforeCursor)) return null;
   return beforeCursor.slice(1);
+}
+
+function parseSettingAction(
+  name: string,
+  args: string,
+): DeferredSettingAction | null {
+  if (name === "plan" || name === "yolo" || name === "compact") {
+    return { kind: name };
+  }
+  if (name === "effort") {
+    const v = args.trim().toLowerCase();
+    return v === "low" || v === "high" || v === "max"
+      ? { kind: "effort", value: v }
+      : null;
+  }
+  return null;
 }
 
 interface MentionState {
@@ -112,18 +122,14 @@ export function ChatInput() {
   const [mention, setMention] = useState<MentionState | null>(null);
   const [slash, setSlash] = useState<SlashState | null>(null);
   const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
-  /** 附件被忽略的提示（超限/类型不支持），提交或再次粘贴时清除 */
   const [imageNotice, setImageNotice] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionListRef = useRef<HTMLDivElement>(null);
   const slashListRef = useRef<HTMLDivElement>(null);
   const mentionTimer = useRef<number | null>(null);
   const mentionAbort = useRef<AbortController | null>(null);
-  /** Esc 关闭时的触发片段（`@query`），文本再次变化前不重新打开 */
   const mentionDismissed = useRef<string | null>(null);
-  /** 斜杠命令下拉 Esc 关闭片段（`/query`），语义同上 */
   const slashDismissed = useRef<string | null>(null);
-  /** picker 选中记录：`@rel` 展示 → 绝对路径，发送时替换 */
   const pendingMentions = useRef(new Map<string, string>());
   const mentionTokens = useRef(new Set<string>());
   const [mentionRanges, setMentionRanges] = useState<MentionRange[]>([]);
@@ -192,7 +198,6 @@ export function ChatInput() {
   const isRunning = useApp((s) => s.isRunning);
   const planMode = useApp((s) => s.planMode);
   const sendMessage = useApp((s) => s.sendMessage);
-  const runCompact = useApp((s) => s.runCompact);
   const interrupt = useApp((s) => s.interrupt);
   const setPlanMode = useApp((s) => s.setPlanMode);
   const escHint = useApp((s) => s.escHint);
@@ -200,6 +205,18 @@ export function ChatInput() {
   const yolo = useApp((s) => s.yolo);
   const setYolo = useApp((s) => s.setYolo);
   const commands = useApp((s) => s.commands);
+  const setView = useApp((s) => s.setView);
+  const setModelMenu = useApp((s) => s.setModelMenu);
+  const deferSetting = useApp((s) => s.deferSetting);
+  const applySettingAction = useApp((s) => s.applySettingAction);
+  const sessionId = useApp((s) => s.sessionId);
+  const queue = useApp((s) => (s.sessionId ? s.queuedMessages[s.sessionId] : undefined)) ?? [];
+  const [queueExpanded, setQueueExpanded] = useState(true);
+  const enqueueMessage = useApp((s) => s.enqueueMessage);
+  const removeQueuedMessage = useApp((s) => s.removeQueuedMessage);
+  const interjectQueued = useApp((s) => s.interjectQueued);
+  const interjectAllQueued = useApp((s) => s.interjectAllQueued);
+  const hasContent = text.trim().length > 0 || pendingImages.length > 0;
 
   useEffect(() => {
     if (!escHint) return;
@@ -207,15 +224,12 @@ export function ChatInput() {
     return () => clearTimeout(t);
   }, [escHint, setEscHint]);
 
-  const sessionId = useApp((s) => s.sessionId);
   const workDir = useApp((s) => s.workDir);
   useEffect(() => {
-    // 切换会话/项目时清空待发送附件与提示，避免图片误发进新会话
     setPendingImages([]);
     setImageNotice(null);
   }, [sessionId, workDir]);
 
-  // 自适应高度：默认 2 行，内容超过后增高，最高 10 行（超出后滚动）
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -229,7 +243,6 @@ export function ChatInput() {
     el.style.height = `${Math.min(max, Math.max(min, el.scrollHeight))}px`;
   }, [text]);
 
-  // 选中项滚动可见
   useEffect(() => {
     mentionListRef.current
       ?.querySelector<HTMLElement>('[data-selected="true"]')
@@ -280,7 +293,7 @@ export function ChatInput() {
             : m,
         );
       } catch {
-        // 请求被后续输入取消 —— 忽略
+        // Aborted/stale mention search — the next keystroke reschedules
       }
     }, 120);
   };
@@ -312,7 +325,6 @@ export function ChatInput() {
     });
   };
 
-  /** 选中斜杠命令：输入框替换为 `/name `（尾随空格便于直接输入参数） */
   const applyCommand = (cmd: CommandInfo) => {
     const el = textareaRef.current;
     mentionTokens.current.clear();
@@ -326,7 +338,6 @@ export function ChatInput() {
     });
   };
 
-  /** 发送时把 `@rel` 展示替换为 `@abs`，并采集提及元数据 */
   const expandMentions = (value: string) => {
     let out = value;
     for (const [display, abs] of pendingMentions.current) {
@@ -358,36 +369,105 @@ export function ChatInput() {
     return { out, mentions };
   };
 
-  const submit = () => {
-    if ((!text.trim() && pendingImages.length === 0) || isRunning) return;
+  const enqueueCurrent = () => {
     const { out: value, mentions } = expandMentions(text.trim());
     mentionTokens.current.clear();
-
-    // ui 型斜杠命令本地分发（当前仅 /compact）；prompt 型发送原文由后端展开
-    const firstWord = value.split(/\s+/, 1)[0] ?? "";
-    if (firstWord.startsWith("/")) {
-      const cmd = useApp
-        .getState()
-        .commands.find((c) => c.name === firstWord.slice(1));
-      if (cmd?.kind === "ui") {
-        setTextWithRanges("");
-        setHistoryIndex(null);
-        setDraft("");
-        if (cmd.name === "compact") runCompact().catch(() => {});
-        return;
-      }
-    }
-
     const attachments = pendingImages;
     setTextWithRanges("");
     setPendingImages([]);
     setImageNotice(null);
     setHistoryIndex(null);
     setDraft("");
+    enqueueMessage(value, attachments.length > 0 ? attachments : undefined, mentions);
+  };
+
+  const editQueued = (item: (typeof queue)[number]) => {
+    if (!sessionId) return;
+    if (item.inFlight) return; // delivery pending; editing would duplicate it
+    removeQueuedMessage(sessionId, item.id);
+    mentionTokens.current.clear();
+    setPendingImages(item.images ?? []);
+    setTextWithRanges(item.text);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
+  const runViewCommand = (name: string) => {
+    if (name === "skills") setView("skills");
+    else if (name === "mcp") setView("mcp");
+    else if (name === "stats") setView("stats");
+    else if (name === "models") setModelMenu(true);
+  };
+
+  const pushNotice = (t: string) => {
+    useApp.getState().pushTurnItem({ kind: "notice", text: t });
+  };
+
+  const submit = () => {
+    if (!hasContent) return;
+    const raw = text.trim();
+    const firstWord = raw.split(/\s+/, 1)[0] ?? "";
+    const cmd = firstWord.startsWith("/")
+      ? useApp.getState().commands.find((c) => c.name === firstWord.slice(1))
+      : undefined;
+    const args = raw.slice(firstWord.length).trim();
+
+    const clearInput = () => {
+      setTextWithRanges("");
+      setPendingImages([]);
+      setImageNotice(null);
+      setHistoryIndex(null);
+      setDraft("");
+    };
+
+    if (cmd?.kind === "view") {
+      clearInput();
+      runViewCommand(cmd.name);
+      return;
+    }
+
+    if (cmd?.kind === "setting") {
+      if (cmd.name === "compact" && isRunning) {
+        if (sessionId) {
+          clearInput();
+          deferSetting(sessionId, { kind: "compact" });
+          pushNotice("已暂存 /compact：将在当前任务完成后执行");
+        } else {
+          pushNotice("当前没有活动会话，无法暂存 /compact");
+        }
+        return;
+      }
+      if (cmd.name === "effort" && !args.trim()) {
+        clearInput();
+        setModelMenu(true);
+        return;
+      }
+      const action = parseSettingAction(cmd.name, args);
+      clearInput();
+      if (!action) {
+        pushNotice(
+          cmd.name === "effort"
+            ? "无效的思考强度，可选值 low / high / max"
+            : `无效参数：/${cmd.name} ${args}`,
+        );
+        return;
+      }
+      applySettingAction(action);
+      return;
+    }
+
+    if (isRunning) {
+      enqueueCurrent();
+      return;
+    }
+
+    const { out: value, mentions } = expandMentions(raw);
+    mentionTokens.current.clear();
+
+    const attachments = pendingImages;
+    clearInput();
     sendMessage(value, attachments.length > 0 ? attachments : undefined, mentions);
   };
 
-  /** 追加粘贴/选择的图片附件（类型/数量/大小校验与后端一致） */
   const addImageFiles = async (files: File[]) => {
     const images = files.filter((f) => SUPPORTED_IMAGE_MIMES.has(f.type));
     const rejected = files.length - images.length;
@@ -409,7 +489,7 @@ export function ChatInput() {
           prev.length >= ATTACHMENT_MAX_COUNT ? prev : [...prev, att],
         );
       } catch {
-        // 读取失败：跳过
+        // Read failure: the user already sees the remaining count/notice below
       }
     }
     if (pendingImages.length >= ATTACHMENT_MAX_COUNT) {
@@ -422,7 +502,6 @@ export function ChatInput() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 斜杠命令补全激活时优先接管导航键
     if (slash && slash.items.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -456,7 +535,6 @@ export function ChatInput() {
       }
     }
 
-    // @ 补全激活时优先接管导航键
     if (mention && mention.results.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -538,9 +616,7 @@ export function ChatInput() {
       }
     }
 
-    // 中断（处理中双击 Esc，5 秒窗口）
     if (e.key === "Escape") {
-      // 全局弹窗打开时 Esc 只关弹窗，不进入中断计时
       if (anyDialogOpen()) return;
       if (isRunning) {
         const now = Date.now();
@@ -556,14 +632,23 @@ export function ChatInput() {
       return;
     }
 
-    // Plan 模式切换
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
       setPlanMode(!planMode);
       return;
     }
 
-    // 输入历史（光标在首行/末行时）
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      // Same paste-protection window as plain Enter: a paste ending in an
+      // image+text burst must not instantly interject the whole queue
+      if (Date.now() - pastedAt < 350) {
+        return;
+      }
+      e.preventDefault();
+      if (sessionId && queue.length > 0) void interjectAllQueued(sessionId);
+      return;
+    }
+
     if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       const el = textareaRef.current;
       if (!el) return;
@@ -597,10 +682,11 @@ export function ChatInput() {
       }
     }
 
-    // 粘贴后短窗口内 Enter = 换行（对齐 TUI PasteBurst 语义）
+    // Enter within the short window after a paste = newline (TUI PasteBurst
+    // semantics)
     if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
       if (Date.now() - pastedAt < 350) {
-        return; // 让默认行为插入换行
+        return; // let the default behavior insert the newline
       }
       e.preventDefault();
       submit();
@@ -610,11 +696,97 @@ export function ChatInput() {
   return (
     <div className="shrink-0 px-4 pb-4 pt-2">
       <div className="mx-auto w-full max-w-3xl">
-        {/* 双击 Esc 中断提示（处理中显示） */}
         {escHint && (
           <p className="mb-2 text-center text-[11px] text-muted-foreground/60">
             再按一次 Esc 中断当前任务
           </p>
+        )}
+
+        {queue.length > 0 && (
+          <div className="mx-auto mb-2 w-[94%] rounded-2xl border border-border bg-background shadow-sm">
+            {queue.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setQueueExpanded((v) => !v)}
+                aria-label={queueExpanded ? "收起排队消息" : "展开排队消息"}
+                className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-sm"
+              >
+                <MessageCircle className="size-4 shrink-0 text-muted-foreground" />
+                <span className="font-medium text-foreground">
+                  {queue.length} 条排队消息
+                </span>
+                <ChevronDown
+                  className={cn(
+                    "ml-auto size-4 shrink-0 text-muted-foreground/60 transition-transform",
+                    queueExpanded && "rotate-180",
+                  )}
+                />
+              </button>
+            )}
+            {(queueExpanded || queue.length === 1) && (
+              <div
+                className={cn(
+                  "max-h-48 overflow-y-auto overscroll-contain py-1",
+                  queue.length > 1 && "border-t border-border/60",
+                )}
+              >
+                {queue.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center gap-2 px-3 py-1.5"
+                  >
+                    <MessageCircle className="size-4 shrink-0 text-muted-foreground/60" />
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1 truncate text-sm",
+                        item.inFlight
+                          ? "text-muted-foreground/50"
+                          : "text-foreground/90",
+                      )}
+                    >
+                      {item.text}
+                    </span>
+                    {item.inFlight ? (
+                      <span className="shrink-0 text-xs text-muted-foreground/50">
+                        发送中…
+                      </span>
+                    ) : (
+                      <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground/60">
+                        <button
+                          type="button"
+                          title="编辑（放回输入框）"
+                          onClick={() => editQueued(item)}
+                          className="cursor-pointer rounded-md p-1 hover:bg-muted hover:text-foreground"
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          title="删除"
+                          onClick={() =>
+                            sessionId && removeQueuedMessage(sessionId, item.id)
+                          }
+                          className="cursor-pointer rounded-md p-1 hover:bg-muted hover:text-foreground"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          title="插话发送"
+                          onClick={() =>
+                            sessionId && void interjectQueued(sessionId, item)
+                          }
+                          className="cursor-pointer rounded-md p-1 hover:bg-muted hover:text-foreground"
+                        >
+                          <ArrowUp className="size-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         <div
@@ -625,9 +797,8 @@ export function ChatInput() {
               "focus-within:border-primary/30 focus-within:shadow-md focus-within:shadow-primary/5",
           )}
         >
-          {/* / 斜杠命令补全下拉（外层圆角裁剪，内层滚动 —— 滚动条不戳出圆角） */}
-          {slash && slash.items.length > 0 && (
-            <div className="absolute bottom-full left-2 right-2 z-10 mb-2 overflow-hidden rounded-xl border border-border bg-background shadow-lg">
+        {slash && slash.items.length > 0 && (
+          <div className="absolute bottom-full left-2 right-2 z-10 mb-2 overflow-hidden rounded-xl border border-border bg-background shadow-lg">
               <div ref={slashListRef} className="max-h-60 overflow-y-auto overscroll-contain py-1">
                 {slash.items.map((cmd, i) => (
                   <button
@@ -656,7 +827,6 @@ export function ChatInput() {
             </div>
           )}
 
-          {/* @ 文件提及补全下拉（外层圆角裁剪，内层滚动 —— 滚动条不戳出圆角） */}
           {mention && mention.results.length > 0 && (
             <div className="absolute bottom-full left-2 right-2 z-10 mb-2 overflow-hidden rounded-xl border border-border bg-background shadow-lg">
               <div ref={mentionListRef} className="max-h-60 overflow-y-auto overscroll-contain py-1">
@@ -684,7 +854,6 @@ export function ChatInput() {
             </div>
           )}
 
-          {/* 外层圆角裁剪，内层滚动 —— 滚动条不戳出圆角 */}
           <div
             className="relative overflow-hidden rounded-t-3xl"
             onMouseMove={handleMentionHover}
@@ -695,9 +864,11 @@ export function ChatInput() {
               value={text}
               rows={2}
               placeholder={
-                isRunning
-                  ? "处理中…（双击 Esc 中断）"
-                  : "给 hailux 发送消息..."
+                queue.length > 0
+                  ? "Cmd/Ctrl+Enter 插话发送全部排队消息"
+                  : isRunning
+                    ? "处理中…（双击 Esc 中断；输入内容 Enter 排队发送）"
+                    : "给 hailux 发送消息..."
               }
               className={cn(
                 "relative hlx-input-scroll w-full resize-none overflow-y-auto bg-transparent px-4 pb-1 pt-3.5 text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground/40 [scrollbar-gutter:stable]",
@@ -728,12 +899,10 @@ export function ChatInput() {
                   0,
                   e.target.selectionStart ?? 0,
                 );
-                // / 命令补全触发（首 token 以 / 开头；与 @ 补全互斥）
                 const cmdQuery = slashCommandQuery(beforeCursor);
                 if (cmdQuery !== null) {
                   closeMention();
                   if (`/${cmdQuery}` === slashDismissed.current) {
-                    // Esc 关闭后片段未变 —— 保持关闭
                   } else {
                     slashDismissed.current = null;
                     const items = commands.filter((c) =>
@@ -749,21 +918,21 @@ export function ChatInput() {
                 }
                 setSlash(null);
                 slashDismissed.current = null;
-                // @ 补全触发解析（以光标前文本为准）
                 const query = fileMentionQuery(beforeCursor);
                 if (query === null) {
                   closeMention();
                 } else if (`@${query}` === mentionDismissed.current) {
-                  // Esc 关闭后片段未变 —— 保持关闭
-                } else {
+                                  } else {
                   mentionDismissed.current = null;
                   scheduleMentionSearch(query);
                 }
               }}
               onPaste={(e) => {
                 setPastedAt(Date.now());
-                // 粘贴图片：拦截并转为附件 chips。仅当剪贴板同时没有文本时
-                // 才整体拦截——图文混合时文本走默认插入、图片另行追加
+                // Image paste: intercept and convert to attachment chips, but
+                // only when the clipboard holds no text at all — with mixed
+                // content, text takes the default insertion and images are
+                // appended separately
                 const files = Array.from(e.clipboardData?.files ?? []);
                 const hasImage = files.some((f) =>
                   SUPPORTED_IMAGE_MIMES.has(f.type),
@@ -776,7 +945,7 @@ export function ChatInput() {
               }}
               onKeyDown={onKeyDown}
             />
-            {/* chip 镜像层：padding 与 scrollbar-gutter 须与 textarea 一致，换行点才同步 */}
+            {/* Chip mirror layer: padding and scrollbar-gutter must match the textarea so line wraps stay in sync */}
             <div
               aria-hidden
               className="pointer-events-none absolute inset-0 z-10 overflow-hidden px-4 pb-1 pt-3.5 text-base leading-6 [scrollbar-gutter:stable]"
@@ -799,7 +968,8 @@ export function ChatInput() {
                       !!selRange &&
                       selRange.start < range.end &&
                       selRange.end > range.start;
-                    // chip 本体零 padding：与原生字形逐像素对齐，图标按 `@` 字形位置定位
+                    // Zero padding on the chip itself: pixel-aligns with the
+                    // native glyphs; the icon positions at the `@` glyph
                     return (
                       <span
                         key={seg.key}
@@ -834,7 +1004,6 @@ export function ChatInput() {
             </div>
           </div>
 
-          {/* 图片附件 chips：缩略图 + 移除按钮 */}
           {imageNotice && (
             <div className="px-4 pb-1 pt-1 text-xs text-muted-foreground">
               {imageNotice}
@@ -873,7 +1042,6 @@ export function ChatInput() {
           )}
 
           <div className="flex min-w-0 items-center justify-between gap-2 px-2.5 pb-2.5 pt-0.5">
-            {/* 左侧工具区：Plan / YOLO 开关 */}
             <div className="flex min-w-0 items-center gap-1">
               <button
                 type="button"
@@ -912,36 +1080,45 @@ export function ChatInput() {
               </button>
             </div>
 
-            {/* 右侧：模型 + 推理等级组合控件 / 发送/停止（上下文占用环已移至顶栏右上角） */}
-            <div className="flex shrink-0 items-center gap-1.5">
-              <ModelEffortMenu />
+              <div className="flex shrink-0 items-center gap-1.5">
+                <ModelEffortMenu />
 
-              {/* 发送 / 停止 */}
-              {isRunning ? (
-                <button
-                  type="button"
-                  title="停止（双击 Esc）"
-                  onClick={() => interrupt()}
-                  className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95"
-                >
-                  {escHint ? (
-                    <Loader2 className="size-3.5 animate-spin" />
+                {isRunning ? (
+                  hasContent ? (
+                    <button
+                      type="button"
+                      title="排队发送（Enter）"
+                      onClick={submit}
+                      className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95"
+                    >
+                      <ListPlus className="size-4" />
+                    </button>
                   ) : (
-                    <Square className="size-3.5 fill-current" />
-                  )}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  title="发送（Enter）"
-                  disabled={!text.trim() && pendingImages.length === 0}
-                  onClick={submit}
-                  className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95 disabled:cursor-default disabled:opacity-30"
-                >
-                  <ArrowUp className="size-4" />
-                </button>
-              )}
-            </div>
+                    <button
+                      type="button"
+                      title="停止（双击 Esc）"
+                      onClick={() => interrupt()}
+                      className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95"
+                    >
+                      {escHint ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Square className="size-3.5 fill-current" />
+                      )}
+                    </button>
+                  )
+                ) : (
+                  <button
+                    type="button"
+                    title="发送（Enter）"
+                    disabled={!hasContent}
+                    onClick={submit}
+                    className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-all duration-200 hover:bg-primary/90 active:scale-95 disabled:cursor-default disabled:opacity-30"
+                  >
+                    <ArrowUp className="size-4" />
+                  </button>
+                )}
+              </div>
           </div>
         </div>
       </div>

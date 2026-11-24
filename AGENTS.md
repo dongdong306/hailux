@@ -89,6 +89,16 @@ subagent delegation, and custom slash commands.
   global run-permit semaphore + default work dir + config write lock).
   Disconnect semantics: **SSE loss never interrupts a task** — the only interrupt entry
   is `POST /api/interrupt` (requires session_id). Same session: second run → 409.
+  Mid-run interjection: `POST /api/interject` (409 = no active run) buffers into a
+  per-run `InterjectSlot` channel (bounded, `INTERJECT_QUEUE_LIMIT` = 10 pending),
+  delivered without the session lock; the agent injects at loop boundaries.
+  Contract: `CoreEvent::UserMessage` echoes an injected interjection (persist →
+  publish → advance_durable); `CoreEvent::InterjectDropped` reports one accepted
+  but never injected (transient like `Error` — no DB row, no watermark advance;
+  clients re-queue the item). `client_id` is the echo key end to end (queue item id
+  ↔ optimistic bubble marker); repeats are deduped at the injection point and
+  reported as dropped. Queues are in-memory per surface (TUI session / browser
+  tab) — exit or switch drops them silently.
   Global concurrency cap: `[session] max_concurrent_runs` (default 4, 0 = unlimited) → 429.
   Static assets embedded from `web/dist` via rust-embed, SPA fallback to index.html;
   index.html is `no-cache`, hashed assets immutable.

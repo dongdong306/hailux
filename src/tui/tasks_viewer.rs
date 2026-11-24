@@ -211,8 +211,6 @@ impl<'a> TasksViewer<'a> {
     }
 }
 
-/// 将 subagent 的 StoredMessage 列表转换为主聊天区的 Message 列表，
-/// 以复用 history_cell 渲染管线。
 fn stored_messages_to_chat(messages: &[StoredMessage]) -> Vec<Message> {
     use std::collections::HashMap;
     let mut result = Vec::new();
@@ -226,11 +224,11 @@ fn stored_messages_to_chat(messages: &[StoredMessage]) -> Vec<Message> {
                         text: msg.content.clone(),
                         plan_mode: false,
                         mentions: Vec::new(),
+                        pending_interject: None,
                     });
                 }
             }
             MessageRole::Assistant => {
-                // 推理内容（如果有）先于正文输出
                 if let Some(ref reasoning) = msg.reasoning_content
                     && !reasoning.is_empty()
                 {
@@ -321,7 +319,6 @@ pub fn render_task_detail(
         TaskRunStatus::Error => ("✗", Color::Red),
     };
 
-    // 布局：状态行(1) + 任务ID/描述行(1) + 分割线(1) + 消息区(flex) + 底部提示(1)
     let [header_top, header_bot, divider_area, body_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -331,7 +328,6 @@ pub fn render_task_detail(
     ])
     .areas(area);
 
-    // 第一行：状态图标 + subagent_name + 状态/tokens/model
     let mut top_spans = vec![
         Span::styled(
             format!(" {} ", status_icon),
@@ -369,7 +365,6 @@ pub fn render_task_detail(
 
     Paragraph::new(Line::from(top_spans)).render(header_top, buf);
 
-    // 第二行：task_id + description
     let task_id = entry
         .subsession
         .as_ref()
@@ -393,14 +388,12 @@ pub fn render_task_detail(
 
     Paragraph::new(Line::from(bot_spans)).render(header_bot, buf);
 
-    // 分割线
     let divider_line = Line::from(vec![Span::styled(
         "─".repeat(divider_area.width as usize),
         Style::default().fg(Color::DarkGray),
     )]);
     Paragraph::new(divider_line).render(divider_area, buf);
 
-    // 消息列表（复用 history_cell 管线）
     let scrollbar_width: u16 = 2;
     let text_width = body_area.width.saturating_sub(scrollbar_width);
     let visible_height = body_area.height;
@@ -412,12 +405,11 @@ pub fn render_task_detail(
         history_cell::messages_to_cells(&chat_messages, true)
     };
 
-    // 构建带分隔空行的行列表（每个 cell 后加一个空行，同主聊天区逻辑）
     let mut all_lines: Vec<Line> = Vec::new();
     for cell in &cells {
         let lines = cell.display_lines(text_width);
         all_lines.extend(lines);
-        all_lines.push(Line::from("")); // 消息间分隔
+        all_lines.push(Line::from(""));
     }
 
     if all_lines.is_empty() {
@@ -428,7 +420,6 @@ pub fn render_task_detail(
         )));
     }
 
-    // 背景色填充
     for line in all_lines.iter_mut() {
         if let Some(bg) = line.spans.iter().find_map(|span| match span.style.bg {
             Some(color) if color != Color::Reset => Some(color),
@@ -441,7 +432,6 @@ pub fn render_task_detail(
     let total_lines = all_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height as usize);
     let actual_scroll = (*scroll_offset).min(max_scroll);
-    // 写回 clamp 后的值，防止 PgDown 累积超过上限
     *scroll_offset = actual_scroll;
 
     let visible_lines: Vec<Line> = all_lines
@@ -453,7 +443,6 @@ pub fn render_task_detail(
     let text_area = Rect::new(body_area.x, body_area.y, text_width, visible_height);
     Paragraph::new(visible_lines).render(text_area, buf);
 
-    // 滚动条
     if total_lines > visible_height as usize {
         let scrollbar_area = Rect::new(
             body_area.x + text_width,
@@ -485,7 +474,6 @@ pub fn render_task_detail(
         scrollbar.render(scrollbar_area, buf, &mut scrollbar_state);
     }
 
-    // 底部提示栏
     let help_text = if total_lines > visible_height as usize {
         "↑↓ 切换  PgUp/PgDn 翻页  Esc 返回列表"
     } else {

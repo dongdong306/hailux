@@ -15,24 +15,16 @@
 import type { StoreApi } from "zustand";
 import type { Envelope, ServerEvent } from "../runtime/types";
 import { handleSharedEvent, itemOps } from "./shared-events";
-import type { AppState } from "./types";
+import type { AppState, ChatItem } from "./types";
 
 export type StoreGet = StoreApi<AppState>["getState"];
 export type StoreSet = StoreApi<AppState>["setState"];
 
-/** Latest request's usage snapshot of this turn (attached to the done row in
- * the message footer action bar) */
 interface TurnCtx {
   prompt: number;
   completion: number;
 }
 
-/**
- * Create a run event sink (fed as onEvent into getSse).
- *
- * `initialSession` is the owning session id. The sink is stateful (local seq
- * cursor + turnCtx); stream-manager.ts guarantees a single live instance.
- */
 export function createRunSink(
   initialSession: string,
   get: StoreGet,
@@ -41,11 +33,26 @@ export function createRunSink(
   let bound = initialSession;
   let lastSeq = 0;
   let turnCtx: TurnCtx | null = null;
+  /** Whether the last AgentComplete was clean (RunComplete drains the queue
+   *  only then; interrupted/errored turns keep it for manual handling) */
+  let lastCompleted = false;
+
+  /** Index of the last item that is not a trailing pending-interject
+   *  bubble: those bubbles are not part of the previous turn's output, so
+   *  stream append/freeze must skip them (TUI's turn_output_insert_index) */
+  const lastRealIndex = (list: ChatItem[]) => {
+    let i = list.length - 1;
+    while (i >= 0 && list[i]!.kind === "user" && list[i]!.pendingInterject) {
+      i--;
+    }
+    return i;
+  };
 
   /** Freeze the thinking timer (thinking -> output/tool-call transition;
    * aligns with the TUI's finalize_thinking_ms) */
   const freezeThinking = (ops: ReturnType<typeof itemOps>) => {
-    const last = ops.items[ops.items.length - 1];
+    const i = lastRealIndex(ops.items);
+    const last = i >= 0 ? ops.items[i] : undefined;
     if (last?.kind === "reasoning-streaming") {
       const startedAt = last.thinkStartedAt ?? Date.now();
       ops.patchLast((i) => ({
@@ -77,7 +84,38 @@ export function createRunSink(
         }));
       }
       turnCtx = null;
+      lastCompleted = false;
       return;
+    }
+
+    // UserMessage echo bookkeeping (view-independent):
+    // - dequeue the queue item (covers the in-flight marker design: the item
+    //   stays queued from interject until the echo arrives)
+    // - consume the optimistic marker: a hit means this tab already rendered
+    //   the bubble, only the marker cleanup remains
+    let interjectEchoedLocally = false;
+    if (event.type === "UserMessage") {
+      get().removeQueuedByClientId(bound, event.client_id);
+      const pending = get().pendingInterjectEcho;
+      if (pending[event.client_id]) {
+        const { [event.client_id]: _drop, ...rest } = pending;
+        set({ pendingInterjectEcho: rest });
+        interjectEchoedLocally = true;
+      }
+    }
+    // Accepted-but-dropped bookkeeping (view-independent): release the
+    // in-flight item so it stays queued for a manual resend, and drop the
+    // optimistic marker (the bubble itself is removed below, current view
+    // only — other tabs never rendered it)
+    let interjectDroppedLocally = false;
+    if (event.type === "InterjectDropped") {
+      get().setQueuedInFlight(bound, event.client_id, false);
+      const pending = get().pendingInterjectEcho;
+      if (pending[event.client_id]) {
+        const { [event.client_id]: _drop, ...rest } = pending;
+        set({ pendingInterjectEcho: rest });
+        interjectDroppedLocally = true;
+      }
     }
 
     // Cursor bookkeeping: write the global slot only while the owning session
@@ -90,14 +128,39 @@ export function createRunSink(
     // running server-side; switching back replays via head_seq + subscription.
     if (get().sessionId !== bound) return;
 
-    const ops = itemOps(get, set);
-    const { items, push, patchLast } = ops;
+    // While an optimistic interjection bubble (pendingInterject, echo not
+    // yet arrived) waits at the tail, the previous turn's later output
+    // appends before it — the timeline matches a rebuilt view. The marker is
+    // stripped on echo, restoring append-at-end for the new turn. Stream
+    // lookups also skip trailing bubbles so thinking/answers never get split
+    // into two cards by a bubble.
+    const push = (item: ChatItem) => {
+      const cur = get().items;
+      const at = lastRealIndex(cur) + 1;
+      if (at === cur.length) {
+        set((s) => ({ items: [...s.items, item] }));
+      } else {
+        set((s) => ({
+          items: [...s.items.slice(0, at), item, ...s.items.slice(at)],
+        }));
+      }
+    };
+    const patchLast = (patch: (item: ChatItem) => ChatItem) => {
+      const i = lastRealIndex(get().items);
+      if (i < 0) return;
+      set((s) => ({
+        items: [...s.items.slice(0, i), patch(s.items[i]!), ...s.items.slice(i + 1)],
+      }));
+    };
+    const items = get().items;
+    const ops = { items, push, patchLast };
     if (handleSharedEvent(event, ops, set)) return;
 
     switch (event.type) {
       case "AgentChunk": {
         freezeThinking(ops);
-        const last = items[items.length - 1];
+        const lastIdx = lastRealIndex(items);
+        const last = lastIdx >= 0 ? items[lastIdx] : undefined;
         if (last?.kind === "assistant-streaming") {
           patchLast((i) => ({ ...i, text: (i.text ?? "") + event.text }));
         } else {
@@ -106,7 +169,8 @@ export function createRunSink(
         break;
       }
       case "AgentReasoningChunk": {
-        const last = items[items.length - 1];
+        const lastIdx = lastRealIndex(items);
+        const last = lastIdx >= 0 ? items[lastIdx] : undefined;
         if (last?.kind === "reasoning-streaming") {
           patchLast((i) => ({ ...i, text: (i.text ?? "") + event.text }));
         } else {
@@ -122,19 +186,21 @@ export function createRunSink(
         // Partial output of failed attempts must not enter context: clear the trailing streaming items in sync
         // (align with TUI pop semantics); the notice ends the current acc, retried content starts a new message
         const cur = [...items];
+        let i = lastRealIndex(cur);
         while (
-          cur.length > 0 &&
-          (cur[cur.length - 1]?.kind === "assistant-streaming" ||
-            cur[cur.length - 1]?.kind === "reasoning-streaming")
+          i >= 0 &&
+          (cur[i]!.kind === "assistant-streaming" ||
+            cur[i]!.kind === "reasoning-streaming")
         ) {
-          cur.pop();
+          cur.splice(i, 1);
+          i = lastRealIndex(cur);
         }
         const secs = (event.delay_ms / 1000).toFixed(1);
-        cur.push({
+        set({ items: cur });
+        push({
           kind: "notice",
           text: `请求失败，${secs}s 后进行第 ${event.attempt}/${event.max_retries} 次重试：${event.reason}`,
         });
-        set({ items: cur });
         break;
       }
       case "ToolCallStart":
@@ -194,7 +260,9 @@ export function createRunSink(
         // ctx depends on event order: the backend guarantees UsageUpdate precedes AgentComplete;
         // when the turn has no usage at all (e.g. the first request fails), ctx is null → no context usage shown
         freezeThinking(ops);
-        const last = items[items.length - 1];
+        lastCompleted = event.status === "completed";
+        const lastIdx = lastRealIndex(items);
+        const last = lastIdx >= 0 ? items[lastIdx] : undefined;
         if (last?.kind === "assistant-streaming") {
           patchLast((i) => ({ ...i, kind: "assistant" }));
         }
@@ -208,6 +276,46 @@ export function createRunSink(
         });
         break;
       }
+      case "UserMessage": {
+        // Locally rendered interjection: the echo only strips the bubble's
+        // pendingInterject marker (the bubble is already in the right
+        // timeline spot; later turns resume append-at-end), never re-renders.
+        // Miss (other tab's interjection / replay after reconnect) → render
+        // normally.
+        if (interjectEchoedLocally) {
+          const cid = event.client_id;
+          set((s) => ({
+            items: s.items.map((it) =>
+              it.pendingInterject === cid
+                ? { ...it, pendingInterject: undefined }
+                : it,
+            ),
+          }));
+        } else {
+          push({
+            kind: "user",
+            text: event.content,
+            images: event.attachments?.length ? event.attachments : undefined,
+            mentions: event.mentions?.length ? event.mentions : undefined,
+          });
+        }
+        break;
+      }
+      case "InterjectDropped": {
+        // Never entered the context: remove the optimistic bubble and tell
+        // the user the message is back in the queue
+        if (interjectDroppedLocally) {
+          const cid = event.client_id;
+          set((s) => ({
+            items: s.items.filter((it) => it.pendingInterject !== cid),
+          }));
+          get().pushTurnItem({
+            kind: "notice",
+            text: "插话未送达（任务已中断或结束），消息已放回排队列表",
+          });
+        }
+        break;
+      }
       case "RunComplete": {
         // Sentinel: wrap up the running state. Turn-end side effects live here
         // (event-driven, also fires for observer tabs that didn't submit the run)
@@ -219,7 +327,43 @@ export function createRunSink(
         if (event.abnormal) {
           push({ kind: "error", text: "任务异常终止，请刷新页面重新同步" });
         }
-        // Refresh the session list (title / updated_at); reconcile global modes
+        // Leftover in-flight interjections: echoes arrive at the injection
+        // boundary (before AgentComplete), so anything still pending never
+        // entered the context (interrupted before the boundary / teardown
+        // race). Remove the optimistic bubbles — the message is NOT in the
+        // conversation — and release the queue items; the auto-drain below
+        // resends them as a normal message.
+        const leftoverIds = Object.keys(get().pendingInterjectEcho);
+        if (leftoverIds.length > 0) {
+          set({ pendingInterjectEcho: {} });
+          set((s) => ({
+            items: s.items.filter((it) => !it.pendingInterject),
+          }));
+          set((s) => ({
+            queuedMessages: {
+              ...s.queuedMessages,
+              [bound]: (s.queuedMessages[bound] ?? []).map((q) =>
+                leftoverIds.includes(q.id)
+                  ? { ...q, inFlight: undefined }
+                  : q,
+              ),
+            },
+          }));
+        }
+        // Queue auto-drain (this view's session only; interrupted/errored/
+        // compaction turns keep the queue). Chained: this RunComplete pops
+        // one, its RunComplete pops the next. sendMessage's optimistic items
+        // push + isRunning flip are synchronous before its first await, so
+        // ordering stays deterministic.
+        if (!event.abnormal && lastCompleted) {
+          void get().drainQueuedHead(bound);
+        }
+        // Deferred setting commands (/plan /yolo /effort /compact) apply
+        // after a clean turn; compact waits for an empty queue (mutually
+        // exclusive with the drain chain)
+        if (!event.abnormal && lastCompleted) {
+          get().drainDeferredSettings(bound, !get().queuedMessages[bound]?.length);
+        }
         get().loadSessions().catch(() => {});
         void get().syncMode();
         break;
@@ -253,7 +397,6 @@ export function createRunSink(
       apply(env.event);
       return;
     }
-    // Bare event (unusual frames like the Lagged notice)
     apply(f as unknown as ServerEvent);
   };
 }

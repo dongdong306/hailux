@@ -1,4 +1,3 @@
-// State and view-model types: ChatItem render model, skill/MCP entries, AppState contract
 import type {
   ChatAttachment,
   ChatMention,
@@ -43,10 +42,36 @@ export interface ChatItem {
   ctxCompletionTokens?: number; // Context usage snapshot this run (last request output tokens)
   thinkMs?: number; // Thinking duration (final)
   thinkStartedAt?: number; // Thinking timer start (in progress, epoch ms)
-  /** Image attachments of the user message (data URLs for inline bubble thumbnails) */
   images?: ChatAttachment[];
-  /** @ mention metadata of the user message */
   mentions?: ChatMention[];
+  /** Optimistic interjection bubble: carries the client_id until the
+   *  UserMessage echo. While set, the previous turn's streaming output
+   *  inserts before this bubble (timeline matches a rebuilt view); removed
+   *  on echo or when an InterjectDropped / RunComplete cleanup finds it
+   *  never entered the context. */
+  pendingInterject?: string;
+}
+
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  images?: ChatAttachment[];
+  mentions?: ChatMention[];
+  createdAt: number;
+  /** Delivery in progress (accepted by /api/interject, waiting for the
+   *  UserMessage echo or InterjectDropped release). Blocks double-interject,
+   *  edit and delete; cleared by the echo (item removed), a drop (item
+   *  stays queued) or the RunComplete leftover cleanup. */
+  inFlight?: boolean;
+}
+
+/** A setting-type slash command deferred while running (only /compact is
+ *  staged — it needs a new run; plan/yolo/effort act immediately).
+ *  Applied after RunComplete once the queue drains, so it never races the
+ *  auto-drain run. Toggles read state at apply time, not enqueue time. */
+export interface DeferredSettingAction {
+  kind: "plan" | "yolo" | "effort" | "compact";
+  value?: ReasoningEffort;
 }
 
 /** Global mode state (GET /api/mode and yolo/plan-mode/reasoning-effort set response body).
@@ -60,11 +85,8 @@ export interface ModeStatus {
 /** Reasoning effort level (top-level reasoning_effort in request body; backend contract ReasoningEffort enum) */
 export type ReasoningEffort = "low" | "high" | "max";
 
-/** File entry inside a skill directory */
 export interface SkillFileEntry {
-  /** Path relative to the skill directory (`/` separated) */
   path: string;
-  /** Size in bytes */
   size: number;
 }
 
@@ -72,13 +94,10 @@ export interface SkillFileEntry {
 export interface SkillEntry {
   name: string;
   description: string;
-  /** Absolute path of SKILL.md */
   location: string;
   /** "global" (~/.hailux/skills) | "project" (<work_dir>/.hailux/skills) */
   scope: "global" | "project";
-  /** SKILL.md body (after frontmatter) */
   content: string;
-  /** All files inside the skill directory (including SKILL.md) */
   files: SkillFileEntry[];
 }
 
@@ -108,7 +127,6 @@ export interface McpServerEntry {
   name: string;
   connected: boolean;
   tools: number;
-  /** "stdio" | "http" */
   transport: string;
   command?: string;
   args: string[];
@@ -131,13 +149,10 @@ export interface McpServerInput {
 }
 
 export interface AppState {
-  // Sessions
   sessions: SessionInfo[];
   sessionId: string | null;
   workDir: string;
-  // Project directory list (for workdir picker)
   workdirs: string[];
-  // Message stream
   items: ChatItem[];
   /** Monotonic timestamp bumped on session switch; the chat viewport watches it to
    *  scroll to bottom (assistant-ui's own auto-scroll hooks don't fire on
@@ -146,26 +161,17 @@ export interface AppState {
   isRunning: boolean;
   /** Current run start timestamp (epoch ms); done line shows backend duration on completion */
   runStartedAt: number | null;
-  /** Cumulative input tokens for this session (sum of all LLM requests; shown in top bar) */
   promptTokens: number;
-  /** Cumulative output tokens for this session */
   completionTokens: number;
-  /** Cumulative cache-hit tokens for this session (shown in top bar) */
   cachedTokens: number;
-  /** Input tokens of the last request (≈ current context size; for the context meter below messages) */
   contextPromptTokens: number;
-  /** Output tokens of the last request */
   contextCompletionTokens: number;
-  /** Model context window size (tokens); 0 = unknown */
   contextWindow: number;
-  // Modes
   planMode: boolean;
   yolo: boolean;
   /** Reasoning effort (server-level global, reconciled by syncMode) */
   effort: ReasoningEffort;
-  // Input history (↑ at first line goes to previous entry)
   inputHistory: string[];
-  // Dialogs
   permission: {
     requestId: string;
     description: string;
@@ -173,14 +179,11 @@ export interface AppState {
     subagent?: string;
   } | null;
   askUser: { requestId: string; questions: QuestionInfo[] } | null;
-  // Pickers
   models: ModelInfo[];
-  /** Provider list (incl. unconfigured predefined providers; for the add-model form) */
   providers: ProviderOption[];
   /** Add-model dialog; may open with a preset (provider card / model id prefill) */
   showAddModel: boolean;
   addModelPreset: { provider: string; modelId?: string } | null;
-  /** Slash command list (refreshed when workDir changes) */
   commands: CommandInfo[];
   showWorkdirPicker: boolean;
   /** Open state of the model + reasoning-effort combo menu (input area pill control) */
@@ -188,20 +191,14 @@ export interface AppState {
   /** Main area view (skills/MCP are inline panels replacing the chat area) */
   activeView: ActiveView;
   skills: SkillEntry[];
-  /** Skill list load failure message (shown in panel + retry) */
   skillsError: string | null;
   mcpServers: McpServerEntry[];
-  /** MCP list load failure message (shown in panel + retry) */
   mcpError: string | null;
-  // Usage stats
   stats: StatsResponse | null;
-  /** Project filter for stats ("" = all projects) */
   statsFilter: string;
-  /** Stats window in days */
   statsDays: number;
   statsLoading: boolean;
   statsError: string | null;
-  // Interrupt hint (double-Esc semantics)
   escHint: boolean;
 
   /** Server epoch of the current session's bus (restart detection; null =
@@ -213,22 +210,26 @@ export interface AppState {
   /** Running state per session (sidebar indicator; visibility of parallel
    * cross-session runs) */
   runningSessions: Record<string, boolean>;
+  /** Queued messages per session (running-mode staging; kept across tab
+   * switches; the first item auto-drains FIFO after a clean RunComplete) */
+  queuedMessages: Record<string, QueuedMessage[]>;
+  /** Deferred setting commands per session (only /compact today; applied
+   *  after RunComplete, queue drained first to avoid racing isRunning) */
+  deferredSettings: Record<string, DeferredSettingAction[]>;
+  /** Interjection client_ids with an optimistic bubble awaiting the
+   *  UserMessage echo: an echo hit consumes the marker only (bubble already
+   *  rendered); RunComplete clears leftovers. */
+  pendingInterjectEcho: Record<string, boolean>;
 
-  // actions
   /** Startup init: determine initial project dir (last visited > server default) and fetch sessions */
   initWorkDir: () => Promise<void>;
   loadSessions: () => Promise<void>;
   loadModels: () => Promise<void>;
   loadProviders: () => Promise<void>;
-  /** Add a model and auto-switch to it */
   addModel: (input: CreateModelInput) => Promise<void>;
-  /** Edit an existing model's parameters (and optionally rename it) */
   updateModel: (input: UpdateModelInput) => Promise<void>;
-  /** Delete a custom model (backend auto-migrates when the current model is deleted) */
   deleteModel: (selector: string) => Promise<void>;
-  /** Edit an existing provider's credentials / endpoint (and optionally rename it) */
   updateProvider: (input: UpdateProviderInput) => Promise<void>;
-  /** Delete a custom provider (entire entry incl. credentials and all its models) */
   deleteProvider: (providerId: string) => Promise<void>;
   /** Add the checked models of a fetched list to a provider's model table
    * (returns the ids that were actually added) */
@@ -238,7 +239,6 @@ export interface AppState {
   discoverModels: (input: DiscoverModelsInput) => Promise<DiscoverModelsResult>;
   loadWorkdirs: () => Promise<void>;
   loadCommands: () => Promise<void>;
-  /** Switch main area view; refresh list when entering skills/mcp */
   setView: (view: ActiveView) => void;
   reloadSkills: () => Promise<void>;
   createSkill: (input: {
@@ -258,21 +258,46 @@ export interface AppState {
   createMcpServer: (input: McpServerInput) => Promise<void>;
   updateMcpServer: (name: string, input: McpServerInput) => Promise<void>;
   deleteMcpServer: (name: string) => Promise<void>;
-  /** Fetch usage stats (statsFilter/statsDays as the current filters) */
   loadStats: () => Promise<void>;
   setStatsFilter: (dir: string) => void;
   setStatsDays: (days: number) => void;
   newSession: (workDir?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
+  /** Send a message and start a run; false = submit failed (409/429/network,
+   *  error item already in items). Queue drain relies on this to re-enqueue. */
   sendMessage: (
     message: string,
     attachments?: ChatAttachment[],
     mentions?: ChatMention[],
-  ) => Promise<void>;
-  /** Manually compact the current session context (POST /api/compact, SSE response) */
+  ) => Promise<boolean>;
   runCompact: () => Promise<void>;
   interrupt: () => Promise<void>;
+  enqueueMessage: (text: string, images?: ChatAttachment[], mentions?: ChatMention[]) => void;
+  removeQueuedMessage: (sessionId: string, id: string) => void;
+  removeQueuedByClientId: (sessionId: string, clientId: string) => void;
+  /** Set/clear the in-flight marker on a queued item (view-independent
+   *  bookkeeping; the run-sink calls it for InterjectDropped) */
+  setQueuedInFlight: (sessionId: string, id: string, inFlight: boolean) => void;
+  /** Interject one queued message: POST /api/interject, optimistic bubble +
+   *  in-flight marker on success (the item stays queued until the echo);
+   *  409 (run just ended) falls back to a normal send with the auto-drain
+   *  chain. The optimistic bubble is only appended while the target session
+   *  is still the current view. */
+  interjectQueued: (sessionId: string, item: QueuedMessage) => Promise<void>;
+  interjectAllQueued: (sessionId: string) => Promise<void>;
+  /** Pop the first queued item and send it as a normal message (RunComplete
+   *  auto-drain; also the reconciliation when switching back to a session
+   *  that finished while unobserved). Submit failure requeues the head. */
+  drainQueuedHead: (sessionId: string) => Promise<void>;
+  /** Append a notice/error into the timeline at the turn boundary (before
+   *  trailing pending-interject bubbles, same rule as the run-sink push) */
+  pushTurnItem: (item: ChatItem) => void;
+  deferSetting: (sessionId: string, action: DeferredSettingAction) => void;
+  applySettingAction: (action: DeferredSettingAction) => void;
+  /** Drain deferred settings after RunComplete: instant ones apply now;
+   *  compact only when the queue is empty */
+  drainDeferredSettings: (sessionId: string, queueEmpty: boolean) => void;
   replyPermission: (allow: boolean, always: boolean) => Promise<void>;
   replyAsk: (answer: string) => Promise<void>;
   setPlanMode: (on: boolean) => Promise<void>;
@@ -282,7 +307,6 @@ export interface AppState {
   /** Reconcile global modes from server (yolo / planMode / effort); fail silently (retry next chance) */
   syncMode: () => Promise<void>;
   switchModel: (selector: string) => Promise<void>;
-  /** show=true opens the add-model dialog; preset is the prefill (provider / model id) */
   setAddModel: (show: boolean, preset?: { provider: string; modelId?: string } | null) => void;
   /** Switch project dir: keep running tasks alive (session-routed events), reset view state, fetch that project's sessions */
   setWorkDir: (dir: string) => Promise<void>;

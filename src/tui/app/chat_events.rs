@@ -48,12 +48,7 @@ impl App {
                 attachments,
                 mentions,
             } => {
-                if let Some(matched) = command::match_command(&text, &self.command_registry) {
-                    self.handle_command(matched).await?;
-                } else {
-                    self.handle_user_message(text, attachments, mentions)
-                        .await?;
-                }
+                self.submit_text(text, attachments, mentions).await?;
             }
             AppEvent::Resize => {}
             AppEvent::ScrollUp => {
@@ -80,12 +75,12 @@ impl App {
         match event {
             CoreEvent::AgentChunk(chunk) => {
                 self.finalize_thinking_ms();
-                match self.messages.last_mut() {
+                match self.last_real_message_mut() {
                     Some(Message::AgentStreaming(text)) => {
                         text.push_str(&chunk);
                     }
                     _ => {
-                        self.messages.push(Message::AgentStreaming(chunk));
+                        self.push_turn_output(Message::AgentStreaming(chunk));
                     }
                 }
                 if self.should_auto_scroll {
@@ -93,12 +88,12 @@ impl App {
                 }
             }
             CoreEvent::AgentReasoningChunk(chunk) => {
-                match self.messages.last_mut() {
+                match self.last_real_message_mut() {
                     Some(Message::AgentThinking { text, think_ms, .. }) if think_ms.is_none() => {
                         text.push_str(&chunk);
                     }
                     _ => {
-                        self.messages.push(Message::AgentThinking {
+                        self.push_turn_output(Message::AgentThinking {
                             text: chunk,
                             think_ms: None,
                             thinking_started_at: Some(Instant::now()),
@@ -116,14 +111,17 @@ impl App {
                 reason,
             } => {
                 // Partial output from a failed attempt never enters context: trailing streaming renders are dropped in lockstep
-                while matches!(
-                    self.messages.last(),
-                    Some(Message::AgentStreaming(_)) | Some(Message::AgentThinking { .. })
-                ) {
-                    self.messages.pop();
+                let cut = self.turn_output_insert_index();
+                while cut > 0
+                    && matches!(
+                        self.messages[cut - 1],
+                        Message::AgentStreaming(_) | Message::AgentThinking { .. }
+                    )
+                {
+                    self.messages.remove(cut - 1);
                 }
                 let secs = delay_ms as f64 / 1000.0;
-                self.messages.push(Message::Agent(format!(
+                self.push_turn_output(Message::Agent(format!(
                     "[请求失败，{secs:.1}s 后进行第 {attempt}/{max_retries} 次重试：{reason}]"
                 )));
                 if self.should_auto_scroll {
@@ -165,12 +163,19 @@ impl App {
                     }
                 }
 
-                if let Some(Message::AgentStreaming(text)) = self.messages.last() {
-                    let text = text.clone();
-                    *self.messages.last_mut().unwrap() = Message::Agent(text);
+                let last_idx = self.turn_output_insert_index().checked_sub(1);
+                let is_streaming = last_idx
+                    .and_then(|i| self.messages.get(i))
+                    .is_some_and(|m| matches!(m, Message::AgentStreaming(_)));
+                if is_streaming {
+                    let i = last_idx.unwrap();
+                    if let Message::AgentStreaming(text) = &self.messages[i] {
+                        let text = text.clone();
+                        self.messages[i] = Message::Agent(text);
+                    }
                 }
                 if let Some(total_ms) = self.timing.last_total_ms {
-                    self.messages.push(Message::AgentDone {
+                    self.push_turn_output(Message::AgentDone {
                         total_ms,
                         model: turn_model.clone(),
                         status,
@@ -196,6 +201,35 @@ impl App {
                 self.esc_hint_active = false;
                 self.should_auto_scroll = true;
                 self.scroll_offset = 0;
+                // Safety net: an interrupt before the injection boundary
+                // leaves optimistic bubbles behind and in-flight queue items
+                // stuck — strip the markers so later output appends normally,
+                // and release the items (they stayed queued; the Completed
+                // drain below resends them)
+                let in_flight_ids: Vec<String> = self
+                    .messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        Message::User {
+                            pending_interject: Some(id),
+                            ..
+                        } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                for m in &mut self.messages {
+                    if let Message::User {
+                        pending_interject, ..
+                    } = m
+                    {
+                        *pending_interject = None;
+                    }
+                }
+                for id in in_flight_ids {
+                    if let Some(item) = self.queue.iter_mut().find(|q| q.client_id == id) {
+                        item.in_flight = false;
+                    }
+                }
                 if let Some(session_id) = &self.current_session_id {
                     self.storage.touch_session(session_id).await?;
                 }
@@ -204,12 +238,15 @@ impl App {
                 let threshold =
                     (self.resolved.context_window as f32 * self.config.compact_threshold) as u32;
                 if total_context > threshold {
+                    self.drain_after_compact = true;
                     let pct = (self.config.compact_threshold * 100.0) as u32;
                     self.compact_conversation(Some(&format!(
                         "上下文 token 已达 {}%，自动压缩",
                         pct
                     )))
                     .await?;
+                } else if status == TaskStatus::Completed {
+                    self.drain_queue().await?;
                 }
             }
             CoreEvent::UsageUpdate {
@@ -241,15 +278,17 @@ impl App {
                         let boundary_idx = self
                             .messages
                             .iter()
-                            .rposition(|m| {
-                                matches!(
-                                    m,
-                                    Message::User { .. }
-                                        | Message::ToolCall { .. }
-                                        | Message::ToolResult { .. }
-                                        | Message::Agent(_)
-                                        | Message::AgentDone { .. }
-                                )
+                            .rposition(|m| match m {
+                                Message::User {
+                                    pending_interject: Some(_),
+                                    ..
+                                } => false,
+                                Message::User { .. }
+                                | Message::ToolCall { .. }
+                                | Message::ToolResult { .. }
+                                | Message::Agent(_)
+                                | Message::AgentDone { .. } => true,
+                                _ => false,
                             })
                             .map(|i| i + 1)
                             .unwrap_or(0);
@@ -275,7 +314,7 @@ impl App {
             } => {
                 self.finalize_thinking_ms();
                 if subagent_name.is_some() {
-                    self.messages.push(Message::SubagentStep {
+                    self.push_turn_output(Message::SubagentStep {
                         summary: crate::tui::history_cell::subagent_step_summary(&name, &arguments),
                         is_done: false,
                         agent: subagent_name.clone(),
@@ -318,7 +357,7 @@ impl App {
                             }
                         }
                     }
-                    self.messages.push(Message::ToolCall { name, arguments });
+                    self.push_turn_output(Message::ToolCall { name, arguments });
                 }
                 if self.should_auto_scroll {
                     self.scroll_offset = 0;
@@ -397,7 +436,7 @@ impl App {
                             }
                         }
                     }
-                    self.messages.push(Message::ToolResult {
+                    self.push_turn_output(Message::ToolResult {
                         name,
                         result,
                         display,
@@ -426,7 +465,7 @@ impl App {
                 self.timing.pause();
             }
             CoreEvent::CompactChunk(chunk) => {
-                if let Some(Message::CompactStreaming(text)) = self.messages.last_mut() {
+                if let Some(Message::CompactStreaming(text)) = self.last_real_message_mut() {
                     text.push_str(&chunk);
                 }
                 if self.should_auto_scroll {
@@ -456,7 +495,6 @@ impl App {
                     self.last_esc_time = None;
                     self.esc_hint_active = false;
 
-                    // New context ≈ context_prompt_tokens - compact_prompt_tokens + completion_tokens
                     if let Some(usage) = usage {
                         let estimated_prompt =
                             estimate_compact_prompt(self.context_prompt_tokens, usage);
@@ -468,12 +506,10 @@ impl App {
                         }
                     }
 
-                    if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
-                        *self.messages.last_mut().unwrap() = Message::CompactMarker {
-                            compacted_count,
-                            total_ms,
-                        };
-                    }
+                    self.replace_trailing_compact_streaming(Message::CompactMarker {
+                        compacted_count,
+                        total_ms,
+                    });
 
                     self.should_auto_scroll = true;
                     self.scroll_offset = 0;
@@ -482,12 +518,16 @@ impl App {
 
                 self.is_processing = false;
                 self.input.set_processing(false);
+                if self.drain_after_compact {
+                    self.drain_after_compact = false;
+                    self.drain_queue().await?;
+                }
             }
             CoreEvent::CompactError(msg) => {
-                if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
-                    *self.messages.last_mut().unwrap() =
-                        Message::Agent(format!("[压缩失败: {}]", msg));
-                }
+                self.replace_trailing_compact_streaming(Message::Agent(format!(
+                    "[压缩失败: {}]",
+                    msg
+                )));
                 self.timing.abort();
                 self.last_esc_time = None;
                 self.esc_hint_active = false;
@@ -497,6 +537,12 @@ impl App {
             }
             // Permission requests are enqueued at the top of App::handle_event and never reach here
             CoreEvent::PermissionRequest { .. } => {}
+            CoreEvent::UserMessage { interjection } => {
+                self.handle_interjected_user_message(interjection).await?;
+            }
+            CoreEvent::InterjectDropped { client_id } => {
+                self.handle_interject_dropped(&client_id);
+            }
         }
         Ok(())
     }
@@ -505,8 +551,7 @@ impl App {
         match matched {
             command::MatchedCommand::Ui { cmd, args } => {
                 self.input.clear();
-                // Clear pending state along with the input box so leftover attachments don't end up on
-                // unrelated later messages (their elements disappeared with the clear)
+                // Clear pending state along with the input box
                 self.pending_images.clear();
                 self.pending_pastes.clear();
                 self.file_picker.pending_mentions.clear();
@@ -557,7 +602,6 @@ impl App {
                             self.messages
                                 .push(Message::Agent(format!("保存 YOLO 配置失败: {e}")));
                         }
-                        // Sync to the shared config (visible to TaskTool / subagents)
                         if let Ok(mut shared) = self.shared.config.lock() {
                             *shared = self.config.clone();
                         }
@@ -625,7 +669,6 @@ impl App {
         }
     }
 
-    /// Opens the reasoning effort submenu (current level preselected)
     pub(super) fn open_effort_picker(&mut self) {
         let selected_index = match self.agent.reasoning_effort() {
             crate::agent::models::ReasoningEffort::Low => 0,
@@ -635,7 +678,6 @@ impl App {
         self.state = AppState::EffortPicker { selected_index };
     }
 
-    /// Applies reasoning effort (immediate on the Agent + config persistence + shared-config sync + echo)
     pub(super) fn apply_effort(&mut self, effort: crate::agent::models::ReasoningEffort) {
         self.agent.set_reasoning_effort(effort);
         self.config.reasoning_effort = effort;
@@ -643,7 +685,6 @@ impl App {
             self.messages
                 .push(Message::Agent(format!("保存思考强度配置失败: {e}")));
         }
-        // Sync to the shared config (visible to newly created subagents)
         if let Ok(mut shared) = self.shared.config.lock() {
             shared.reasoning_effort = effort;
         }
@@ -654,17 +695,25 @@ impl App {
         self.render.dirty = true;
     }
 
-    /// Freezes the current thinking block's elapsed time when moving from the thinking phase to output.
     pub(super) fn finalize_thinking_ms(&mut self) {
         if let Some(Message::AgentThinking {
             think_ms,
             thinking_started_at,
             ..
-        }) = self.messages.last_mut()
+        }) = self.last_real_message_mut()
             && think_ms.is_none()
             && let Some(t) = thinking_started_at.take()
         {
             *think_ms = Some(t.elapsed().as_millis() as u64);
+        }
+    }
+
+    fn replace_trailing_compact_streaming(&mut self, msg: Message) {
+        let i = self.turn_output_insert_index().checked_sub(1);
+        if let Some(i) = i
+            && matches!(&self.messages[i], Message::CompactStreaming(_))
+        {
+            self.messages[i] = msg;
         }
     }
 
@@ -689,6 +738,7 @@ impl App {
             text: display_text,
             plan_mode: self.plan_mode,
             mentions: mention_spans,
+            pending_interject: None,
         });
 
         let new_session = self.current_session_id.is_none();
@@ -710,24 +760,7 @@ impl App {
         } else {
             serde_json::to_string(&attachments).ok()
         };
-        let mentions_json = if mention_display.is_empty() {
-            None
-        } else {
-            let values: Vec<String> = mention_display.iter().map(|(abs, _)| abs.clone()).collect();
-            let list: Vec<serde_json::Value> =
-                crate::tui::app::types::locate_mentions(&input, &values)
-                    .iter()
-                    .map(|r| crate::tui::app::types::byte_range_to_char_range(&input, r))
-                    .map(|r| {
-                        serde_json::json!({
-                            "start": r.start,
-                            "end": r.end,
-                            "kind": "file",
-                        })
-                    })
-                    .collect();
-            serde_json::to_string(&list).ok()
-        };
+        let mentions_json = mentions_json_for(&input, &mention_display);
         let stored = StoredMessage {
             role: MessageRole::User,
             content: input.clone(),
@@ -792,7 +825,7 @@ impl App {
             })
             .to_string();
 
-            self.messages.push(Message::ToolCall {
+            self.push_turn_output(Message::ToolCall {
                 name: "task".to_string(),
                 arguments: args.clone(),
             });
@@ -827,13 +860,12 @@ impl App {
                 record.status = task_status;
             }
 
-            self.messages.push(Message::ToolResult {
+            self.push_turn_output(Message::ToolResult {
                 name: "task".to_string(),
                 result: result_text.clone(),
                 display: None,
             });
 
-            // Persist the subagent result as an assistant message in the main session
             let assistant_stored = StoredMessage {
                 role: MessageRole::Assistant,
                 content: result_text,
@@ -863,7 +895,7 @@ impl App {
 
         let tx = self.core_tx.clone();
         if let Err(e) = self.agent.chat_stream(&input, attachments, tx) {
-            self.messages.push(Message::Agent(format!("[错误: {}]", e)));
+            self.push_turn_output(Message::Agent(format!("[错误: {}]", e)));
             self.is_processing = false;
             self.input.set_processing(false);
         }
@@ -905,25 +937,324 @@ impl App {
         } else {
             "正在压缩上下文...\n".to_string()
         };
-        self.messages.push(Message::CompactStreaming(label));
+        self.push_turn_output(Message::CompactStreaming(label));
         self.render.dirty = true;
 
         let tx = self.core_tx.clone();
         if let Err(e) = self.agent.request_compaction(tx, session_id) {
-            if let Some(Message::CompactStreaming(_)) = self.messages.last_mut() {
-                *self.messages.last_mut().unwrap() = Message::Agent(format!("[压缩失败: {}]", e));
-            }
+            self.replace_trailing_compact_streaming(Message::Agent(format!("[压缩失败: {}]", e)));
             self.timing.abort();
             self.is_processing = false;
             self.input.set_processing(false);
         }
         Ok(())
     }
+
+    /// Optimistic interjection bubbles at the tail are transparent: new
+    /// output goes before them so the timeline matches a rebuilt view
+    pub(super) fn turn_output_insert_index(&self) -> usize {
+        let mut idx = self.messages.len();
+        while idx > 0
+            && matches!(
+                &self.messages[idx - 1],
+                Message::User {
+                    pending_interject: Some(_),
+                    ..
+                }
+            )
+        {
+            idx -= 1;
+        }
+        idx
+    }
+
+    pub(super) fn push_turn_output(&mut self, msg: Message) {
+        let at = self.turn_output_insert_index();
+        if at == self.messages.len() {
+            self.messages.push(msg);
+        } else {
+            self.messages.insert(at, msg);
+        }
+    }
+
+    pub(super) fn last_real_message_mut(&mut self) -> Option<&mut Message> {
+        let idx = self.turn_output_insert_index();
+        if idx == 0 {
+            None
+        } else {
+            self.messages.get_mut(idx - 1)
+        }
+    }
+
+    pub(super) async fn submit_text(
+        &mut self,
+        text: String,
+        attachments: Vec<crate::agent::media::Attachment>,
+        mention_display: Vec<(String, String)>,
+    ) -> Result<()> {
+        if let Some(matched) = command::match_command(&text, &self.command_registry) {
+            self.handle_command(matched).await
+        } else {
+            self.handle_user_message(text, attachments, mention_display)
+                .await
+        }
+    }
+
+    pub(super) async fn drain_queue(&mut self) -> Result<()> {
+        if self.queue.is_empty() {
+            return Ok(());
+        }
+        let item = self.queue.remove(0);
+        self.clamp_queue_selection();
+        self.render.dirty = true;
+        let attachments = item.all_attachments();
+        self.submit_text_preserving_draft(item.text, attachments, item.mention_display)
+            .await
+    }
+
+    /// After any queue removal, keep the QueueManager selection in bounds
+    /// (the manager stays open while Core events drain the queue)
+    fn clamp_queue_selection(&mut self) {
+        if let AppState::QueueManager { selected_index } = &mut self.state {
+            if self.queue.is_empty() {
+                self.state = AppState::Chat;
+            } else {
+                *selected_index = (*selected_index).min(self.queue.len() - 1);
+            }
+        }
+    }
+
+    /// Programmatic submits must not wipe a draft the user is typing:
+    /// `input.submit()` and UI-command handling clear the box, so snapshot
+    /// and restore around the actual submit.
+    async fn submit_text_preserving_draft(
+        &mut self,
+        text: String,
+        attachments: Vec<crate::agent::media::Attachment>,
+        mention_display: Vec<(String, String)>,
+    ) -> Result<()> {
+        let draft = self.input.text().to_string();
+        self.submit_text(text, attachments, mention_display).await?;
+        if !draft.is_empty() && self.input.text().is_empty() {
+            self.input.set_text(draft);
+            self.refresh_suggestions();
+            self.render.dirty = true;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn interject_one(&mut self, client_id: &str) -> Result<()> {
+        let Some(pos) = self.queue.iter().position(|q| q.client_id == client_id) else {
+            return Ok(());
+        };
+        if self.queue[pos].in_flight {
+            // Delivery already in progress (waiting for echo / drop)
+            return Ok(());
+        }
+        if self.is_processing {
+            let item = &self.queue[pos];
+            let rendered = self.command_registry.render_prompt_command(&item.text);
+            // Mention offsets are computed against the raw text; a rendered
+            // command template shifts them — drop mentions there instead of
+            // emitting wrong ranges
+            let mentions = if rendered.is_some() {
+                Vec::new()
+            } else {
+                mentions_for(&item.text, &item.mention_display)
+            };
+            let ok = self.agent.interject(crate::agent::event::Interjection {
+                client_id: client_id.to_string(),
+                content: rendered.unwrap_or_else(|| item.text.clone()),
+                attachments: item.all_attachments(),
+                mentions,
+            });
+            if ok {
+                // The item stays queued (in_flight) until the UserMessage echo
+                // removes it, so an InterjectDropped finds it intact
+                self.queue[pos].in_flight = true;
+                let item = &self.queue[pos];
+                let (display_text, mention_spans) =
+                    super::types::rewrite_mentions(&item.text, &item.mention_display);
+                self.push_turn_output(Message::User {
+                    text: display_text,
+                    plan_mode: self.plan_mode,
+                    mentions: mention_spans,
+                    pending_interject: Some(client_id.to_string()),
+                });
+                self.should_auto_scroll = true;
+                self.scroll_offset = 0;
+                self.render.dirty = true;
+                return Ok(());
+            }
+            // Run just ended / cancelling / bounded queue full: keep the item
+            // queued for the AgentComplete auto-drain — never fall through to
+            // submit_text here (it would race the finishing run into a
+            // double-run with context pollution)
+            return Ok(());
+        }
+        let item = self.queue.remove(pos);
+        self.clamp_queue_selection();
+        let attachments = item.all_attachments();
+        self.submit_text_preserving_draft(item.text, attachments, item.mention_display)
+            .await
+    }
+
+    /// An accepted interjection never entered the context (run interrupted /
+    /// errored / teardown race): release the in-flight item (stays queued for
+    /// a manual resend) and remove the optimistic bubble.
+    fn handle_interject_dropped(&mut self, client_id: &str) {
+        if let Some(item) = self.queue.iter_mut().find(|q| q.client_id == client_id) {
+            item.in_flight = false;
+        }
+        self.messages.retain(|m| {
+            !matches!(
+                m,
+                Message::User {
+                    pending_interject: Some(id),
+                    ..
+                } if id == client_id
+            )
+        });
+        // Consecutive drops (a burst on interrupt) collapse into one notice
+        let is_dup = matches!(
+            self.messages.last(),
+            Some(Message::Agent(t)) if t == INTERJECT_DROPPED_NOTICE
+        );
+        if !is_dup {
+            self.messages
+                .push(Message::Agent(INTERJECT_DROPPED_NOTICE.to_string()));
+        }
+        self.clamp_queue_selection();
+        self.should_auto_scroll = true;
+        self.scroll_offset = 0;
+        self.render.dirty = true;
+    }
+
+    async fn handle_interjected_user_message(
+        &mut self,
+        interjection: crate::agent::event::Interjection,
+    ) -> Result<()> {
+        let crate::agent::event::Interjection {
+            client_id,
+            content,
+            attachments,
+            mentions,
+        } = interjection;
+        // Echo = actually injected: remove the in-flight queue item now
+        if let Some(pos) = self.queue.iter().position(|q| q.client_id == client_id) {
+            self.queue.remove(pos);
+            self.clamp_queue_selection();
+            self.render.dirty = true;
+        }
+        let optimistic_idx = self.messages.iter().rposition(|m| {
+            matches!(
+                m,
+                Message::User {
+                    pending_interject: Some(id),
+                    ..
+                } if id == &client_id
+            )
+        });
+        if let Some(i) = optimistic_idx {
+            if let Message::User {
+                pending_interject, ..
+            } = &mut self.messages[i]
+            {
+                *pending_interject = None;
+            }
+        } else {
+            let mention_spans = mentions
+                .iter()
+                .filter_map(|m| {
+                    crate::tui::app::types::char_range_to_byte_range(&content, m.start, m.end)
+                })
+                .collect::<Vec<_>>();
+            self.push_turn_output(Message::User {
+                text: content.clone(),
+                plan_mode: self.plan_mode,
+                mentions: mention_spans,
+                pending_interject: None,
+            });
+        }
+        self.should_auto_scroll = true;
+        self.scroll_offset = 0;
+        self.render.dirty = true;
+
+        if let Some(session_id) = &self.current_session_id {
+            let attachments_json = if attachments.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&attachments).ok()
+            };
+            let mentions_json = if mentions.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&mentions).ok()
+            };
+            let stored = StoredMessage {
+                role: MessageRole::User,
+                content,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+                model: None,
+                runtime_meta: if self.plan_mode {
+                    Some(r#"{"plan_mode":true}"#.to_string())
+                } else {
+                    None
+                },
+                think_ms: None,
+                compacted: false,
+                attachments: attachments_json,
+                mentions: mentions_json,
+            };
+            self.storage.append_message(session_id, &stored).await?;
+        }
+
+        Ok(())
+    }
 }
 
-/// Parses the sub_session_id from task tool result text.
-///
-/// Format: `<task subagent="..." description="..." task_id="UUID" state="completed">`
+/// Shown when an accepted interjection was discarded without entering the
+/// context (drop event burst collapses into one notice)
+const INTERJECT_DROPPED_NOTICE: &str = "插话未送达（任务已中断或结束），消息已放回排队列表";
+
+/// Mention metadata for a message body, as core-level `Mention` values
+/// (offsets in Unicode code points against `text`)
+pub(super) fn mentions_for(
+    text: &str,
+    mention_display: &[(String, String)],
+) -> Vec<crate::agent::event::Mention> {
+    if mention_display.is_empty() {
+        return Vec::new();
+    }
+    let values: Vec<String> = mention_display.iter().map(|(abs, _)| abs.clone()).collect();
+    crate::tui::app::types::locate_mentions(text, &values)
+        .iter()
+        .map(|r| crate::tui::app::types::byte_range_to_char_range(text, r))
+        .map(|r| crate::agent::event::Mention {
+            start: r.start,
+            end: r.end,
+            kind: "file".to_string(),
+        })
+        .collect()
+}
+
+pub(super) fn mentions_json_for(
+    text: &str,
+    mention_display: &[(String, String)],
+) -> Option<String> {
+    let list = mentions_for(text, mention_display);
+    if list.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&list).ok()
+    }
+}
+
 fn parse_task_id_from_result(result: &str) -> Option<String> {
     parse_task_outcomes(result)
         .into_iter()
@@ -931,15 +1262,11 @@ fn parse_task_id_from_result(result: &str) -> Option<String> {
         .and_then(|b| b.task_id)
 }
 
-/// Parsed outcome of a single `<task>` block in task tool results
 struct TaskOutcome {
     task_id: Option<String>,
     ok: bool,
 }
 
-/// Parses `<task ...>` blocks out of the result (tolerates both wrapped and unwrapped `<tasks>` formats).
-/// Failed blocks keep a placeholder (ok=false, no task_id); the returned order matches the tasks array
-/// so callers can pair by position
 fn parse_task_outcomes(result: &str) -> Vec<TaskOutcome> {
     let mut blocks = Vec::new();
     for line in result.lines() {
@@ -959,7 +1286,6 @@ fn parse_task_outcomes(result: &str) -> Vec<TaskOutcome> {
     blocks
 }
 
-/// Extracts `key="value"` from a `<task ...>` attribute line
 fn extract_task_attr(tag: &str, key: &str) -> Option<String> {
     let marker = format!("{key}=\"");
     let start = tag.find(&marker)? + marker.len();
@@ -978,7 +1304,6 @@ mod tests {
             prompt_tokens: 5000,
             completion_tokens: 800,
         };
-        // 10000 - 5000 + 800 = 5800
         assert_eq!(estimate_compact_prompt(10_000, usage), 5_800);
     }
 
@@ -988,7 +1313,6 @@ mod tests {
             prompt_tokens: 15_000,
             completion_tokens: 800,
         };
-        // old_prompt < compact_prompt -> saturating_sub yields 0, +800
         assert_eq!(estimate_compact_prompt(10_000, usage), 800);
     }
 
@@ -1016,7 +1340,6 @@ mod tests {
         assert!(!blocks[1].ok);
         assert_eq!(blocks[2].task_id.as_deref(), Some("id-3"));
         assert!(blocks[2].ok);
-        // The direct path takes the first successful block's id (skipping failed blocks)
         assert_eq!(parse_task_id_from_result(result), Some("id-1".to_string()));
     }
 
@@ -1034,5 +1357,25 @@ mod tests {
         let result = "<task subagent=\"general\" task_id=\"uuid-x\" state=\"completed\">\n<task_result>\ndone\n</task_result>\n</task>";
         assert_eq!(parse_task_id_from_result(result), Some("uuid-x".into()));
         assert_eq!(parse_task_id_from_result("no tags here"), None);
+    }
+
+    #[test]
+    fn mentions_json_for_empty_mentions_is_none() {
+        assert!(mentions_json_for("hello", &[]).is_none());
+    }
+
+    #[test]
+    fn mentions_json_for_builds_char_ranges() {
+        let pairs = vec![("D:/p/src/main.rs".to_string(), "src/main.rs".to_string())];
+        let json = mentions_json_for("看下 @D:/p/src/main.rs 谢谢", &pairs).unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(list.len(), 1);
+        let start = list[0]["start"].as_u64().unwrap() as usize;
+        let end = list[0]["end"].as_u64().unwrap() as usize;
+        assert_eq!(list[0]["kind"], "file");
+        let text = "看下 @D:/p/src/main.rs 谢谢";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars[start], '@');
+        assert_eq!(chars[end - 1], 's');
     }
 }

@@ -1,16 +1,16 @@
-// App state: sessions/messages/permission requests/modes (Zustand)
 import { create } from "zustand";
 import type {
   ChatRequest,
   CommandInfo,
   DiscoverModelsResult,
+  InterjectRequest,
   ModelInfo,
   ProviderOption,
   SessionDetail,
   SessionInfo,
   StatsResponse,
 } from "../runtime/types";
-import { getJson, postJson } from "../runtime/sse-client";
+import { HttpError, getJson, postJson } from "../runtime/sse-client";
 import { rebuildSessionItems } from "./session-history";
 import { closeStream, openStream } from "./stream-manager";
 import { readError } from "./shared-events";
@@ -18,11 +18,18 @@ import type {
   AppState,
   McpServerEntry,
   ModeStatus,
+  QueuedMessage,
   SkillEntry,
 } from "./types";
 
-/** localStorage key: last visited project directory */
 const LAST_WORKDIR_KEY = "hailux.lastWorkDir";
+
+/** crypto.randomUUID requires a secure context (HTTPS / localhost) — plain
+ *  HTTP on a LAN IP leaves it undefined and would break enqueueing entirely */
+function genClientId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `q-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 /** Submit a chat/compact request. Submit-only: the response body (an SSE
  * stream nobody consumes) is cancelled immediately — run events arrive via
@@ -95,14 +102,16 @@ export const useApp = create<AppState>((set, get) => ({
   epoch: null,
   lastSeq: 0,
   runningSessions: {},
+  queuedMessages: {},
+  deferredSettings: {},
+  pendingInterjectEcho: {},
 
   async initWorkDir() {
-    // Prefer the last visited project directory, falling back to the server default (backend startup dir)
     let dir = "";
     try {
       dir = localStorage.getItem(LAST_WORKDIR_KEY) ?? "";
     } catch {
-      // localStorage unavailable (private mode etc.) → use default directory
+      // localStorage unavailable (private mode etc.) — fall through
     }
     if (!dir) {
       const resp = await getJson<{ path: string }>("/api/default-workdir");
@@ -111,17 +120,13 @@ export const useApp = create<AppState>((set, get) => ({
     set({ workDir: dir });
     await get().loadSessions();
     get().loadCommands().catch(() => {});
-    // Restore real modes from the server after page load/refresh (global modes are independent of work_dir)
     await get().syncMode();
   },
 
   async loadSessions() {
-    // Fetch by current project directory (backend returns default dir when not initialized)
     const workDir = get().workDir;
     const query = workDir ? `?work_dir=${encodeURIComponent(workDir)}` : "";
     const sessions = await getJson<SessionInfo[]>(`/api/sessions${query}`);
-    // Sidebar live indicator: the list response carries per-session running
-    // state, merged into runningSessions
     set({
       sessions,
       runningSessions: {
@@ -228,7 +233,7 @@ export const useApp = create<AppState>((set, get) => ({
       const commands = await getJson<CommandInfo[]>(`/api/commands${query}`);
       set({ commands });
     } catch {
-      // Command list load failure must not block the main flow (completion degrades to no hints)
+      // Command discovery is best-effort; the slash menu just stays empty
     }
   },
 
@@ -326,7 +331,6 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   async updateMcpServer(name, input) {
-    // name identifies the original server; a different input.name renames it (backend handles it as new_name)
     const { name: newName, ...rest } = input;
     const resp = await fetch("/api/mcp", {
       method: "PUT",
@@ -357,7 +361,6 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       const params = new URLSearchParams();
       if (statsFilter) params.set("work_dir", statsFilter);
-      // Send unconditionally: days=0 (all time) is falsy, so conditional sending would be overridden by the backend default of 30 days
       params.set("days", String(statsDays));
       const qs = params.toString();
       const stats = await getJson<StatsResponse>(
@@ -421,7 +424,6 @@ export const useApp = create<AppState>((set, get) => ({
         detail.messages,
         Boolean(detail.compact_summary),
       );
-      // Sessions carry their own working directory — switching a session switches the directory context
       const target = get().sessions.find((s) => s.id === id);
       set({
         sessionId: id,
@@ -442,6 +444,17 @@ export const useApp = create<AppState>((set, get) => ({
       // Long-lived subscription: running -> replay/resume after head_seq;
       // idle -> keep waiting
       openStream(get, set, id, detail.head_seq, detail.epoch);
+      // Reconcile a session that finished while unobserved: its RunComplete
+      // fired elsewhere (or in a closed tab) and never drained here. Trade-off
+      // noted: SessionDetail does not carry the last run status, so an
+      // interrupted run's queue also drains — matching the clean-completion
+      // path is the lesser surprise vs. items stuck forever.
+      if (!detail.running) {
+        // drainQueuedHead removes the head synchronously before its first
+        // await, so the deferred drain below sees the post-removal length
+        void get().drainQueuedHead(id);
+        get().drainDeferredSettings(id, !get().queuedMessages[id]?.length);
+      }
     } catch (e) {
       // No silent failure: an unset sessionId makes /compact report "no
       // active session"; surface the error so the user can retry.
@@ -475,11 +488,25 @@ export const useApp = create<AppState>((set, get) => ({
         contextCompletionTokens: 0,
       });
     }
+    // Queues are per-session: drop them along with the session
+    set((s) => {
+      const dropQueue = id in s.queuedMessages;
+      const dropDeferred = id in s.deferredSettings;
+      if (!dropQueue && !dropDeferred) return {};
+      return {
+        queuedMessages: dropQueue
+          ? Object.fromEntries(Object.entries(s.queuedMessages).filter(([k]) => k !== id))
+          : s.queuedMessages,
+        deferredSettings: dropDeferred
+          ? Object.fromEntries(Object.entries(s.deferredSettings).filter(([k]) => k !== id))
+          : s.deferredSettings,
+      };
+    });
     await get().loadSessions();
   },
 
   async sendMessage(message, attachments, mentions) {
-    if (get().isRunning) return;
+    if (get().isRunning) return false;
     // Ensure a session exists before submitting: events are delivered via the
     // session's single subscription, which newSession attaches. The server
     // reuses the latest blank session, so this does not stack empty sessions.
@@ -487,7 +514,7 @@ export const useApp = create<AppState>((set, get) => ({
     if (!sessionId) {
       await get().newSession();
       sessionId = get().sessionId;
-      if (!sessionId) return;
+      if (!sessionId) return false;
     }
     const req: ChatRequest = {
       message,
@@ -510,6 +537,7 @@ export const useApp = create<AppState>((set, get) => ({
 
     try {
       await submitRun("/api/chat", req);
+      return true;
     } catch (e) {
       // 409 (session busy) / 429 (global cap) / network errors. If the run
       // actually started server-side, the subscription re-asserts isRunning at
@@ -519,6 +547,7 @@ export const useApp = create<AppState>((set, get) => ({
         isRunning: false,
         runStartedAt: null,
       }));
+      return false;
     }
     // Turn-end side effects (session list refresh, mode reconcile) live in the
     // sink's RunComplete branch — fired event-driven, even for observer tabs.
@@ -532,6 +561,228 @@ export const useApp = create<AppState>((set, get) => ({
     await postJson("/api/interrupt", { session_id: sessionId }).catch(
       () => {},
     );
+  },
+
+  enqueueMessage(text, images, mentions) {
+    const sessionId = get().sessionId;
+    if (!sessionId) return;
+    const item: QueuedMessage = {
+      id: genClientId(),
+      text,
+      images: images?.length ? images : undefined,
+      mentions: mentions?.length ? mentions : undefined,
+      createdAt: Date.now(),
+    };
+    set((s) => ({
+      queuedMessages: {
+        ...s.queuedMessages,
+        [sessionId]: [...(s.queuedMessages[sessionId] ?? []), item],
+      },
+    }));
+  },
+
+  removeQueuedMessage(sessionId, id) {
+    set((s) => {
+      const queue = s.queuedMessages[sessionId];
+      if (!queue) return {};
+      return {
+        queuedMessages: {
+          ...s.queuedMessages,
+          [sessionId]: queue.filter((q) => q.id !== id),
+        },
+      };
+    });
+  },
+
+  removeQueuedByClientId(sessionId, clientId) {
+    // client_id == queue item id (UserMessage echo / cross-tab sync)
+    get().removeQueuedMessage(sessionId, clientId);
+  },
+
+  setQueuedInFlight(sessionId, id, inFlight) {
+    set((s) => ({
+      queuedMessages: {
+        ...s.queuedMessages,
+        [sessionId]: (s.queuedMessages[sessionId] ?? []).map((q) =>
+          q.id === id ? { ...q, inFlight: inFlight || undefined } : q,
+        ),
+      },
+    }));
+  },
+
+  pushTurnItem(item) {
+    // Insert before trailing pending-interject bubbles (same rule as the
+    // run-sink push) so notices/errors never land after an optimistic bubble
+    set((s) => {
+      let at = s.items.length;
+      while (
+        at > 0 &&
+        s.items[at - 1]!.kind === "user" &&
+        s.items[at - 1]!.pendingInterject
+      ) {
+        at--;
+      }
+      if (at === s.items.length) {
+        return { items: [...s.items, item] };
+      }
+      return {
+        items: [...s.items.slice(0, at), item, ...s.items.slice(at)],
+      };
+    });
+  },
+
+  async interjectQueued(sessionId, item) {
+    const queue = get().queuedMessages[sessionId] ?? [];
+    const originalIdx = queue.findIndex((q) => q.id === item.id);
+    if (originalIdx < 0) return;
+    if (queue[originalIdx]!.inFlight) return;
+    // In-flight marker replaces the old synchronous dequeue: the item stays
+    // in the queue until the UserMessage echo removes it (so an
+    // InterjectDropped finds it intact), while the marker still guarantees
+    // double-trigger protection (a re-entry snapshots an in-flight item and
+    // skips)
+    get().setQueuedInFlight(sessionId, item.id, true);
+    const readd = () =>
+      set((s) => {
+        const q = (s.queuedMessages[sessionId] ?? []).filter(
+          (x) => x.id !== item.id,
+        );
+        const at = Math.min(originalIdx, q.length);
+        const next = [...q];
+        next.splice(at, 0, { ...item, inFlight: undefined });
+        return { queuedMessages: { ...s.queuedMessages, [sessionId]: next } };
+      });
+
+    const runningTarget = get().isRunning && get().sessionId === sessionId;
+    if (runningTarget) {
+      let delivered = false;
+      try {
+        const resp = await postJson("/api/interject", {
+          session_id: sessionId,
+          client_id: item.id,
+          message: item.text,
+          attachments: item.images,
+          mentions: item.mentions,
+        } satisfies InterjectRequest);
+        if (!resp.ok) throw new HttpError(resp.status, await readError(resp));
+        delivered = true;
+      } catch (e) {
+        get().setQueuedInFlight(sessionId, item.id, false);
+        if (e instanceof HttpError && e.status === 409) {
+          // fall through to the normal send below
+        } else {
+          get().pushTurnItem({
+            kind: "error",
+            text: `插话发送失败: ${String(e)}`,
+          });
+          return;
+        }
+      }
+      if (delivered) {
+        // Optimistic bubble: rendered now, injected at the next loop boundary.
+        // The pendingInterject marker keeps pre-echo output inserting before
+        // the bubble (timeline matches a rebuilt view); the UserMessage echo
+        // consumes the marker and removes the queue item. The bubble is only
+        // appended while this session is still the current view — the POST
+        // may outlive a session switch, and the sink's invariant is that
+        // non-current views never get items mutations (the echoed message is
+        // covered by the DB rebuild on switching back).
+        if (get().sessionId === sessionId) {
+          set((s) => ({
+            pendingInterjectEcho: { ...s.pendingInterjectEcho, [item.id]: true },
+            items: [
+              ...s.items,
+              {
+                kind: "user",
+                text: item.text,
+                images: item.images,
+                mentions: item.mentions,
+                pendingInterject: item.id,
+              },
+            ],
+          }));
+        }
+        return;
+      }
+    }
+    // Idle / 409 fallback: normal send — no echo will arrive for a plain
+    // message, so consume the queue item now (in-flight cleared first)
+    get().setQueuedInFlight(sessionId, item.id, false);
+    get().removeQueuedMessage(sessionId, item.id);
+    const ok = await get().sendMessage(item.text, item.images, item.mentions);
+    if (!ok) {
+      readd();
+    }
+  },
+
+  async interjectAllQueued(sessionId) {
+    const queue = [...(get().queuedMessages[sessionId] ?? [])];
+    // Deliver in queue order; in-flight items are skipped by interjectQueued.
+    // A 409 fallback mid-way opens a new run and the remaining items
+    // interject into it — all messages still land in order
+    for (const item of queue) {
+      await get().interjectQueued(sessionId, item);
+    }
+  },
+
+  async drainQueuedHead(sessionId) {
+    const queue = get().queuedMessages[sessionId];
+    if (!queue?.length) return;
+    const first = queue[0]!;
+    if (first.inFlight) {
+      // Stuck in-flight (echo lost, e.g. across a server restart): release it
+      get().setQueuedInFlight(sessionId, first.id, false);
+      return;
+    }
+    get().removeQueuedMessage(sessionId, first.id);
+    const ok = await get().sendMessage(first.text, first.images, first.mentions);
+    if (!ok) {
+      // Submit failed (error item already in items): back to the front for
+      // a manual retry
+      set((s) => ({
+        queuedMessages: {
+          ...s.queuedMessages,
+          [sessionId]: [first, ...(s.queuedMessages[sessionId] ?? [])],
+        },
+      }));
+    }
+  },
+
+  deferSetting(sessionId, action) {
+    set((s) => ({
+      deferredSettings: {
+        ...s.deferredSettings,
+        [sessionId]: [...(s.deferredSettings[sessionId] ?? []), action],
+      },
+    }));
+  },
+
+  applySettingAction(action) {
+    if (action.kind === "plan") {
+      void get().setPlanMode(!get().planMode);
+    } else if (action.kind === "yolo") {
+      void get().setYolo(!get().yolo);
+    } else if (action.kind === "effort" && action.value) {
+      void get().setEffort(action.value);
+    } else if (action.kind === "compact") {
+      void get().runCompact();
+    }
+  },
+
+  drainDeferredSettings(sessionId, queueEmpty) {
+    const actions = get().deferredSettings[sessionId];
+    if (!actions?.length) return;
+    // Only /compact opens a run: apply it only after the queue drains so it
+    // never races the auto-drain sendMessage; everything else is instant
+    const instant = actions.filter((a) => a.kind !== "compact");
+    const compacts = queueEmpty ? actions.filter((a) => a.kind === "compact") : [];
+    const rest = queueEmpty ? [] : actions.filter((a) => a.kind === "compact");
+    set((s) => ({
+      deferredSettings: { ...s.deferredSettings, [sessionId]: rest },
+    }));
+    for (const action of [...instant, ...compacts]) {
+      get().applySettingAction(action);
+    }
   },
 
   async runCompact() {
@@ -585,7 +836,6 @@ export const useApp = create<AppState>((set, get) => ({
       const mode = (await resp.json()) as ModeStatus;
       set({ yolo: mode.yolo, planMode: mode.plan_mode });
     } catch {
-      // Roll back the optimistic value; the request may have reached the server, so syncMode reconciles the real state
       set({ planMode: !on });
       get().syncMode();
     }
@@ -613,7 +863,7 @@ export const useApp = create<AppState>((set, get) => ({
         effort: mode.reasoning_effort,
       });
     } catch {
-      // Fail silently: retry at the next reconcile point (turn end / page visible / project switch)
+      // Best-effort reconciliation; retried at the next chat/switch entry
     }
   },
 

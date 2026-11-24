@@ -24,7 +24,6 @@ pub(crate) use tool_cells::{ExploringCell, ToolCell};
 
 pub(crate) trait HistoryCell: Send + Sync {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>>;
-    /// 基于内容计算缓存键，用于跳过未变更 cell 的重复渲染
     fn cache_key(&self) -> u64;
 }
 
@@ -37,7 +36,6 @@ fn format_seconds(ms: u64) -> String {
     format!("{:.1}", secs)
 }
 
-/// 工具分类，每种工具拥有独立的动词、颜色和显示标签
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ToolCategory {
     FileRead,
@@ -74,7 +72,6 @@ impl ToolCategory {
         }
     }
 
-    /// 进行中动词（如 Codex 的 "Calling" / "Running" / "Exploring"）
     pub fn verb_active(&self) -> &'static str {
         match self {
             Self::FileRead => "Reading",
@@ -93,7 +90,6 @@ impl ToolCategory {
         }
     }
 
-    /// 完成动词（如 Codex 的 "Called" / "Ran" / "Explored"）
     pub fn verb_done(&self) -> &'static str {
         match self {
             Self::FileRead => "Read",
@@ -112,7 +108,6 @@ impl ToolCategory {
         }
     }
 
-    /// 主题色（活跃/成功状态）
     pub fn color(&self) -> Color {
         match self {
             Self::FileRead => Color::Cyan,
@@ -131,20 +126,13 @@ impl ToolCategory {
     }
 }
 
-/// 聊天正文前景色
 pub(crate) const CHAT_FG: Color = Color::Rgb(248, 250, 252); // #F8FAFC
-/// 输入占位符（中性灰，不带蓝调）
-pub(crate) const CHAT_PLACEHOLDER: Color = Color::Rgb(130, 130, 130); // #828282
-/// 粘贴元素高亮
 pub(crate) const CHAT_PASTE: Color = Color::Rgb(34, 211, 238); // #22D3EE
-/// 路径引用 `@file`/`@folder` 高亮
 pub(crate) const CHAT_FILE_MENTION: Color = Color::Rgb(251, 191, 36); // #FBBF24
 pub(crate) const CHAT_IMAGE: Color = Color::Rgb(167, 139, 250); // #A78BFA
-/// Plan 模式徽标
 pub(crate) const PLAN_BADGE: Color = Color::Rgb(217, 159, 7); // #D99F07
 
-/// 将 Message 列表转换为 HistoryCell 列表
-/// 连续只读工具调用合并为 ExploringCell，其余各自独立展示
+/// Consecutive read-only tool calls merge into an ExploringCell
 pub(crate) fn messages_to_cells(
     messages: &[Message],
     thinking_collapsed: bool,
@@ -162,6 +150,7 @@ pub(crate) fn messages_to_cells(
                 text,
                 plan_mode,
                 mentions,
+                ..
             } => {
                 last_plan_mode = *plan_mode;
                 cells.push(Box::new(UserMessageCell {
@@ -213,7 +202,6 @@ pub(crate) fn messages_to_cells(
             }
             Message::ToolCall { name, arguments } => {
                 if name == "task" {
-                    // Task 工具：收集 SubagentStep 作为实时进度，取 ToolResult 作为终态
                     let mut task_result = None;
                     let mut steps = Vec::new();
                     let mut j = i + 1;
@@ -325,7 +313,6 @@ pub(crate) fn messages_to_cells(
                         i = j;
                     }
                 } else if ToolCategory::from_name(name) == ToolCategory::Todo {
-                    // todo_write：解析结果生成 TodoCell
                     let next_result = if i + 1 < messages.len() {
                         if let Message::ToolResult {
                             name: rn, result, ..
@@ -347,7 +334,6 @@ pub(crate) fn messages_to_cells(
                         cells.push(Box::new(TodoCell::from_result(result)));
                         i += 2;
                     } else {
-                        // 尚未有结果时，从参数中提取简略展示
                         let args: serde_json::Value =
                             serde_json::from_str(arguments).unwrap_or_default();
                         let mut items = Vec::new();
@@ -467,7 +453,6 @@ pub(crate) fn messages_to_cells(
     cells
 }
 
-/// 使用 textwrap 进行精确换行
 fn wrap_text(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
@@ -481,8 +466,6 @@ fn wrap_text(text: &str, max_width: u16) -> Vec<String> {
         .collect()
 }
 
-/// 从工具调用的参数中提取摘要信息
-/// subagent 步骤摘要：动词前缀 + 目标（如 "Read src/main.rs"、"Grep \"TODO\" in src"）
 pub(crate) fn subagent_step_summary(name: &str, arguments: &str) -> String {
     let cat = ToolCategory::from_name(name);
     let detail = tool_call_summary(name, arguments);
@@ -688,7 +671,6 @@ pub(crate) fn tool_result_summary(name: &str, result: &str) -> String {
             }
         }
         "task" => {
-            // 提取 <task_result> 内容
             let inner =
                 extract_xml_tag(result, "task_result").unwrap_or_else(|| result.to_string());
             let trimmed = inner.trim();

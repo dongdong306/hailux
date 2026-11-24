@@ -7,15 +7,18 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use super::super::protocol::{
-    CreateSessionRequest, InterruptRequest, SessionInfo, ValidateWorkdirRequest, WorkdirInfo,
+    CreateSessionRequest, InterjectRequest, InterruptRequest, SessionInfo, ValidateWorkdirRequest,
+    WorkdirInfo,
 };
 use super::super::state::WebServerState;
 use super::{err500, resolve_dir, strip_verbatim};
+use crate::agent::event::Interjection;
 
 #[derive(Deserialize)]
 pub(super) struct SessionsQuery {
     work_dir: Option<String>,
-    /// all=true：跨工作目录列出全部顶层会话（侧边栏按目录分组用）
+    /// all=true: list every top-level session across work dirs (sidebar
+    /// groups by directory)
     #[serde(default)]
     all: bool,
 }
@@ -45,7 +48,8 @@ pub(super) async fn list_sessions(
         };
     }
 
-    // storage 层已做 work_dir 变体匹配（带/不带 `\\?\` 前缀），单次查询即可
+    // The storage layer matches work_dir variants (with/without the `\\?\`
+    // prefix), so a single query suffices
     let requested = q
         .work_dir
         .unwrap_or_else(|| state.default_work_dir.display().to_string());
@@ -128,7 +132,7 @@ pub(super) async fn get_session(
 ) -> Response {
     match state.manager.storage().load_messages(&id).await {
         Ok(messages) => {
-            // 附带压缩摘要标记（前端渲染分隔线）
+            // Plus the compaction-summary marker (frontend renders the divider)
             let summary = state
                 .manager
                 .storage()
@@ -162,9 +166,10 @@ pub(super) async fn get_session(
     }
 }
 
-/// 导出会话为自包含 HTML 分享文件（复用 `share` 模块，与 TUI /share 同源）。
-/// Content-Disposition 走 ASCII 回退名 + UTF-8 扩展名（RFC 5987），避免
-/// 中文标题在不同浏览器的编码歧义。
+/// Export a session as a self-contained HTML share file (reuses the `share`
+/// module, same source as the TUI's /share). Content-Disposition pairs an
+/// ASCII fallback name with a UTF-8 extension name (RFC 5987) to avoid
+/// non-ASCII title encoding ambiguity across browsers.
 pub(super) async fn export_session(
     State(state): State<Arc<WebServerState>>,
     Path(id): Path<String>,
@@ -194,7 +199,8 @@ pub(super) async fn export_session(
     }
 }
 
-/// 百分号编码（RFC 3986 unreserved 之外全编码），用于 filename* 扩展名。
+/// Percent-encode everything outside the RFC 3986 unreserved set, for the
+/// filename* extension parameter.
 pub(super) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {
@@ -236,7 +242,8 @@ pub(super) async fn list_workdirs(State(state): State<Arc<WebServerState>>) -> R
     }
 }
 
-/// 服务器启动目录（canonical，剥离 verbatim 前缀）—— 前端初始项目目录
+/// Server startup dir (canonical, verbatim prefix stripped) — the
+/// frontend's initial project directory
 pub(super) async fn get_default_workdir(State(state): State<Arc<WebServerState>>) -> Response {
     Json(WorkdirInfo {
         path: strip_verbatim(&state.default_work_dir.display().to_string()),
@@ -255,7 +262,7 @@ pub(super) async fn validate_workdir(Json(req): Json<ValidateWorkdirRequest>) ->
     Json(WorkdirInfo { path: s }).into_response()
 }
 
-// ── 文件提及搜索（@ 补全）────────────────────────────────────
+// ── File mention search (@ completion) ───────────────────────
 
 #[derive(Deserialize)]
 pub(super) struct FilesQuery {
@@ -311,7 +318,7 @@ pub(super) async fn search_files(
     }
 }
 
-// ── 运行时控制 ───────────────────────────────────────────────
+// ── Runtime controls ─────────────────────────────────────────
 
 pub(super) async fn interrupt(
     State(state): State<Arc<WebServerState>>,
@@ -335,6 +342,88 @@ pub(super) async fn interrupt(
         (
             StatusCode::NOT_FOUND,
             "该会话没有运行中的任务（或服务器尚未加载它）",
+        )
+            .into_response()
+    }
+}
+
+/// Mid-run interjection (POST /api/interject). The message waits in a per-run
+/// channel and enters the agent context at the next loop boundary — the
+/// current LLM stream / tool execution is never interrupted. Echoed back as
+/// `UserMessage` (with client_id) once actually injected, so the submitting
+/// tab removes its queued item only then. 409 = no active chat run.
+pub(super) async fn interject(
+    State(state): State<Arc<WebServerState>>,
+    Json(req): Json<InterjectRequest>,
+) -> Response {
+    // Input validation: an empty message would poison the healthy run with a
+    // content-less user turn; an empty client_id breaks the echo contract
+    if req.client_id.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "client_id 不能为空").into_response();
+    }
+    if req.message.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "插话内容不能为空").into_response();
+    }
+    let attachments = match super::super::runner::convert_attachments(&req.attachments) {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    // Plan mode is server-global (the run syncs it at its entry), so this
+    // flag is the run's effective value unless toggled mid-run. Mirrors the
+    // chat-entry guard: an expanded /init would inject a doomed
+    // create-AGENTS.md prompt into a read-only run.
+    if state.manager.global_plan()
+        && crate::agent::parse_slash_input(&req.message)
+            .map(|(n, _)| n)
+            .as_deref()
+            == Some(crate::agent::command_def::INIT_COMMAND_NAME)
+    {
+        return (
+            StatusCode::CONFLICT,
+            "当前为只读规划模式，无法插话 /init。请先退出规划模式，再运行 /init。",
+        )
+            .into_response();
+    }
+    // Prompt-style slash commands (/init, custom commands) expand here, at
+    // submission time: the run task holds the session lock for its whole
+    // duration, so ChatSession's registry is unreachable — re-discover from
+    // the session's work_dir instead (same as GET /api/commands). The echo
+    // still shows the raw `/cmd` text; only the injected content is expanded.
+    let content = match state
+        .manager
+        .storage()
+        .get_session_work_dir(&req.session_id)
+        .await
+    {
+        Ok(Some(dir)) => crate::agent::CommandRegistry::discover(std::path::Path::new(&dir))
+            .ok()
+            .and_then(|r| r.render_prompt_command(&req.message))
+            .unwrap_or_else(|| req.message.clone()),
+        _ => req.message.clone(),
+    };
+    let interjection = Interjection {
+        client_id: req.client_id,
+        content,
+        attachments,
+        mentions: req
+            .mentions
+            .into_iter()
+            .map(|m| crate::agent::event::Mention {
+                start: m.start,
+                end: m.end,
+                kind: m.kind,
+            })
+            .collect(),
+    };
+    if state.manager.try_interject(&req.session_id, interjection) {
+        StatusCode::OK.into_response()
+    } else {
+        // No instance / slot unset / receiver dropped (run over or compaction
+        // run active — compaction does not open an interject channel) /
+        // cancelling / bounded queue full (limit: 10 pending interjections)
+        (
+            StatusCode::CONFLICT,
+            "该会话没有正在运行的对话任务，无法插话",
         )
             .into_response()
     }

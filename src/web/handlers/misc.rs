@@ -19,16 +19,18 @@ fn mode_status(state: &WebServerState) -> ModeStatus {
     }
 }
 
-/// 当前全局模式（对账用）。仅读原子标志，不触碰会话锁，
-/// SSE 流长时间持锁时也能即时返回。
+/// Current global mode (for reconciliation). Reads atomic flags only,
+/// never the session lock — returns immediately even while an SSE stream
+/// holds it for a long time.
 pub(super) async fn get_mode(State(state): State<Arc<WebServerState>>) -> Response {
     Json(mode_status(&state)).into_response()
 }
 
-/// YOLO / Plan 为服务器级全局模式（跨 work_dir、跨会话保持）：
-/// 广播即时生效（YOLO 绕过会话锁）。旧客户端携带的 `work_dir` 字段
-/// 会被 serde 忽略（未知字段默认跳过）。返回设置后的最终状态，
-/// 前端以其为准（不做本地猜测）。
+/// YOLO / Plan are server-level global modes (kept across work dirs and
+/// sessions): the broadcast applies immediately (YOLO bypasses the session
+/// lock). A stale client sending `work_dir` is tolerated (serde skips
+/// unknown fields). Returns the resulting state — the frontend must treat
+/// it as authoritative instead of guessing locally.
 pub(super) async fn set_plan_mode(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<PlanModeRequest>,
@@ -41,9 +43,11 @@ pub(super) async fn set_yolo(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<YoloRequest>,
 ) -> Response {
-    // 持久化到 config.toml（下次启动 / 新建会话保持当前模式；空串 = Normal，
-    // save 时不写该字段，保持文件最小化）。配置写锁串行化读-改-写，
-    // 防止并发请求互相覆盖（对齐 switch_model）。保存失败不切换内存模式。
+    // Persisted to config.toml (the mode survives restarts / new sessions;
+    // empty string = Normal, omitted on save to keep the file minimal). The
+    // config write lock serializes read-modify-write so concurrent requests
+    // can't overwrite each other (mirrors switch_model). A save failure
+    // leaves the in-memory mode untouched.
     let _guard = state.config_write_lock.lock().await;
     let mut cfg = state.manager.cfg();
     cfg.permission.mode = if req.enabled {
@@ -59,8 +63,9 @@ pub(super) async fn set_yolo(
     Json(mode_status(&state)).into_response()
 }
 
-/// 设置思考强度（服务器级全局）：写 config.toml + 广播所有已构建会话。
-/// 持锁中的会话跳过，由 chat 入口同步兜底（对齐 set_global_plan）。
+/// Set reasoning effort (server-level global): writes config.toml and
+/// broadcasts to all built sessions. Locked sessions are skipped; the chat
+/// entry re-syncs as a fallback (mirrors set_global_plan).
 pub(super) async fn set_effort(
     State(state): State<Arc<WebServerState>>,
     Json(req): Json<EffortRequest>,
@@ -76,19 +81,24 @@ pub(super) async fn set_effort(
     Json(mode_status(&state)).into_response()
 }
 
-// ── 斜杠命令 ─────────────────────────────────────────────────
+// ── Slash commands ───────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub(super) struct CommandsQuery {
     work_dir: Option<String>,
 }
 
-/// Web 端可用的斜杠命令列表（输入框 `/` 补全用）。
+/// Slash commands available on the web (input `/` completion).
 ///
-/// - prompt 型：`/init` 与自定义命令，`POST /api/chat` 时由后端展开为完整提示词
-/// - ui 型：`/compact`（前端本地处理，走 `POST /api/compact`）。
-///   其余 TUI UI-action 命令（/new /sessions /plan /models /skills /mcp /yolo /tasks /exit）
-///   在 Web 端均有对应的界面入口或无意义，不列出。
+/// - prompt: `/init` and custom commands, expanded by the backend on
+///   `POST /api/chat` / `/api/interject`
+/// - view: pure UI actions (open Skills/MCP/stats panels, model menu),
+///   immediate in any state
+/// - setting: /plan /yolo /effort match the toolbar toggles (immediate in
+///   any state); /compact opens a new run, so while running the frontend
+///   defers it until this run's RunComplete (with the queue drained).
+///   Other TUI UI-action commands (/new /sessions /tasks /share /exit) all
+///   have web UI entries or are meaningless here, so they are not listed.
 pub(super) async fn list_commands(
     State(state): State<Arc<WebServerState>>,
     Query(q): Query<CommandsQuery>,
@@ -96,11 +106,27 @@ pub(super) async fn list_commands(
     let dir = resolve_dir(&state, q.work_dir.as_deref());
     let registry = crate::agent::CommandRegistry::discover(&dir).unwrap_or_default();
 
-    let mut commands = vec![CommandInfoDto {
-        name: "compact".to_string(),
-        description: "压缩上下文（总结历史对话）".to_string(),
-        kind: "ui".to_string(),
-    }];
+    let mut commands: Vec<CommandInfoDto> = [
+        ("compact", "压缩上下文（总结历史对话）", "setting"),
+        ("plan", "切换规划模式（只读）", "setting"),
+        ("yolo", "切换 YOLO 模式（跳过权限确认）", "setting"),
+        (
+            "effort",
+            "设置思考强度（/effort low|high|max 直接设置）",
+            "setting",
+        ),
+        ("skills", "查看已加载的 skill", "view"),
+        ("mcp", "查看 MCP 服务器", "view"),
+        ("stats", "查看 token 用量统计", "view"),
+        ("models", "切换模型", "view"),
+    ]
+    .into_iter()
+    .map(|(name, description, kind)| CommandInfoDto {
+        name: name.to_string(),
+        description: description.to_string(),
+        kind: kind.to_string(),
+    })
+    .collect();
     commands.extend(
         registry
             .list()
@@ -114,31 +140,33 @@ pub(super) async fn list_commands(
     Json(commands).into_response()
 }
 
-// ── 用量统计 ─────────────────────────────────────────────────
+// ── Usage stats ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub(super) struct StatsQuery {
-    /// 可选项目筛选（空/缺省 = 全局统计）
+    /// Optional project filter (empty/absent = global stats)
     work_dir: Option<String>,
-    /// 统计窗口天数（默认 30；0 = 全部）
+    /// Stats window in days (default 30; 0 = all)
     #[serde(default)]
     days: Option<u32>,
-    /// 最近请求明细条数（默认 50）
+    /// Recent-request detail row count (default 50)
     #[serde(default)]
     limit: Option<u32>,
 }
 
-/// token 用量统计（全局或按项目筛选，基于 messages 表的请求级 usage 行）
+/// Token usage stats (global or per project, based on per-request usage
+/// rows in the messages table)
 pub(super) async fn get_stats(
     State(state): State<Arc<WebServerState>>,
     Query(q): Query<StatsQuery>,
 ) -> Response {
-    // work_dir 语义区分：显式传空串/缺省 = 全局；传值 = 该项目
+    // work_dir semantics: explicit empty/absent = global; a value = that project
     let filter = q
         .work_dir
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty());
-    // work_dir=all 保持全局（前端项目筛选器的“全部项目”选项不发该参数）
+    // work_dir=all stays global (the frontend project filter's "all projects"
+    // option never sends this param)
     let filter = if filter.as_deref() == Some("all") {
         None
     } else {
@@ -156,7 +184,8 @@ pub(super) async fn get_stats(
         let mut recent = storage
             .list_recent_usage(filter.as_deref(), days, limit)
             .await?;
-        // 对齐 /api/workdirs 契约：剥离 DB 中的 verbatim 前缀后再下发
+        // Match the /api/workdirs contract: strip the verbatim prefix stored
+        // in the DB before sending
         for r in &mut recent {
             r.work_dir = strip_verbatim(&r.work_dir);
         }
