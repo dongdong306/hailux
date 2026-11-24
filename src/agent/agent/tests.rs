@@ -820,3 +820,152 @@ fn interject_rejects_while_cancelling() {
         "a cancelling run must reject interjections so callers fall back"
     );
 }
+
+// ── Retry-error context policy ─────────────────────────────────────
+// Errors leave no assistant trace in the stored context; the failure reaches
+// the next turn as a transient system-reminder injected on the new user
+// message (append_text_to_last_user_message).
+
+fn user_text(msg: &SharedMessage) -> String {
+    match msg.as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => t.clone(),
+            ChatCompletionRequestUserMessageContent::Array(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ChatCompletionRequestUserMessageContentPart::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        },
+        _ => panic!("expected a User message"),
+    }
+}
+
+#[test]
+fn append_reminder_text_form_appends_to_last_user() {
+    use super::messages::append_text_to_last_user_message;
+    let mut messages = vec![user_msg("older"), user_msg("hello")];
+    append_text_to_last_user_message(&mut messages, "<note/>");
+    assert_eq!(user_text(&messages[1]), "hello\n\n<note/>");
+    assert_eq!(user_text(&messages[0]), "older");
+}
+
+#[test]
+fn append_reminder_hits_user_before_trailing_tool_results() {
+    use super::messages::append_text_to_last_user_message;
+    let mut messages = vec![
+        user_msg("hello"),
+        assistant_with_tool_calls(&["c1"]),
+        tool_result_msg("c1"),
+    ];
+    append_text_to_last_user_message(&mut messages, "<note/>");
+    assert!(user_text(&messages[0]).ends_with("<note/>"));
+}
+
+#[test]
+fn append_reminder_array_form_pushes_text_part() {
+    use super::messages::append_text_to_last_user_message;
+    let img = png_attachment();
+    let mut messages = vec![Arc::new(build_user_message("看图", &[img]))];
+    append_text_to_last_user_message(&mut messages, "<note/>");
+    let CompatibleChatCompletionRequestMessage::User(u) = messages[0].as_ref() else {
+        panic!("expected User");
+    };
+    let ChatCompletionRequestUserMessageContent::Array(parts) = &u.content else {
+        panic!("expected Array content");
+    };
+    assert_eq!(parts.len(), 3, "text part + image part + appended note");
+    let ChatCompletionRequestUserMessageContentPart::Text(t) = &parts[2] else {
+        panic!("expected trailing Text part");
+    };
+    assert!(t.text.ends_with("<note/>"));
+}
+
+#[test]
+fn append_reminder_noop_without_user_message() {
+    use super::messages::append_text_to_last_user_message;
+    let assistant: SharedMessage = Arc::new(
+        ChatCompletionRequestAssistantMessage {
+            content: Some(
+                async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(
+                    "hi".to_string(),
+                ),
+            ),
+            ..Default::default()
+        }
+        .into(),
+    );
+    let mut messages: Vec<SharedMessage> = vec![assistant];
+    append_text_to_last_user_message(&mut messages, "<note/>");
+    assert!(matches!(
+        messages[0].as_ref(),
+        CompatibleChatCompletionRequestMessage::Assistant(_)
+    ));
+}
+
+#[tokio::test]
+async fn finalize_error_status_leaves_no_assistant_trace() {
+    let (event_tx, mut rx) = crate::agent::event::create_core_event_channel();
+    let mut messages = vec![user_msg("hello")];
+    super::stream::finalize_messages(
+        &mut messages,
+        "[Error: 429]".to_string(),
+        &event_tx,
+        Vec::new(),
+        "test/test-model",
+        crate::agent::models::ReasoningEffort::default(),
+        crate::agent::event::TaskStatus::Error,
+    );
+    // The final list is handed to AgentComplete (input drained by design)
+    let crate::agent::event::CoreEvent::AgentComplete {
+        messages: final_msgs,
+        ..
+    } = rx.recv().await.expect("AgentComplete emitted")
+    else {
+        panic!("expected AgentComplete");
+    };
+    assert_eq!(
+        final_msgs.len(),
+        1,
+        "error finalize must not synthesize an assistant message"
+    );
+    assert!(matches!(
+        final_msgs[0].as_ref(),
+        CompatibleChatCompletionRequestMessage::User(_)
+    ));
+}
+
+#[tokio::test]
+async fn finalize_completed_status_keeps_assistant_fallback() {
+    let (event_tx, mut rx) = crate::agent::event::create_core_event_channel();
+    let mut messages = vec![user_msg("hello")];
+    super::stream::finalize_messages(
+        &mut messages,
+        "[fallback]".to_string(),
+        &event_tx,
+        Vec::new(),
+        "test/test-model",
+        crate::agent::models::ReasoningEffort::default(),
+        crate::agent::event::TaskStatus::Completed,
+    );
+    // PersistMessage (fallback synthesis) precedes the sentinel
+    let mut final_msgs = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        if let crate::agent::event::CoreEvent::AgentComplete { messages, .. } = ev {
+            final_msgs = messages;
+            break;
+        }
+    }
+    assert_eq!(final_msgs.len(), 2, "non-error fallback still applies");
+    let CompatibleChatCompletionRequestMessage::Assistant(a) = final_msgs[1].as_ref() else {
+        panic!("expected synthesized Assistant");
+    };
+    let Some(async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(t)) =
+        &a.base.content
+    else {
+        panic!("expected text content");
+    };
+    assert_eq!(t, "[fallback]");
+}

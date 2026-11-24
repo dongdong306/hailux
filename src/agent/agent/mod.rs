@@ -61,6 +61,11 @@ pub struct Agent {
     /// the receiver. Shared with SessionManager so delivery skips the session
     /// lock the runner holds for the whole run.
     interject_slot: InterjectSlot,
+    /// Last exhausted-retry stream error (transient, in-memory only): the run
+    /// task writes it on failure, the next `chat_stream` consumes it as a
+    /// `<system-reminder>` on the new user message. The error itself never
+    /// enters the stored context as an assistant message.
+    last_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Agent {
@@ -94,6 +99,7 @@ impl Agent {
             event_hub: super::event::EventHub::new(),
             retry,
             interject_slot: Arc::new(std::sync::Mutex::new(None)),
+            last_error: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -103,6 +109,11 @@ impl Agent {
 
     pub fn interrupt(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Consume the pending last-run error, if any (chat_stream entry point)
+    fn take_last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// Web interrupt endpoint sets this without the session lock
@@ -213,12 +224,31 @@ impl Agent {
 
     pub fn chat_stream(
         &mut self,
+        session_id: &str,
         user_input: &str,
         attachments: Vec<Attachment>,
         event_tx: CoreEventTx,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.messages
             .push(Arc::new(build_user_message(user_input, &attachments)));
+
+        // Surface the previous run's failure as a transient system-reminder on
+        // the new user message (the DB user row keeps the original text only;
+        // the reminder lands in the row's runtime_meta via PersistUserReminder
+        // so rebuilds reproduce the exact request bytes): the error itself no
+        // longer enters the context as an assistant message. The event carries
+        // session_id so consumers anchor the target row at injection time even
+        // if the user switches sessions while the event sits in the queue.
+        if let Some(err) = self.take_last_error() {
+            let reminder = format!(
+                "<system-reminder>The previous request failed after retries were exhausted and produced no output, so it left nothing in this conversation. Failure: {err}. Continue the new request normally; mention the earlier failure only if it helps the user.</system-reminder>"
+            );
+            messages::append_text_to_last_user_message(&mut self.messages, &reminder);
+            let _ = event_tx.try_send(CoreEvent::PersistUserReminder {
+                session_id: session_id.to_string(),
+                reminder,
+            });
+        }
 
         let client = self.client.clone();
         let tool_registry = self.tool_registry.clone_registry();
@@ -256,9 +286,20 @@ impl Agent {
 
         let tx_clone = event_tx.clone();
         let cancel = self.cancel.clone();
+        let last_error = self.last_error.clone();
         self.cancel.store(false, Ordering::Relaxed);
         tokio::spawn(async move {
             if let Err(e) = run_stream_loop(&mut state, cancel, &tx_clone).await {
+                // Stash the failure for the next turn's system-reminder;
+                // truncated to keep the reminder from flooding the context
+                let mut err_text = e.to_string();
+                let char_count = err_text.chars().count();
+                if char_count > 300 {
+                    err_text = err_text.chars().take(300).collect::<String>() + "…";
+                }
+                if let Ok(mut slot) = last_error.lock() {
+                    *slot = Some(err_text);
+                }
                 let _ = tx_clone.try_send(CoreEvent::AgentChunk(format!("\n[Error: {}]", e)));
                 finalize_messages(
                     &mut state.messages,

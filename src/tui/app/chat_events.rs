@@ -75,6 +75,7 @@ impl App {
         match event {
             CoreEvent::AgentChunk(chunk) => {
                 self.finalize_thinking_ms();
+                self.drop_trailing_retry_notice();
                 match self.last_real_message_mut() {
                     Some(Message::AgentStreaming(text)) => {
                         text.push_str(&chunk);
@@ -88,6 +89,7 @@ impl App {
                 }
             }
             CoreEvent::AgentReasoningChunk(chunk) => {
+                self.drop_trailing_retry_notice();
                 match self.last_real_message_mut() {
                     Some(Message::AgentThinking { text, think_ms, .. }) if think_ms.is_none() => {
                         text.push_str(&chunk);
@@ -121,9 +123,12 @@ impl App {
                     self.messages.remove(cut - 1);
                 }
                 let secs = delay_ms as f64 / 1000.0;
-                self.push_turn_output(Message::Agent(format!(
+                let notice = format!(
                     "[请求失败，{secs:.1}s 后进行第 {attempt}/{max_retries} 次重试：{reason}]"
-                )));
+                );
+                // Replace a trailing retry notice in place; only the latest
+                // attempt stays visible instead of one line per attempt
+                upsert_retry_notice(&mut self.messages, notice);
                 if self.should_auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -287,6 +292,7 @@ impl App {
                                 | Message::ToolCall { .. }
                                 | Message::ToolResult { .. }
                                 | Message::Agent(_)
+                                | Message::Retry(_)
                                 | Message::AgentDone { .. } => true,
                                 _ => false,
                             })
@@ -306,6 +312,23 @@ impl App {
                     self.storage.append_message(session_id, &stored).await?;
                 }
             }
+            CoreEvent::PersistUserReminder {
+                session_id,
+                reminder,
+            } => {
+                // The in-memory user message already carries the reminder;
+                // land it in the row's runtime_meta so a rebuild reproduces
+                // the exact request bytes (prompt-cache stable). Use the
+                // session anchored at injection time, not the ambient
+                // current session (a mid-queue switch would misfile the row).
+                if let Err(e) = self
+                    .storage
+                    .append_user_message_reminder(&session_id, &reminder)
+                    .await
+                {
+                    eprintln!("[warn] failed to persist user reminder: {e}");
+                }
+            }
             CoreEvent::ToolCallStart {
                 name,
                 arguments,
@@ -313,6 +336,7 @@ impl App {
                 subagent_index,
             } => {
                 self.finalize_thinking_ms();
+                self.drop_trailing_retry_notice();
                 if subagent_name.is_some() {
                     self.push_turn_output(Message::SubagentStep {
                         summary: crate::tui::history_cell::subagent_step_summary(&name, &arguments),
@@ -894,7 +918,7 @@ impl App {
         }
 
         let tx = self.core_tx.clone();
-        if let Err(e) = self.agent.chat_stream(&input, attachments, tx) {
+        if let Err(e) = self.agent.chat_stream(&session_id, &input, attachments, tx) {
             self.push_turn_output(Message::Agent(format!("[错误: {}]", e)));
             self.is_processing = false;
             self.input.set_processing(false);
@@ -953,28 +977,19 @@ impl App {
     /// Optimistic interjection bubbles at the tail are transparent: new
     /// output goes before them so the timeline matches a rebuilt view
     pub(super) fn turn_output_insert_index(&self) -> usize {
-        let mut idx = self.messages.len();
-        while idx > 0
-            && matches!(
-                &self.messages[idx - 1],
-                Message::User {
-                    pending_interject: Some(_),
-                    ..
-                }
-            )
-        {
-            idx -= 1;
-        }
-        idx
+        turn_output_insert_index(&self.messages)
     }
 
     pub(super) fn push_turn_output(&mut self, msg: Message) {
-        let at = self.turn_output_insert_index();
-        if at == self.messages.len() {
-            self.messages.push(msg);
-        } else {
-            self.messages.insert(at, msg);
-        }
+        push_turn_output(&mut self.messages, msg);
+    }
+
+    /// A retry notice is transient: the next attempt's first streamed output
+    /// (content / reasoning / tool call) removes it — a successful retry
+    /// leaves no trace in the timeline; a fully failed retry keeps its last
+    /// notice as the error trail.
+    pub(super) fn drop_trailing_retry_notice(&mut self) {
+        drop_trailing_retry_notice(&mut self.messages);
     }
 
     pub(super) fn last_real_message_mut(&mut self) -> Option<&mut Message> {
@@ -1294,9 +1309,107 @@ fn extract_task_attr(tag: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Optimistic interjection bubbles at the tail are transparent: new output
+/// goes before them so the timeline matches a rebuilt view
+fn turn_output_insert_index(messages: &[Message]) -> usize {
+    let mut idx = messages.len();
+    while idx > 0
+        && matches!(
+            &messages[idx - 1],
+            Message::User {
+                pending_interject: Some(_),
+                ..
+            }
+        )
+    {
+        idx -= 1;
+    }
+    idx
+}
+
+fn push_turn_output(messages: &mut Vec<Message>, msg: Message) {
+    let at = turn_output_insert_index(messages);
+    if at == messages.len() {
+        messages.push(msg);
+    } else {
+        messages.insert(at, msg);
+    }
+}
+
+/// Returns whether a trailing retry notice was removed.
+fn drop_trailing_retry_notice(messages: &mut Vec<Message>) -> bool {
+    let idx = turn_output_insert_index(messages);
+    if idx > 0 && matches!(&messages[idx - 1], Message::Retry(_)) {
+        messages.remove(idx - 1);
+        true
+    } else {
+        false
+    }
+}
+
+/// Replace a trailing retry notice in place (one line per retry sequence,
+/// not one line per attempt); push as a fresh notice otherwise.
+fn upsert_retry_notice(messages: &mut Vec<Message>, notice: String) {
+    let at = turn_output_insert_index(messages);
+    if at > 0 && matches!(&messages[at - 1], Message::Retry(_)) {
+        messages[at - 1] = Message::Retry(notice);
+    } else {
+        push_turn_output(messages, Message::Retry(notice));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_notice_upsert_replaces_trailing_notice_in_place() {
+        let mut messages: Vec<Message> = vec![Message::Agent("answer".into())];
+        upsert_retry_notice(&mut messages, "[retry 1/3]".into());
+        upsert_retry_notice(&mut messages, "[retry 2/3]".into());
+        assert_eq!(messages.len(), 2, "one line per retry sequence");
+        assert!(matches!(&messages[1], Message::Retry(t) if t == "[retry 2/3]"));
+    }
+
+    #[test]
+    fn retry_notice_upsert_pushes_when_notice_not_trailing() {
+        let mut messages: Vec<Message> = vec![
+            Message::Retry("[retry 1/3]".into()),
+            Message::AgentStreaming("partial".into()),
+        ];
+        upsert_retry_notice(&mut messages, "[retry 2/3]".into());
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[2], Message::Retry(_)));
+    }
+
+    #[test]
+    fn retry_notice_dropped_by_first_output_of_next_attempt() {
+        let mut messages: Vec<Message> = vec![
+            Message::Agent("answer".into()),
+            Message::Retry("[retry 1/3]".into()),
+        ];
+        assert!(drop_trailing_retry_notice(&mut messages));
+        assert_eq!(messages.len(), 1);
+        push_turn_output(&mut messages, Message::AgentStreaming("new".into()));
+        assert!(matches!(&messages[1], Message::AgentStreaming(_)));
+    }
+
+    #[test]
+    fn retry_notice_drop_noop_when_not_trailing() {
+        let mut messages: Vec<Message> = vec![
+            Message::Agent("answer".into()),
+            Message::Retry("[retry 1/3]".into()),
+            Message::AgentStreaming("partial".into()),
+        ];
+        assert!(!drop_trailing_retry_notice(&mut messages));
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn retry_notice_drop_noop_on_empty_list() {
+        let mut messages: Vec<Message> = Vec::new();
+        assert!(!drop_trailing_retry_notice(&mut messages));
+    }
 
     #[test]
     fn estimate_basic() {

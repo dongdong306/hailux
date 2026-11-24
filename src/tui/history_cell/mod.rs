@@ -166,6 +166,12 @@ pub(crate) fn messages_to_cells(
                 }
                 i += 1;
             }
+            Message::Retry(text) => {
+                if !text.trim().is_empty() {
+                    cells.push(Box::new(TooltipCell { text: text.clone() }));
+                }
+                i += 1;
+            }
             Message::AgentStreaming(text) => {
                 if !text.trim().is_empty() {
                     cells.push(Box::new(AgentMarkdownCell { text: text.clone() }));

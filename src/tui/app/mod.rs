@@ -504,6 +504,15 @@ impl App {
                             eprintln!("[warn] cleanup persist error: {e}");
                         }
                     }
+                    AppEvent::Core(crate::agent::event::CoreEvent::PersistUserReminder {
+                        ..
+                    }) => {
+                        // Keep runtime_meta in lockstep with the in-memory
+                        // reminder even on the interrupt teardown path
+                        if let Err(e) = self.handle_event(event).await {
+                            eprintln!("[warn] cleanup reminder persist error: {e}");
+                        }
+                    }
                     _ => {}
                 }
             }

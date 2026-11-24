@@ -175,6 +175,54 @@ impl ChatStorage {
         Ok(())
     }
 
+    /// Append a transient `<system-reminder>` block to the last user row's
+    /// `runtime_meta.system_reminder` array. The read-modify-write runs in a
+    /// transaction and the update targets the row id captured by the SELECT,
+    /// so the target row is anchored even under concurrent writers. The value
+    /// is an array — multiple blocks per message are supported and rebuilt in
+    /// order, so request bytes stay identical across restarts (prompt-cache
+    /// stable). `content` itself is never touched — UI/export read it
+    /// verbatim.
+    pub async fn append_user_message_reminder(
+        &self,
+        session_id: &str,
+        reminder: &str,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let row: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, runtime_meta FROM messages WHERE id = (SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user')",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((row_id, runtime_meta)) = row else {
+            return Ok(());
+        };
+        let mut obj: serde_json::Map<String, serde_json::Value> = runtime_meta
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        match obj.get_mut("system_reminder") {
+            Some(serde_json::Value::Array(blocks)) => {
+                blocks.push(serde_json::Value::String(reminder.to_string()));
+            }
+            _ => {
+                obj.insert(
+                    "system_reminder".to_string(),
+                    serde_json::Value::Array(vec![serde_json::Value::String(reminder.to_string())]),
+                );
+            }
+        }
+        let updated = serde_json::Value::Object(obj).to_string();
+        sqlx::query("UPDATE messages SET runtime_meta = ? WHERE id = ?")
+            .bind(&updated)
+            .bind(row_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// 修复 orphaned tool calls：扫描最后一条活跃（compacted = 0）assistant 消息的
     /// tool_calls，为缺少 tool result 的 tool_call_id 补一条 "Tool execution aborted" 消息。
     pub async fn repair_orphaned_tool_calls(&self, session_id: &str) -> Result<()> {

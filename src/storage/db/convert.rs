@@ -194,6 +194,27 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
     }
 }
 
+/// Splice persisted `<system-reminder>` blocks back into the rebuilt user
+/// message so request bytes stay identical across restarts (prompt-cache
+/// stable). Blocks live in the row's `runtime_meta.system_reminder` array in
+/// injection order; `content` itself is never polluted — UI/export read it
+/// verbatim.
+fn stored_user_reminders(msg: &StoredMessage) -> Vec<String> {
+    msg.runtime_meta
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| {
+            v.get("system_reminder")
+                .and_then(|b| b.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| b.as_str().map(String::from))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
 pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompletionRequestMessage> {
     match msg.role {
         MessageRole::System => Some(
@@ -212,10 +233,19 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
                     serde_json::from_str::<Vec<crate::agent::media::Attachment>>(json).ok()
                 })
                 .unwrap_or_default();
+            // Persisted reminders splice back exactly as injected in memory
+            // ("\n\n"-joined into the Text content, separate trailing parts
+            // in the Array form) so rebuilt requests are byte-identical
+            let reminders = stored_user_reminders(msg);
             if attachments.is_empty() {
+                let mut text = msg.content.clone();
+                for r in &reminders {
+                    text.push_str("\n\n");
+                    text.push_str(r);
+                }
                 Some(
                     ChatCompletionRequestUserMessage {
-                        content: ChatCompletionRequestUserMessageContent::Text(msg.content.clone()),
+                        content: ChatCompletionRequestUserMessageContent::Text(text),
                         name: None,
                     }
                     .into(),
@@ -241,6 +271,13 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
                         },
                     )
                 }));
+                for r in &reminders {
+                    parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                        ChatCompletionRequestMessageContentPartText {
+                            text: format!("\n\n{r}"),
+                        },
+                    ));
+                }
                 Some(
                     ChatCompletionRequestUserMessage {
                         content: ChatCompletionRequestUserMessageContent::Array(parts),

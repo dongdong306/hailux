@@ -700,3 +700,100 @@ async fn rebuild_drops_all_tables_and_recreates_schema() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].content, "after");
 }
+
+#[tokio::test]
+async fn user_reminder_persists_multi_block_and_merges_runtime_meta() {
+    let storage = ChatStorage::new_in_memory().await.unwrap();
+    let sid = storage.create_session("m", "/tmp").await.unwrap();
+
+    // User row already carrying a runtime_meta key must keep it after merge
+    let mut row = make_message(MessageRole::User, "hello");
+    row.runtime_meta = Some(r#"{"plan_mode":true}"#.to_string());
+    storage.append_message(&sid, &row).await.unwrap();
+
+    let r1 = "<system-reminder>failure A</system-reminder>";
+    let r2 = "<system-reminder>failure B</system-reminder>";
+    storage
+        .append_user_message_reminder(&sid, r1)
+        .await
+        .unwrap();
+    storage
+        .append_user_message_reminder(&sid, r2)
+        .await
+        .unwrap();
+
+    let loaded = storage.load_active_messages(&sid).await.unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(loaded[0].runtime_meta.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["plan_mode"], true, "existing keys survive the merge");
+    let blocks = meta["system_reminder"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "multiple reminder blocks accumulate");
+    assert_eq!(blocks[0], *r1);
+    assert_eq!(blocks[1], *r2);
+
+    // Rebuild splices blocks in order — byte-identical to the in-memory
+    // append_text_to_last_user_message sequence
+    let rebuilt = from_stored_message(&loaded[0]).unwrap();
+    let crate::agent::models::CompatibleChatCompletionRequestMessage::User(u) = &rebuilt else {
+        panic!("expected User message");
+    };
+    let ChatCompletionRequestUserMessageContent::Text(t) = &u.content else {
+        panic!("expected Text content");
+    };
+    assert_eq!(t, &format!("hello\n\n{r1}\n\n{r2}"));
+    assert_eq!(loaded[0].content, "hello", "stored content stays pristine");
+}
+
+#[tokio::test]
+async fn user_reminder_rebuild_appends_array_part_for_attachments() {
+    use crate::agent::media::Attachment;
+
+    let storage = ChatStorage::new_in_memory().await.unwrap();
+    let sid = storage.create_session("m", "/tmp").await.unwrap();
+
+    let png_bytes: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let att = Attachment::from_bytes("image/png", &png_bytes);
+    let with_image = crate::agent::build_user_message("看图", std::slice::from_ref(&att));
+    let stored = to_stored_message(&with_image);
+    storage.append_message(&sid, &stored).await.unwrap();
+
+    let r1 = "<system-reminder>failure A</system-reminder>";
+    storage
+        .append_user_message_reminder(&sid, r1)
+        .await
+        .unwrap();
+
+    let loaded = storage.load_active_messages(&sid).await.unwrap();
+    let rebuilt = from_stored_message(&loaded[0]).unwrap();
+    let crate::agent::models::CompatibleChatCompletionRequestMessage::User(u) = &rebuilt else {
+        panic!("expected User message");
+    };
+    let ChatCompletionRequestUserMessageContent::Array(parts) = &u.content else {
+        panic!("expected Array content");
+    };
+    // text part + image part + reminder part — mirrors the in-memory injection
+    assert_eq!(parts.len(), 3);
+    match &parts[2] {
+        ChatCompletionRequestUserMessageContentPart::Text(t) => {
+            assert_eq!(t.text, format!("\n\n{r1}"));
+        }
+        _ => panic!("expected trailing reminder text part"),
+    }
+}
+
+#[tokio::test]
+async fn user_reminder_noop_without_user_row() {
+    let storage = ChatStorage::new_in_memory().await.unwrap();
+    let sid = storage.create_session("m", "/tmp").await.unwrap();
+    // Only an assistant row exists — the append must not touch it
+    storage
+        .append_message(&sid, &make_message(MessageRole::Assistant, "hi"))
+        .await
+        .unwrap();
+    storage
+        .append_user_message_reminder(&sid, "<system-reminder>x</system-reminder>")
+        .await
+        .unwrap();
+    let loaded = storage.load_messages(&sid).await.unwrap();
+    assert!(loaded[0].runtime_meta.is_none());
+}

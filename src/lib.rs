@@ -251,8 +251,10 @@ pub async fn run_non_interactive(
         agent.register_tool(Box::new(task_tool));
     }
 
+    // No session: non-interactive runs never persist (the reminder event
+    // carries an empty session_id and no consumer acts on it here)
     agent
-        .chat_stream(&message, Vec::new(), event_tx.clone())
+        .chat_stream("", &message, Vec::new(), event_tx.clone())
         .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     let mut in_reasoning = false;
