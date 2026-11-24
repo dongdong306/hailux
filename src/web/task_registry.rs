@@ -1,14 +1,18 @@
-//! request_id → oneshot Sender 注册表 + 连接级 drop guard。
+//! request_id -> oneshot sender registry for pending permission confirmations
+//! and user questions.
 //!
-//! 权限确认 / 用户提问通过独立 POST 回复，用 `request_id` 关联。
-//! **断连防泄漏**：SSE 流随时可能断开（关标签页、刷新、网络抖动），
-//! 前端死后无人回复会让 agent task 永久阻塞在 `oneshot::Receiver` 上。
-//! 因此每个待回复条目记录所属连接 ID；SSE 流被 drop 时（axum 感知
-//! 客户端断开），`ConnectionGuard` 自动将 pending 请求以 Deny / 取消
-//! 文本终结，agent task 正常唤醒。
+//! Unlike the previous design (ConnectionGuard auto-denied on disconnect),
+//! pending requests live for the **run**, not the connection — a closed tab no
+//! longer denies; reconnecting clients see the PermissionRequest/AskUser event
+//! replayed, re-surface the dialog, and answer (same as the TUI: no answer,
+//! no progress).
+//!
+//! Lifecycle is owned by the runner: when a run ends (including interrupts)
+//! `cancel_session` sweeps all entries of that run with fallback replies.
+//! Sending to an already-dead receiver is a harmless no-op.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
@@ -21,7 +25,8 @@ enum PendingReply {
 
 #[derive(Default)]
 pub struct TaskRegistry {
-    inner: Mutex<HashMap<String, PendingReply>>,
+    /// request_id -> (pending entry, owning session_id)
+    inner: Mutex<HashMap<String, (PendingReply, String)>>,
 }
 
 impl TaskRegistry {
@@ -29,85 +34,101 @@ impl TaskRegistry {
         Self::default()
     }
 
-    pub fn insert_permission(&self, id: &str, tx: oneshot::Sender<PermissionReply>) {
+    pub fn insert_permission(
+        &self,
+        id: &str,
+        tx: oneshot::Sender<PermissionReply>,
+        session_id: &str,
+    ) {
         if let Ok(mut map) = self.inner.lock() {
-            map.insert(id.to_string(), PendingReply::Permission(tx));
+            map.insert(
+                id.to_string(),
+                (PendingReply::Permission(tx), session_id.to_string()),
+            );
         }
     }
 
     pub fn take_permission(&self, id: &str) -> Option<oneshot::Sender<PermissionReply>> {
-        if let Ok(mut map) = self.inner.lock()
-            && let Some(PendingReply::Permission(tx)) = map.remove(id)
-        {
-            return Some(tx);
+        let mut map = self.inner.lock().ok()?;
+        // Verify the kind before removing: deleting an Ask entry inside
+        // take_permission would silently swallow its fallback reply
+        if !matches!(map.get(id), Some((PendingReply::Permission(_), _))) {
+            return None;
         }
-        None
+        match map.remove(id) {
+            Some((PendingReply::Permission(tx), _)) => Some(tx),
+            _ => None,
+        }
     }
 
-    pub fn insert_ask(&self, id: &str, tx: oneshot::Sender<String>) {
+    pub fn insert_ask(&self, id: &str, tx: oneshot::Sender<String>, session_id: &str) {
         if let Ok(mut map) = self.inner.lock() {
-            map.insert(id.to_string(), PendingReply::Ask(tx));
+            map.insert(
+                id.to_string(),
+                (PendingReply::Ask(tx), session_id.to_string()),
+            );
         }
     }
 
     pub fn take_ask(&self, id: &str) -> Option<oneshot::Sender<String>> {
-        if let Ok(mut map) = self.inner.lock()
-            && let Some(PendingReply::Ask(tx)) = map.remove(id)
-        {
-            return Some(tx);
+        let mut map = self.inner.lock().ok()?;
+        if !matches!(map.get(id), Some((PendingReply::Ask(_), _))) {
+            return None;
         }
-        None
-    }
-}
-
-/// SSE 连接的取消守卫：持有期间产生的 pending 回复记录其归属；
-/// 守卫 drop（流结束或客户端断开）时全部以兜底值终结。
-///
-/// 注意 oneshot sender drop 本身就会让 receiver 立即 Err——
-/// 这里显式发送兜底值，是为了让 agent 收到语义明确的「拒绝/取消」
-/// 而非 channel 错误，两条路径都不会挂起。
-pub struct ConnectionGuard {
-    registry: Arc<TaskRegistry>,
-    /// 归属本连接的 pending request_id 列表
-    pending: Mutex<Vec<String>>,
-}
-
-impl ConnectionGuard {
-    pub fn new(registry: Arc<TaskRegistry>) -> Self {
-        Self {
-            registry,
-            pending: Mutex::new(Vec::new()),
+        match map.remove(id) {
+            Some((PendingReply::Ask(tx), _)) => Some(tx),
+            _ => None,
         }
     }
 
-    /// 登记权限请求，返回 request_id
-    pub fn track_permission(&self, request_id: String, tx: oneshot::Sender<PermissionReply>) {
-        self.registry.insert_permission(&request_id, tx);
-        if let Ok(mut p) = self.pending.lock() {
-            p.push(request_id);
-        }
-    }
-
-    /// 登记提问，返回 request_id
-    pub fn track_ask(&self, request_id: String, tx: oneshot::Sender<String>) {
-        self.registry.insert_ask(&request_id, tx);
-        if let Ok(mut p) = self.pending.lock() {
-            p.push(request_id);
-        }
-    }
-}
-
-impl Drop for ConnectionGuard {
-    fn drop(&mut self) {
-        // 发送兜底回复（sender 已被 take 时 take_* 内部为 None，静默跳过）
-        if let Ok(ids) = self.pending.lock() {
-            for id in ids.iter() {
-                if let Some(tx) = self.registry.take_permission(id) {
-                    let _ = tx.send(PermissionReply::Deny);
-                } else if let Some(tx) = self.registry.take_ask(id) {
-                    let _ = tx.send("[User Cancelled]".to_string());
-                }
+    /// Sweep all pending requests of a session at run end: permissions -> Deny,
+    /// asks -> "[User Cancelled]". Entries already taken are skipped; sending
+    /// to a dead receiver is harmless. An explicit fallback (instead of
+    /// dropping the sender) keeps both paths unambiguous for the agent.
+    pub fn cancel_session(&self, session_id: &str) {
+        let ids: Vec<String> = if let Ok(map) = self.inner.lock() {
+            map.iter()
+                .filter(|(_, (_, sid))| sid == session_id)
+                .map(|(id, _)| id.clone())
+                .collect()
+        } else {
+            return;
+        };
+        for id in ids {
+            if let Some(tx) = self.take_permission(&id) {
+                let _ = tx.send(PermissionReply::Deny);
+            } else if let Some(tx) = self.take_ask(&id) {
+                let _ = tx.send("[User Cancelled]".to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permission::PermissionReply;
+
+    #[test]
+    fn cancel_session_sweeps_only_target_session() {
+        let registry = TaskRegistry::new();
+        let (ptx, mut prx) = oneshot::channel::<PermissionReply>();
+        let (atx, mut arx) = oneshot::channel::<String>();
+        let (other_tx, mut other_rx) = oneshot::channel::<String>();
+        registry.insert_permission("p1", ptx, "s1");
+        registry.insert_ask("a1", atx, "s1");
+        registry.insert_ask("a2", other_tx, "s2");
+
+        registry.cancel_session("s1");
+
+        // s1's permission got the Deny fallback; the ask got the cancel text
+        assert_eq!(prx.try_recv(), Ok(PermissionReply::Deny));
+        assert_eq!(arx.try_recv(), Ok("[User Cancelled]".to_string()));
+        // s2 untouched
+        assert!(other_rx.try_recv().is_err());
+        assert!(registry.take_ask("a2").is_some());
+        // s1 entries swept
+        assert!(registry.take_permission("p1").is_none());
+        assert!(registry.take_ask("a1").is_none());
     }
 }

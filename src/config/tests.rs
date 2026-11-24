@@ -469,6 +469,48 @@ fn retry_default_detection_controls_save_section() {
     );
 }
 
+// ── Session guardrails ──────────────────────────────
+
+#[test]
+fn session_defaults_applied() {
+    let content = r#"
+[providers.deepseek]
+api_key = "sk-test"
+"#;
+    let cfg: Config = toml::from_str(content).unwrap();
+    assert_eq!(cfg.session.max_concurrent_runs, 4);
+}
+
+#[test]
+fn session_section_parsed() {
+    let content = r#"
+[providers.deepseek]
+api_key = "sk-test"
+
+[session]
+max_concurrent_runs = 8
+"#;
+    let cfg: Config = toml::from_str(content).unwrap();
+    assert_eq!(cfg.session.max_concurrent_runs, 8);
+}
+
+#[test]
+fn session_default_detection_controls_save_section() {
+    let mut cfg = Config::default();
+    assert!(
+        cfg.session.is_default(),
+        "default config must not write the [session] section"
+    );
+    let toml = config_to_toml(&cfg).unwrap();
+    assert!(!toml.contains("[session]"));
+
+    cfg.session.max_concurrent_runs = 0; // 0 = unlimited, still non-default → written
+    assert!(!cfg.session.is_default());
+    let toml = config_to_toml(&cfg).unwrap();
+    assert!(toml.contains("[session]"));
+    assert!(toml.contains("max_concurrent_runs = 0"));
+}
+
 // ── Reasoning effort ────────────────────────────────
 
 #[test]

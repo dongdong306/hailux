@@ -77,6 +77,16 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         root.insert("retry".into(), toml::Value::Table(retry_table));
     }
 
+    // Session guardrails: omitted when equal to the default, keeping the config file minimal
+    if !config.session.is_default() {
+        let mut session_table = toml::map::Map::new();
+        session_table.insert(
+            "max_concurrent_runs".into(),
+            toml::Value::Integer(config.session.max_concurrent_runs as i64),
+        );
+        root.insert("session".into(), toml::Value::Table(session_table));
+    }
+
     // Permission settings
     let mut perm_table = toml::map::Map::new();
     if !config.permission.mode.is_empty() {

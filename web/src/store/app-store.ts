@@ -6,13 +6,14 @@ import type {
   DiscoverModelsResult,
   ModelInfo,
   ProviderOption,
-  ServerEvent,
+  SessionDetail,
   SessionInfo,
   StatsResponse,
 } from "../runtime/types";
-import { getJson, postJson, postSse } from "../runtime/sse-client";
+import { getJson, postJson } from "../runtime/sse-client";
 import { rebuildSessionItems } from "./session-history";
-import { handleSharedEvent, itemOps, readError } from "./shared-events";
+import { closeStream, openStream } from "./stream-manager";
+import { readError } from "./shared-events";
 import type {
   AppState,
   McpServerEntry,
@@ -22,6 +23,22 @@ import type {
 
 /** localStorage key: last visited project directory */
 const LAST_WORKDIR_KEY = "hailux.lastWorkDir";
+
+/** Submit a chat/compact request. Submit-only: the response body (an SSE
+ * stream nobody consumes) is cancelled immediately — run events arrive via
+ * the session's single subscription, with server-side replay covering
+ * anything published before it attaches. Throws on HTTP errors (409/429/...). */
+async function submitRun(path: string, body: unknown): Promise<void> {
+  const resp = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    throw new Error(await readError(resp));
+  }
+  await resp.body?.cancel();
+}
 
 // Components keep importing from `../store/app-store`; types are actually defined in ./types
 export type {
@@ -75,7 +92,9 @@ export const useApp = create<AppState>((set, get) => ({
   statsLoading: false,
   statsError: null,
   escHint: false,
-  sse: null,
+  epoch: null,
+  lastSeq: 0,
+  runningSessions: {},
 
   async initWorkDir() {
     // Prefer the last visited project directory, falling back to the server default (backend startup dir)
@@ -101,7 +120,17 @@ export const useApp = create<AppState>((set, get) => ({
     const workDir = get().workDir;
     const query = workDir ? `?work_dir=${encodeURIComponent(workDir)}` : "";
     const sessions = await getJson<SessionInfo[]>(`/api/sessions${query}`);
-    set({ sessions });
+    // Sidebar live indicator: the list response carries per-session running
+    // state, merged into runningSessions
+    set({
+      sessions,
+      runningSessions: {
+        ...get().runningSessions,
+        ...Object.fromEntries(
+          sessions.map((s) => [s.id, Boolean(s.running)] as const),
+        ),
+      },
+    });
   },
 
   async loadModels() {
@@ -369,19 +398,25 @@ export const useApp = create<AppState>((set, get) => ({
         cachedTokens: 0,
         contextPromptTokens: 0,
         contextCompletionTokens: 0,
+        epoch: null,
+        lastSeq: 0,
         workDir: session.work_dir,
         showWorkdirPicker: false,
       });
+      // The new session is observable across tabs immediately (idle long
+      // connection)
+      openStream(get, set, session.id, 0, get().epoch ?? 0);
       await get().loadSessions();
     }
   },
 
   async switchSession(id) {
+    // Close the previous session's stream first; the new one attaches after
+    // the history load. Anything published during the gap stays in the
+    // server-side replay buffer and is covered by since=head_seq.
+    closeStream();
     try {
-      const detail = await getJson<{
-        messages: import("../runtime/types").StoredMessage[];
-        compact_summary?: string;
-      }>(`/api/sessions/${id}`);
+      const detail = await getJson<SessionDetail>(`/api/sessions/${id}`);
       const rebuilt = rebuildSessionItems(
         detail.messages,
         Boolean(detail.compact_summary),
@@ -392,15 +427,21 @@ export const useApp = create<AppState>((set, get) => ({
         sessionId: id,
         items: rebuilt.items,
         scrollBottomSignal: Date.now(),
-        isRunning: false,
-        runStartedAt: null,
+        isRunning: detail.running,
+        runStartedAt: detail.running ? Date.now() : null,
         workDir: target?.work_dir ?? get().workDir,
+        epoch: detail.epoch,
+        lastSeq: detail.head_seq,
+        runningSessions: { ...get().runningSessions, [id]: detail.running },
         promptTokens: rebuilt.promptTokens,
         completionTokens: rebuilt.completionTokens,
         cachedTokens: rebuilt.cachedTokens,
         contextPromptTokens: rebuilt.contextPromptTokens,
         contextCompletionTokens: rebuilt.contextCompletionTokens,
       });
+      // Long-lived subscription: running -> replay/resume after head_seq;
+      // idle -> keep waiting
+      openStream(get, set, id, detail.head_seq, detail.epoch);
     } catch (e) {
       // No silent failure: an unset sessionId makes /compact report "no
       // active session"; surface the error so the user can retry.
@@ -417,10 +458,16 @@ export const useApp = create<AppState>((set, get) => ({
     const resp = await fetch(`/api/sessions/${id}`, { method: "DELETE" });
     if (!resp.ok) return;
     if (get().sessionId === id) {
+      // Close the deleted session's stream (the backend already evicted the
+      // instance and interrupted the run)
+      closeStream();
       set({
         sessionId: null,
         items: [],
+        isRunning: false,
         runStartedAt: null,
+        epoch: null,
+        lastSeq: 0,
         promptTokens: 0,
         completionTokens: 0,
         cachedTokens: 0,
@@ -433,11 +480,20 @@ export const useApp = create<AppState>((set, get) => ({
 
   async sendMessage(message, attachments, mentions) {
     if (get().isRunning) return;
+    // Ensure a session exists before submitting: events are delivered via the
+    // session's single subscription, which newSession attaches. The server
+    // reuses the latest blank session, so this does not stack empty sessions.
+    let sessionId = get().sessionId;
+    if (!sessionId) {
+      await get().newSession();
+      sessionId = get().sessionId;
+      if (!sessionId) return;
+    }
     const req: ChatRequest = {
       message,
       attachments: attachments?.length ? attachments : undefined,
       mentions: mentions?.length ? mentions : undefined,
-      session_id: get().sessionId ?? undefined,
+      session_id: sessionId,
       work_dir: get().workDir || undefined,
     };
 
@@ -452,173 +508,30 @@ export const useApp = create<AppState>((set, get) => ({
       ],
     }));
 
-    // Snapshot of the latest UsageUpdate in this turn: attached to the done row at AgentComplete in the message footer action bar
-    // (the closure variable is rebuilt per request, avoiding a stale snapshot left over from the previous turn)
-    let turnCtx: { prompt: number; completion: number } | null = null;
-
-    const handleEvent = (event: ServerEvent) => {
-      const ops = itemOps(get, set);
-      const { items, push, patchLast } = ops;
-      if (handleSharedEvent(event, ops, set)) return;
-      // Thinking → output/tool call transition: freeze the thinking timer (align with TUI finalize_thinking_ms)
-      const freezeThinking = () => {
-        const last = items[items.length - 1];
-        if (last?.kind === "reasoning-streaming") {
-          const startedAt = last.thinkStartedAt ?? Date.now();
-          patchLast((i) => ({
-            ...i,
-            kind: "reasoning",
-            thinkMs: (i.thinkMs ?? 0) + (Date.now() - startedAt),
-            thinkStartedAt: undefined,
-          }));
-        }
-      };
-
-      switch (event.type) {
-        case "AgentChunk": {
-          freezeThinking();
-          const last = items[items.length - 1];
-          if (last?.kind === "assistant-streaming") {
-            patchLast((i) => ({ ...i, text: (i.text ?? "") + event.text }));
-          } else {
-            push({ kind: "assistant-streaming", text: event.text });
-          }
-          break;
-        }
-        case "AgentReasoningChunk": {
-          const last = items[items.length - 1];
-          if (last?.kind === "reasoning-streaming") {
-            patchLast((i) => ({ ...i, text: (i.text ?? "") + event.text }));
-          } else {
-            push({
-              kind: "reasoning-streaming",
-              text: event.text,
-              thinkStartedAt: Date.now(),
-            });
-          }
-          break;
-        }
-        case "AgentRetry": {
-          // Partial output of failed attempts must not enter context: clear the trailing streaming items in sync
-          // (align with TUI pop semantics); the notice ends the current acc, retried content starts a new message
-          const cur = [...items];
-          while (
-            cur.length > 0 &&
-            (cur[cur.length - 1]?.kind === "assistant-streaming" ||
-              cur[cur.length - 1]?.kind === "reasoning-streaming")
-          ) {
-            cur.pop();
-          }
-          const secs = (event.delay_ms / 1000).toFixed(1);
-          cur.push({
-            kind: "notice",
-            text: `请求失败，${secs}s 后进行第 ${event.attempt}/${event.max_retries} 次重试：${event.reason}`,
-          });
-          set({ items: cur });
-          break;
-        }
-        case "ToolCallStart":
-          freezeThinking();
-          push({
-            kind: "tool-call",
-            name: event.name,
-            arguments: event.arguments,
-            subagent: event.subagent,
-            subagentIndex: event.subagent_index,
-          });
-          break;
-        case "ToolResult":
-          push({
-            kind: "tool-result",
-            name: event.name,
-            result: event.result,
-            display: event.display,
-            subagent: event.subagent,
-            subagentIndex: event.subagent_index,
-          });
-          break;
-        case "UsageUpdate":
-          // Session cumulative (top bar) + record the last request (approximate context usage in the message footer)
-          turnCtx = {
-            prompt: event.prompt_tokens,
-            completion: event.completion_tokens,
-          };
-          set((s) => ({
-            promptTokens: s.promptTokens + event.prompt_tokens,
-            completionTokens: s.completionTokens + event.completion_tokens,
-            cachedTokens: s.cachedTokens + event.cached_tokens,
-            contextPromptTokens: event.prompt_tokens,
-            contextCompletionTokens: event.completion_tokens,
-            contextWindow: event.context_window || s.contextWindow,
-          }));
-          break;
-        case "PermissionRequest":
-          set({
-            permission: {
-              requestId: event.request_id,
-              description: event.description,
-              patterns: event.patterns,
-              subagent: event.subagent,
-            },
-          });
-          break;
-        case "AskUser":
-          set({
-            askUser: {
-              requestId: event.request_id,
-              questions: event.questions,
-            },
-          });
-          break;
-        case "AgentComplete": {
-          // ctx depends on event order: the backend guarantees UsageUpdate precedes AgentComplete;
-          // when the turn has no usage at all (e.g. the first request fails), ctx is null → no context usage shown
-          freezeThinking();
-          const last = items[items.length - 1];
-          if (last?.kind === "assistant-streaming") {
-            patchLast((i) => ({ ...i, kind: "assistant" }));
-          }
-          push({
-            kind: "done",
-            status: event.status,
-            totalMs: event.total_ms,
-            model: event.model,
-            ctxPromptTokens: turnCtx?.prompt,
-            ctxCompletionTokens: turnCtx?.completion,
-          });
-          break;
-        }
-      }
-    };
-
-    const sse = postSse("/api/chat", req, handleEvent);
-    set({ sse });
-
     try {
-      await sse.done;
+      await submitRun("/api/chat", req);
     } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError")) {
-        set((s) => ({
-          items: [...s.items, { kind: "error", text: String(e) }],
-        }));
-      }
-    } finally {
-      // Only clean up if this stream is still the active one; skip when taken over by setWorkDir (project switch),
-      // so the session list is not re-fetched with the old directory and overwritten onto the new project
-      if (get().sse === sse) {
-        set({ isRunning: false, sse: null, runStartedAt: null });
-        get().loadSessions().catch(() => {});
-        // Low-cost reconcile after each turn ends (safety net for any mode drift during the run)
-        get().syncMode();
-      }
+      // 409 (session busy) / 429 (global cap) / network errors. If the run
+      // actually started server-side, the subscription re-asserts isRunning at
+      // SessionStarted — the state self-corrects event-driven.
+      set((s) => ({
+        items: [...s.items, { kind: "error", text: String(e) }],
+        isRunning: false,
+        runStartedAt: null,
+      }));
     }
+    // Turn-end side effects (session list refresh, mode reconcile) live in the
+    // sink's RunComplete branch — fired event-driven, even for observer tabs.
   },
 
   async interrupt() {
-    await postJson("/api/interrupt", {
-      session_id: get().sessionId ?? undefined,
-      work_dir: get().workDir || undefined,
-    });
+    // Precisely interrupt the current session (the backend locates the
+    // instance's cancel flag by session_id)
+    const sessionId = get().sessionId;
+    if (!sessionId) return;
+    await postJson("/api/interrupt", { session_id: sessionId }).catch(
+      () => {},
+    );
   },
 
   async runCompact() {
@@ -632,48 +545,17 @@ export const useApp = create<AppState>((set, get) => ({
     }
 
     set({ isRunning: true, runStartedAt: Date.now() });
-
-    const handleEvent = (event: ServerEvent) => {
-      const ops = itemOps(get, set);
-      if (handleSharedEvent(event, ops, set)) return;
-      switch (event.type) {
-        case "PermissionRequest":
-          set({
-            permission: {
-              requestId: event.request_id,
-              description: event.description,
-              patterns: event.patterns,
-              subagent: event.subagent,
-            },
-          });
-          break;
-        case "AskUser":
-          set({
-            askUser: { requestId: event.request_id, questions: event.questions },
-          });
-          break;
-      }
-    };
-
-    const sse = postSse(
-      "/api/compact",
-      { session_id: sessionId, work_dir: get().workDir || undefined },
-      handleEvent,
-    );
-    set({ sse });
-
     try {
-      await sse.done;
+      await submitRun("/api/compact", {
+        session_id: sessionId,
+        work_dir: get().workDir || undefined,
+      });
     } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError")) {
-        set((s) => ({
-          items: [...s.items, { kind: "error", text: String(e) }],
-        }));
-      }
-    } finally {
-      if (get().sse === sse) {
-        set({ isRunning: false, sse: null, runStartedAt: null });
-      }
+      set((s) => ({
+        items: [...s.items, { kind: "error", text: String(e) }],
+        isRunning: false,
+        runStartedAt: null,
+      }));
     }
   },
 
@@ -768,24 +650,19 @@ export const useApp = create<AppState>((set, get) => ({
       set({ showWorkdirPicker: false });
       return;
     }
-    // Interrupt any in-flight request first, avoiding events leaking into the new project view.
-    // Detach the sse reference in the store before aborting: sendMessage's finally detects
-    // a non-active stream and skips cleanup and re-fetch (see sendMessage)
-    const active = get().sse;
-    if (active) {
-      set({ isRunning: false, sse: null, runStartedAt: null });
-      active.abort();
-      await get()
-        .interrupt()
-        .catch(() => {});
-    }
+    // Switching projects does not interrupt running tasks (tasks are
+    // view-independent post-decoupling; switching back to the original
+    // session resumes live). Only close the current session's stream and
+    // reset the view state.
+    closeStream();
     set({
       workDir: dir,
       sessionId: null,
       items: [],
       isRunning: false,
       runStartedAt: null,
-      sse: null,
+      epoch: null,
+      lastSeq: 0,
       promptTokens: 0,
       completionTokens: 0,
       cachedTokens: 0,

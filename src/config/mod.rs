@@ -15,7 +15,7 @@ mod tests;
 pub(crate) use providers::{PROVIDERS, find_provider_def};
 pub use types::{
     CustomModelEntry, ModelEntry, PermissionConfig, ProviderEntry, RemoveError, RetryConfigToml,
-    UpdateError,
+    SessionConfigToml, UpdateError,
 };
 
 use crate::agent::ReasoningEffort;
@@ -46,6 +46,9 @@ pub struct Config {
     /// Reasoning effort (top-level `reasoning_effort` in the request body: low/high/max; default high)
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
+    /// Web session concurrency guardrails (`[session]`)
+    #[serde(default)]
+    pub session: SessionConfigToml,
     /// Model lists fetched from each provider's `/models` endpoint (a disposable hint layer, never saved to config.toml)
     #[serde(skip)]
     pub(crate) discovered: model_discovery::DiscoveryCache,
@@ -60,6 +63,7 @@ impl Default for Config {
             permission: PermissionConfig::default(),
             retry: RetryConfigToml::default(),
             reasoning_effort: ReasoningEffort::default(),
+            session: SessionConfigToml::default(),
             discovered: model_discovery::DiscoveryCache::new(),
         }
     }

@@ -62,7 +62,34 @@ export type ServerEvent =
       /** Estimated context tokens after compaction (omitted without usage data; frontend skips context meter update) */
       context_tokens?: number;
     }
-  | { type: "Error"; message: string };
+  | { type: "Error"; message: string }
+  | {
+      /** Subscribe first frame (first SSE frame only, not envelope-wrapped):
+       * the attach-time replay snapshot */
+      type: "Snapshot";
+      /** Server start timestamp (secs); mismatch vs. the client = server
+       * restarted, seq space invalidated */
+      epoch: number;
+      /** Whether a run is active at attach time */
+      running: boolean;
+      /** Buffered events with seq > since */
+      events: Envelope[];
+    }
+  | {
+      /** Session run-end sentinel (last event in an envelope; observer
+       * streams close on it) */
+      type: "RunComplete";
+      /** The runner exited abnormally (observers should refresh and resync) */
+      abnormal: boolean;
+    };
+
+/** SSE event envelope (protocol.rs::Envelope): every event carries a
+ * per-session monotonic seq (continuous across runs); reconnecting clients
+ * catch up with a `since` cursor and dedupe by seq */
+export interface Envelope {
+  seq: number;
+  event: ServerEvent;
+}
 
 export interface QuestionOption {
   label: string;
@@ -81,6 +108,8 @@ export interface SessionInfo {
   model: string;
   updated_at: string;
   work_dir: string;
+  /** Whether a run is active (sidebar indicator) */
+  running?: boolean;
 }
 
 export interface StoredMessage {
@@ -105,6 +134,14 @@ export interface StoredMessage {
 export interface SessionDetail {
   messages: StoredMessage[];
   compact_summary?: string;
+  /** Server start timestamp (secs): mismatch vs. the client = server
+   * restarted, cursors invalidated */
+  epoch: number;
+  /** durable watermark: history already covers all events <= head_seq;
+   * subscription replay starts after it */
+  head_seq: number;
+  /** Whether a run is active */
+  running: boolean;
 }
 
 export interface WorkdirInfo {

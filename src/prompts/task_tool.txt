@@ -1,7 +1,7 @@
 
 Launch subagent(s) to handle complex, multi-step tasks.
 
-The only parameter is `tasks`: an array of task objects. Each item launches one subagent, and all items in the array run concurrently in a single tool call. To run multiple subagents in parallel, put multiple items in the `tasks` array — do not rely on issuing multiple parallel tool calls in one message, as that behavior is not guaranteed.
+The only parameter is `tasks`: an array of task objects. Each item launches one subagent, and all items in the array run concurrently in a single tool call. To run multiple subagents in parallel, put multiple items in the `tasks` array — do not rely on issuing multiple parallel tool calls in one message, as that behavior is not guaranteed. Each item object requires `subagent` (from `<available_subagents>`), `description` (3-5 words), and `prompt` (detailed instructions).
 
 Available subagent types are listed in the system prompt's `<available_subagents>` block.
 

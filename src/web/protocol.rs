@@ -9,7 +9,8 @@ use crate::agent::event::{QuestionInfo, TaskStatus};
 
 // ── SSE push events (backend → frontend) ───────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+// PartialEq: asserted against in bus replay tests and event comparisons
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
     /// Effective session ID of this turn. Emitted when the request omits
@@ -99,6 +100,22 @@ pub enum ServerEvent {
     Error {
         message: String,
     },
+    /// Subscribe first frame (first SSE frame only, **not** stored in the
+    /// replay buffer or wrapped in an envelope): the attach-time replay.
+    /// `epoch` mismatch vs. the client's record = server restarted, seq space
+    /// invalidated — the client must drop its cursor and rebuild from history.
+    Snapshot {
+        epoch: u64,
+        running: bool,
+        events: Vec<Envelope>,
+    },
+    /// Run-end sentinel (last event inside an envelope; observer streams close
+    /// on it)
+    RunComplete {
+        /// The runner exited abnormally (panic etc.) — observers should refresh
+        /// and resync instead of treating this as a normal turn end
+        abnormal: bool,
+    },
 }
 
 pub fn status_str(status: &TaskStatus) -> &'static str {
@@ -107,6 +124,18 @@ pub fn status_str(status: &TaskStatus) -> &'static str {
         TaskStatus::Interrupted => "interrupted",
         TaskStatus::Error => "error",
     }
+}
+
+// ── Event bus protocol (shared by the subscribe endpoint and chat/compact
+//    observer streams) ─────────────────────────────────────────────────
+
+/// SSE event envelope: every event carries a per-session monotonic seq
+/// (continuous across runs). Reconnecting clients catch up with a `since`
+/// cursor and dedupe by seq (replay and live delivery may overlap).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Envelope {
+    pub seq: u64,
+    pub event: ServerEvent,
 }
 
 // ── Usage stats (GET /api/stats) ────────────────────────────────
@@ -177,12 +206,16 @@ pub struct AskReplyBody {
 #[derive(Debug, Deserialize)]
 pub struct InterruptRequest {
     pub session_id: Option<String>,
+    /// Kept for wire compatibility; the instance is located by session_id only
+    #[allow(dead_code)]
     pub work_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CompactRequest {
     pub session_id: String,
+    /// Kept for wire compatibility; the session instance is resolved by session_id only
+    #[allow(dead_code)]
     pub work_dir: Option<String>,
 }
 
@@ -389,6 +422,9 @@ pub struct SessionInfo {
     pub model: String,
     pub updated_at: String,
     pub work_dir: String,
+    /// Whether a run is active for this session (sidebar live indicator)
+    #[serde(default)]
+    pub running: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -102,6 +102,34 @@ impl From<&RetryConfigToml> for crate::agent::retry::RetryConfig {
     }
 }
 
+/// The `[session]` section of config.toml: web multi-session concurrency guardrails.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SessionConfigToml {
+    /// Max concurrent top-level agent runs in the web server (0 = unlimited).
+    /// Excess chat/compact requests are rejected with 429 instead of queueing.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: u32,
+}
+
+impl Default for SessionConfigToml {
+    fn default() -> Self {
+        Self {
+            max_concurrent_runs: default_max_concurrent_runs(),
+        }
+    }
+}
+
+fn default_max_concurrent_runs() -> u32 {
+    4
+}
+
+impl SessionConfigToml {
+    /// Whether every field equals its default (decides whether save writes the `[session]` section)
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProviderEntry {
     pub api_key: String,

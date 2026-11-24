@@ -55,9 +55,12 @@ async fn evaluate_permission_requests(
                     reply = rx => match reply {
                         Ok(PermissionReply::Once) => continue,
                         Ok(PermissionReply::Always) => {
-                            // 以请求自身的 permission 类别持久化（而非工具类别），
-                            // 保证 always 对同类别请求生效（如 external_directory）
-                            manager.add_session_rules(&request.permission, &always_patterns);
+                            // Persist under the request's own permission category
+                            // (not the tool's), so "always" also covers
+                            // same-category requests (e.g. external_directory)
+                            manager
+                                .add_session_rules_async(&request.permission, &always_patterns)
+                                .await;
                             continue;
                         }
                         Ok(PermissionReply::Deny) => {

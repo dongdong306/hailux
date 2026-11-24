@@ -23,8 +23,10 @@ use crate::mcp;
 use crate::session::SessionManager;
 use crate::storage::ChatStorage;
 
+mod bus;
 mod handlers;
 mod protocol;
+mod runner;
 mod sse;
 mod state;
 mod task_registry;
@@ -229,10 +231,16 @@ pub async fn run_web(options: WebOptions) -> Result<()> {
         }
     });
 
+    let max_concurrent_runs = cfg.session.max_concurrent_runs;
     let manager = SessionManager::new(resolved, cfg, storage, mcp_backends);
+    let epoch = WebServerState::new_epoch();
     let state = Arc::new(WebServerState {
         manager,
         registry: Arc::new(TaskRegistry::new()),
+        buses: bus::BusRegistry::default(),
+        epoch,
+        run_permits: WebServerState::run_permits_from_limit(max_concurrent_runs),
+        run_limit: max_concurrent_runs,
         default_work_dir: work_dir,
         config_write_lock: tokio::sync::Mutex::new(()),
     });

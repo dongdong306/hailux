@@ -27,7 +27,21 @@ pub(super) struct TaskSpec {
     pub(super) task_id: Option<String>,
 }
 
-/// 解析 tool 参数中的 `tasks` 数组
+/// Human-readable JSON type name for error messages.
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Parse the `tasks` array from tool arguments. Errors echo the element
+/// count/shape so a malformed call can be self-diagnosed from the message
+/// alone (the model's emitted JSON may differ from its intent).
 pub(super) fn parse_task_specs(args: &Value) -> Result<Vec<TaskSpec>, String> {
     let Some(tasks) = args["tasks"].as_array() else {
         return Err(
@@ -41,14 +55,25 @@ pub(super) fn parse_task_specs(args: &Value) -> Result<Vec<TaskSpec>, String> {
     }
     let mut specs = Vec::with_capacity(tasks.len());
     for (i, task) in tasks.iter().enumerate() {
-        let subagent = task["subagent"]
-            .as_str()
-            .ok_or_else(|| format!("tasks[{i}]: \"subagent\" is required"))?
-            .to_string();
-        let prompt = task["prompt"]
-            .as_str()
-            .ok_or_else(|| format!("tasks[{i}]: \"prompt\" is required"))?
-            .to_string();
+        if !task.is_object() {
+            return Err(format!(
+                "tasks[{i}] must be an object (got {}); received {} task(s) in total",
+                json_type_name(task),
+                tasks.len()
+            ));
+        }
+        let subagent = task["subagent"].as_str().ok_or_else(|| {
+            format!(
+                "tasks[{i}]: \"subagent\" is required (received {} task(s))",
+                tasks.len()
+            )
+        })?;
+        let prompt = task["prompt"].as_str().ok_or_else(|| {
+            format!(
+                "tasks[{i}]: \"prompt\" is required (received {} task(s))",
+                tasks.len()
+            )
+        })?;
         if prompt.trim().is_empty() {
             return Err(format!("tasks[{i}]: \"prompt\" must not be empty"));
         }
@@ -58,9 +83,9 @@ pub(super) fn parse_task_specs(args: &Value) -> Result<Vec<TaskSpec>, String> {
             .and_then(Value::as_str)
             .map(str::to_string);
         specs.push(TaskSpec {
-            subagent,
+            subagent: subagent.to_string(),
             description,
-            prompt,
+            prompt: prompt.to_string(),
             task_id,
         });
     }
@@ -161,9 +186,10 @@ impl Tool for TaskTool {
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "description": "Tasks to launch; each item starts one subagent and all items run concurrently",
+                    "description": "Tasks to launch; each item starts one subagent and all items run concurrently. Each item MUST contain \"subagent\", \"description\", and \"prompt\"",
                     "items": {
                         "type": "object",
+                        "additionalProperties": false,
                         "properties": {
                             "subagent": {
                                 "type": "string",
@@ -198,7 +224,14 @@ impl Tool for TaskTool {
         arguments: &'a str,
         _work_dir: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecuteError>> + Send + 'a>> {
-        let args: Value = serde_json::from_str(arguments).unwrap_or_default();
+        let args: Value = match serde_json::from_str(arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return Box::pin(std::future::ready(Err(ToolExecuteError {
+                    message: format!("Invalid JSON parameter: {e}"),
+                })));
+            }
+        };
 
         let specs = match parse_task_specs(&args) {
             Ok(s) => s,
