@@ -1,12 +1,8 @@
-//! Agent 领域事件出口 —— agent 模块对上层（TUI / Web）的唯一事件契约。
+//! Core event contract from the agent to its consumers (TUI / Web).
 //!
-//! agent 不感知任何 UI；上层自行消费 `CoreEvent`：
-//! - TUI：`tui::event::AppEvent::Core(CoreEvent)` 包装后进入终端事件循环
-//! - Web：`web::protocol` 将其序列化为 SSE JSON 推送
-//!
-//! 注意：`AskUser` / `PermissionRequest` 携带 `oneshot::Sender` 回复通道，
-//! 是同步阻塞语义（agent task 等待用户答复）。无 UI 的消费者（非交互模式、
-//! Web 断连兜底）必须保证最终回复，否则 agent task 永久挂起。
+//! `AskUser` / `PermissionRequest` carry a `oneshot::Sender` with blocking
+//! semantics: UI-less consumers (non-interactive mode, web disconnect
+//! fallback) must eventually reply, or the agent task hangs forever.
 
 use crate::agent::models::{ReasoningEffort, SharedMessage};
 use crate::permission::{PermissionReply, PermissionRequest};
@@ -45,7 +41,53 @@ pub struct CompactUsage {
     pub completion_tokens: u32,
 }
 
-/// 领域事件（UI 无关）
+/// Mention metadata attached to a user message: `start`/`end` are Unicode
+/// code point offsets into the content (token includes the `@` prefix).
+/// Core-level mirror of the web protocol's `ChatMention`, keeping agent
+/// consumers free of web protocol types.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Mention {
+    pub start: usize,
+    pub end: usize,
+    pub kind: String,
+}
+
+/// A mid-run user message (web "interjection"): appended at an agent loop
+/// boundary without interrupting the current stream; one arriving during the
+/// final answer stream opens another request round within the same run.
+#[derive(Debug, Clone)]
+pub struct Interjection {
+    /// Echoed back so the frontend can drop the matching queued item
+    pub client_id: String,
+    pub content: String,
+    pub attachments: Vec<crate::agent::media::Attachment>,
+    pub mentions: Vec<Mention>,
+}
+
+/// Max pending interjections per run. The channel is bounded so a runaway
+/// client cannot buffer unbounded memory mid-run; `deliver_interjection`
+/// rejects beyond this and the caller falls back (409 / keep queued).
+pub const INTERJECT_QUEUE_LIMIT: usize = 10;
+
+/// Shared handle to the active run's interjection channel. The channel is
+/// swapped per run; a stale sender fails once its run task drops the
+/// receiver. Shared so delivery skips the session lock the runner holds for
+/// the whole run.
+pub type InterjectSlot =
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Interjection>>>>;
+
+/// Deliver through an `InterjectSlot` without holding any session lock.
+/// False = no instance / no active run / run cancelling / channel full.
+pub fn deliver_interjection(slot: &InterjectSlot, interjection: Interjection) -> bool {
+    let Ok(guard) = slot.lock() else {
+        return false;
+    };
+    match guard.as_ref() {
+        Some(tx) => tx.try_send(interjection).is_ok(),
+        None => false,
+    }
+}
+
 #[derive(Debug)]
 pub enum CoreEvent {
     AgentChunk(String),
@@ -53,11 +95,8 @@ pub enum CoreEvent {
     AgentComplete {
         messages: Vec<SharedMessage>,
         usages: Vec<MessageUsage>,
-        /// 本轮实际使用的模型 display（chat_stream 启动时的快照；
-        /// 轮次进行中切换模型不影响事件携带的值）
+        /// Snapshot at chat_stream start, not the live config
         model: String,
-        /// 本轮请求使用的思考强度（流式启动时的快照，同 model 语义；
-        /// 供 runtime_meta 落库做后续分析）
         reasoning_effort: ReasoningEffort,
         status: TaskStatus,
     },
@@ -66,29 +105,39 @@ pub enum CoreEvent {
         completion_tokens: u32,
         cached_tokens: u32,
     },
+    /// An interjected user message entered the context at a loop boundary.
+    /// Consumers: persist + echo (Web runner); TUI settles the optimistic
+    /// bubble and persists via `handle_interjected_user_message`.
+    UserMessage {
+        /// The interjected message as accepted; `client_id` is the echo key
+        /// the frontend resolves against its queue / optimistic bubble
+        interjection: Interjection,
+    },
+    /// An accepted interjection was discarded without entering the context:
+    /// the run was interrupted / errored / completed before the injection
+    /// boundary (or in the narrow teardown window after the last drain).
+    /// Never persisted. Consumers re-queue the item so the user can resend.
+    InterjectDropped {
+        client_id: String,
+    },
     PersistMessage {
         msg: SharedMessage,
         usage: Option<MessageUsage>,
-        /// 产生该消息的模型 display（流式状态快照，非当前配置）
         model: String,
         display: Option<String>,
     },
     ToolCallStart {
         name: String,
         arguments: String,
-        /// 若来自 subagent 转发，携带 subagent 名称
         subagent_name: Option<String>,
-        /// 若来自 subagent 转发，携带该任务在 tasks 数组中的下标
-        /// （同名 subagent 并发时用于区分实例）
+        /// Index into the tasks array; distinguishes same-named concurrent subagents
         subagent_index: Option<usize>,
     },
     ToolResult {
         name: String,
         result: String,
         display: Option<String>,
-        /// 若来自 subagent 转发，携带 subagent 名称
         subagent_name: Option<String>,
-        /// 若来自 subagent 转发，携带该任务在 tasks 数组中的下标
         subagent_index: Option<usize>,
     },
     AskUser {
@@ -100,17 +149,12 @@ pub enum CoreEvent {
         response_tx: oneshot::Sender<PermissionReply>,
         subagent_name: Option<String>,
     },
-    /// 一次 LLM 请求失败，即将自动重试。
-    /// UI 语义：丢弃末尾正在流式渲染的内容（失败尝试的部分输出不会进入
-    /// 上下文），显示重试提示；重试成功后新内容从头流式输出。
+    /// UI semantics: drop the trailing streamed content (partial output of a
+    /// failed attempt never enters context) and show a retry notice.
     AgentRetry {
-        /// 即将进行的重试序号（1 起始）
         attempt: u32,
-        /// 重试次数上限（RetryConfig.max_retries）
         max_retries: u32,
-        /// 重试前退避等待（ms）
         delay_ms: u64,
-        /// 失败原因摘要
         reason: String,
     },
     CompactChunk(String),
@@ -129,15 +173,11 @@ pub fn create_core_event_channel() -> (CoreEventTx, CoreEventRx) {
     mpsc::channel(4096)
 }
 
-/// 可替换的事件通道句柄。
-///
-/// 部分工具（ask_user、TaskTool 的 subagent 转发）在构造时无法预知
-/// 事件该发往哪个消费者，通过 hub 间接持有通道：
-/// - TUI：启动时 `set` 一次，通道与进程同生命周期
-/// - Web：每个 `/api/chat` 请求 `set` 为该请求的通道，请求结束 `clear`
-///
-/// `send` 在通道缺失或已关闭时返回 `false`，调用方自行兜底
-/// （ask_user 直接报错返回，转发类静默丢弃）。
+/// Swappable event-channel handle for tools that cannot know their consumer
+/// at construction time (ask_user, subagent forwarding). TUI binds once per
+/// process; the web binds per `/api/chat` request. `send` returns false when
+/// unbound/closed — callers handle the fallback (ask_user errors out,
+/// forwarding drops silently).
 #[derive(Clone, Default)]
 pub struct EventHub {
     tx: std::sync::Arc<std::sync::RwLock<Option<CoreEventTx>>>,
@@ -148,21 +188,18 @@ impl EventHub {
         Self::default()
     }
 
-    /// 绑定通道（覆盖旧通道）
     pub fn set(&self, tx: CoreEventTx) {
         if let Ok(mut guard) = self.tx.write() {
             *guard = Some(tx);
         }
     }
 
-    /// 解绑通道（请求结束后调用）
     pub fn clear(&self) {
         if let Ok(mut guard) = self.tx.write() {
             *guard = None;
         }
     }
 
-    /// 尝试投递事件。返回 `false` = 未绑定通道或通道已关闭（未投递）。
     pub fn send(&self, event: CoreEvent) -> bool {
         if let Ok(guard) = self.tx.read()
             && let Some(tx) = guard.as_ref()
@@ -172,7 +209,6 @@ impl EventHub {
         false
     }
 
-    /// 是否绑定了通道
     pub fn is_bound(&self) -> bool {
         self.tx.read().map(|g| g.is_some()).unwrap_or(false)
     }

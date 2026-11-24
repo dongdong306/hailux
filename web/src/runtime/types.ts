@@ -42,6 +42,25 @@ export type ServerEvent =
     }
   | { type: "Notice"; text: string }
   | {
+      /** Mid-run interjection entered the agent context at a loop
+       * boundary. The submitting tab removes its queued item by client_id
+       * (echo confirmation) and renders the user bubble. */
+      type: "UserMessage";
+      client_id: string;
+      content: string;
+      attachments?: ChatAttachment[];
+      mentions?: ChatMention[];
+    }
+  | {
+      /** An accepted interjection was discarded without entering the agent
+       * context (run interrupted/errored before the injection boundary).
+       * Transient like Error: never persisted. The frontend releases the
+       * in-flight queued item (stays queued for a manual resend) and removes
+       * the optimistic bubble. */
+      type: "InterjectDropped";
+      client_id: string;
+    }
+  | {
       /** An LLM request failed and will auto-retry (frontend drops trailing streamed content and notifies) */
       type: "AgentRetry";
       /** Sequence number of the upcoming retry (1-based) */
@@ -242,8 +261,10 @@ export interface UpdateProviderInput {
 export interface CommandInfo {
   name: string;
   description: string;
-  /** "prompt" (expanded into full prompt by backend) | "ui" (handled locally by frontend) */
-  kind: "prompt" | "ui";
+  /** "prompt" (queued/sent, expanded into full prompt by backend)
+   *  | "view" (pure UI action — open a panel/menu, immediate in any state)
+   *  | "setting" (mode/compact toggle — immediate when idle, deferred to run end while running) */
+  kind: "prompt" | "view" | "setting";
 }
 
 export interface SkillInfoDto {
@@ -276,6 +297,18 @@ export interface ChatRequest {
   mentions?: ChatMention[];
   session_id?: string;
   work_dir?: string;
+}
+
+/** Mid-run interjection (POST /api/interject); requires an active chat run
+ * for the session (409 otherwise). The message enters the agent context at
+ * the next loop boundary and is echoed back as a `UserMessage` event. */
+export interface InterjectRequest {
+  session_id: string;
+  /** Client-generated id; echoed on UserMessage for queue-item removal */
+  client_id: string;
+  message: string;
+  attachments?: ChatAttachment[];
+  mentions?: ChatMention[];
 }
 
 // ── Usage stats (GET /api/stats)────────────────────────────────

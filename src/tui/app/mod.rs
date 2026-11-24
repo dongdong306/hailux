@@ -8,6 +8,7 @@ mod session_ops;
 pub(crate) mod types;
 
 pub(crate) use types::AppState;
+use types::QueuedItem;
 pub use types::{AppSharedState, Message};
 
 use paste::PasteBurst;
@@ -43,20 +44,16 @@ pub(super) const BATCH_RENDER_BUDGET: Duration = Duration::from_millis(50);
 /// Cap on events consumed per batch, preventing long occupation under extreme backlogs
 pub(super) const BATCH_MAX_EVENTS: usize = 128;
 
-/// File picker state
 #[derive(Default)]
 pub(super) struct FilePickerState {
     pub(super) active: bool,
     pub(super) results: Vec<String>,
     pub(super) selected: usize,
     pub(super) pending_mentions: Vec<(String, String)>,
-    /// Lazily cached path list (path, lowercase); the filesystem is walked once per picker session.
-    /// None = not built yet, Some(vec) = built (possibly empty)
     pub(super) cached: Option<Vec<(String, String)>>,
 }
 
 impl FilePickerState {
-    /// Called when input content is consumed/reset: closes the picker and clears the cache; the next `@` rescans
     pub(super) fn reset(&mut self) {
         self.active = false;
         self.results.clear();
@@ -66,7 +63,6 @@ impl FilePickerState {
     }
 }
 
-/// Command completion suggestion
 #[derive(Default)]
 pub(super) struct CommandSuggestion {
     pub(super) show: bool,
@@ -89,9 +85,7 @@ pub(super) struct CommandSuggestion {
 /// - markers wrapping text → strip the markers and treat it as a normal paste
 #[derive(Default)]
 pub(super) struct BracketPasteState {
-    /// Saw `[200~` (start marker), waiting for `[201~`
     pub(super) pending_start: bool,
-    /// When the state was established; expires automatically on timeout (orphan marker)
     pub(super) at: Option<Instant>,
 }
 
@@ -106,7 +100,6 @@ pub(super) struct EscClearedSnapshot {
 }
 
 impl EscClearedSnapshot {
-    /// Grabs a snapshot of the current input state (take semantics: the original state is cleared)
     pub(super) fn take_from(app: &mut App) -> Self {
         Self {
             text: app.input.text().to_string(),
@@ -117,51 +110,40 @@ impl EscClearedSnapshot {
     }
 }
 
-/// Task tracking
 #[derive(Default)]
 pub(super) struct TaskTracker {
     pub(super) records: Vec<TaskRecord>,
     pub(super) call_counter: u64,
-    /// Records for in-flight task calls (a concurrent batch holds several)
     pub(super) active_call_ids: Vec<u64>,
 }
 
-/// Spinner animation
 #[derive(Default)]
 pub(super) struct Spinner {
     pub(super) frame: usize,
     pub(super) last_tick: Option<Instant>,
 }
 
-/// Request timing stats
 #[derive(Default)]
 pub(super) struct TimingStats {
     pub(super) user_msg_sent_at: Option<Instant>,
     pub(super) last_total_ms: Option<u64>,
-    /// Accumulated paused time: dialogs waiting for user input (permission / ask) don't count toward elapsed time
     pub(super) paused_total: Duration,
-    /// Start of the current pause; Some = currently blocked on a dialog waiting for user input
     pub(super) paused_at: Option<Instant>,
 }
 
 impl TimingStats {
-    /// Called when entering a wait-for-user-input state (Permission / AskUser dialog).
-    /// No-op if already paused or no request is in flight.
     pub(super) fn pause(&mut self) {
         if self.user_msg_sent_at.is_some() && self.paused_at.is_none() {
             self.paused_at = Some(Instant::now());
         }
     }
 
-    /// Called after the dialog closes (reply done / canceled / Esc); resumes timing.
     pub(super) fn resume(&mut self) {
         if let Some(paused_at) = self.paused_at.take() {
             self.paused_total += paused_at.elapsed();
         }
     }
 
-    /// Effective send instant with paused time deducted.
-    /// While paused this value shifts forward in lockstep with the clock, so `elapsed()` appears frozen.
     pub(super) fn effective_sent_at(&self, now: Instant) -> Option<Instant> {
         let sent_at = self.user_msg_sent_at?;
         let mut adjust = self.paused_total;
@@ -171,45 +153,40 @@ impl TimingStats {
         Some(sent_at + adjust)
     }
 
-    /// Actual elapsed time in milliseconds with paused time deducted.
     pub(super) fn effective_elapsed_ms(&self, now: Instant) -> Option<u64> {
         self.effective_sent_at(now)
             .map(|t| now.duration_since(t).as_millis() as u64)
     }
 
-    /// Clears pause state (a new request starts / a request round ends).
     pub(super) fn clear_pause(&mut self) {
         self.paused_total = Duration::ZERO;
         self.paused_at = None;
     }
 
-    /// Starts timing a new request round: records the send instant and resets the previous round's elapsed time and pause state.
     pub(super) fn start_request(&mut self) {
         self.user_msg_sent_at = Some(Instant::now());
         self.last_total_ms = None;
         self.clear_pause();
     }
 
-    /// Finishes timing: records the final elapsed time and clears in-flight state.
     pub(super) fn finish(&mut self, now: Instant) {
         self.last_total_ms = self.effective_elapsed_ms(now);
         self.user_msg_sent_at = None;
         self.clear_pause();
     }
 
-    /// Aborts timing: clears in-flight state without recording elapsed time (error / cancel paths).
     pub(super) fn abort(&mut self) {
         self.user_msg_sent_at = None;
         self.clear_pause();
     }
 }
 
-/// Render cache and dirty flag
 pub(super) struct RenderState {
     pub(super) cache: RenderCache,
     pub(super) cells: Vec<Box<dyn HistoryCell>>,
     pub(super) dirty: bool,
     pub(super) force_clear: bool,
+    pub(super) ime_anchor: Option<(u16, u16)>,
 }
 
 impl Default for RenderState {
@@ -219,6 +196,7 @@ impl Default for RenderState {
             cells: Vec::new(),
             dirty: true,
             force_clear: false,
+            ime_anchor: None,
         }
     }
 }
@@ -234,7 +212,6 @@ pub struct App {
     pub(super) should_quit: bool,
     pub(super) agent: Agent,
     pub(super) events: (EventTx, event::EventRx),
-    /// Agent domain event sender (wrapped by the forwarder into `AppEvent::Core` to enter the event loop)
     pub(super) core_tx: crate::agent::event::CoreEventTx,
     pub(super) resolved: ResolvedModel,
     pub(super) state: AppState,
@@ -248,26 +225,16 @@ pub struct App {
     pub(super) last_esc_time: Option<Instant>,
     pub(super) esc_hint_active: bool,
     pub(super) pending_pastes: Vec<(String, String)>,
-    /// Pending image attachments (placeholder text → attachment), passed to the agent on message submit
     pub(super) pending_images: Vec<(String, crate::agent::media::Attachment)>,
-    /// Windows bracketed paste marker pairing state (see the `BracketPasteState` docs)
     pub(super) bracket_paste: BracketPasteState,
-    /// Full snapshot of the input state most recently cleared by Esc (text + attachments/pastes/mentions).
-    /// On Windows the first byte of `\e[200~` / `\e[201~` sequences is Esc, which wipes the input
-    /// box; restored wholesale when paste markers follow immediately (see handle_paste).
     pub(super) esc_cleared: Option<(EscClearedSnapshot, Instant)>,
-    /// Time of the most recent Ctrl+V Press (dedupe window for Release-leak probing):
-    /// terminals that don't intercept Ctrl+V deliver Press+Release in pairs; avoids duplicate probes
     pub(super) last_ctrl_v_press: Option<Instant>,
-    /// Whether a clipboard image probe is in flight (the probe runs as a detached async child
-    /// process; new requests are ignored while in flight, so holding Ctrl+V doesn't queue a flood)
     pub(super) image_probe_in_flight: bool,
     /// Start time of the most recent silent clipboard probe (Release leak / empty bracketed paste).
     /// WeChat/QQ "copy image" carries both a bitmap and a FileDrop, so one Ctrl+V arrives via two
     /// channels: path text injection (original file bytes) + probe GetImage (re-encoded bitmap
     /// bytes) — the data_urls differ, so attach_image dedupe can't match them; drop copies by pairing window
     pub(super) leak_probe_started_at: Option<Instant>,
-    /// When an image was last attached via the path-injection channel (handle_paste's FileDrop → path recognition)
     pub(super) path_image_attached_at: Option<Instant>,
     pub(super) config: config::Config,
     pub(super) skills: Vec<SkillInfo>,
@@ -279,6 +246,8 @@ pub struct App {
     pub(super) file_picker: FilePickerState,
     pub(super) subagents: Vec<SubagentConfig>,
     pub(super) tasks: TaskTracker,
+    pub(super) queue: Vec<QueuedItem>,
+    pub(super) drain_after_compact: bool,
     pub(super) shared: AppSharedState,
     pub(super) thinking_collapsed: bool,
     pub(super) timing: TimingStats,
@@ -347,6 +316,8 @@ impl App {
             file_picker: FilePickerState::default(),
             subagents,
             tasks: TaskTracker::default(),
+            queue: Vec::new(),
+            drain_after_compact: false,
             shared,
             thinking_collapsed: true,
             timing: TimingStats::default(),
@@ -373,12 +344,19 @@ impl App {
 
         loop {
             let timeout = if self.is_processing {
-                Duration::from_millis(80)
-            } else {
+                // While running: min(streaming refresh, paste-flush deadline)
+                // so queued-mode input still flushes promptly
+                let streaming = Duration::from_millis(80);
                 self.paste_burst
                     .flush_timeout()
-                    .map(|d| d + Duration::from_millis(5))
-                    .unwrap_or(Duration::from_secs(3600))
+                    .map(|d| (d + Duration::from_millis(5)).min(streaming))
+                    .unwrap_or(streaming)
+            } else {
+                let blink = Duration::from_millis(500);
+                self.paste_burst
+                    .flush_timeout()
+                    .map(|d| (d + Duration::from_millis(5)).min(blink))
+                    .unwrap_or(blink)
             };
 
             if let Some(event) = pending_input_events.pop_front() {
@@ -468,7 +446,6 @@ impl App {
                     self.spinner.frame = self.spinner.frame.wrapping_add(1);
                     self.spinner.last_tick = Some(now);
                 }
-                // Auto-reset the Esc hint after 5 seconds
                 if self.esc_hint_active
                     && self
                         .last_esc_time
@@ -477,6 +454,7 @@ impl App {
                     self.last_esc_time = None;
                     self.esc_hint_active = false;
                 }
+                self.handle_paste_burst_flush(now);
             }
 
             if !self.paste_burst.is_active() {
@@ -491,11 +469,14 @@ impl App {
                 }
                 terminal.draw(|f| self.render(f))?;
             }
+
+            if let Some((x, y)) = self.render.ime_anchor {
+                crossterm::execute!(terminal.backend_mut(), crossterm::cursor::MoveTo(x, y))?;
+            }
         }
 
         event_collector.abort();
 
-        // If work is still in flight, clean up: mark it interrupted and repair orphaned tool calls
         if self.is_processing {
             self.cleanup_on_quit().await;
         }
@@ -503,16 +484,9 @@ impl App {
         Ok(())
     }
 
-    /// Cleanup on quit: interrupt the agent and try to wait for AgentComplete (2s timeout);
-    /// on timeout, manually repair orphaned tool calls in storage and write the interrupted status.
-    ///
-    /// Race-safe: the stream task communicates via the event channel and nobody reads its events
-    /// after cleanup returns; `repair_orphaned_tool_calls` is idempotent (checks existing_ids) so
-    /// no duplicates. Only PersistMessage and AgentComplete are handled; other UI events don't matter on the exit path.
     async fn cleanup_on_quit(&mut self) {
         self.agent.interrupt();
 
-        // Try to wait for the AgentComplete event (up to 2 seconds)
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if let Ok(Some(event)) =
@@ -535,7 +509,6 @@ impl App {
             }
         }
 
-        // Timeout fallback: repair storage manually
         if let Some(session_id) = &self.current_session_id {
             if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
                 eprintln!("[warn] repair_orphaned_tool_calls: {e}");
@@ -563,7 +536,6 @@ impl App {
         }
     }
 
-    /// Wraps handle_event, auto-detecting message changes and marking the cells cache dirty
     async fn process_event(&mut self, event: AppEvent) -> Result<()> {
         let streaming = matches!(
             &event,
@@ -590,7 +562,6 @@ impl App {
         Ok(())
     }
 
-    /// Whether an event is a high-frequency streaming event eligible for batch draining
     fn is_batchable_event(event: &AppEvent) -> bool {
         match event {
             AppEvent::Core(e) => matches!(
@@ -609,13 +580,11 @@ impl App {
     }
 
     async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
-        // MCP background connection completion event, not gated by the current state
         if let AppEvent::McpReady(connections) = event {
             self.handle_mcp_ready(connections).await?;
             return Ok(());
         }
 
-        // Model list fetch results: the model picker (R key) or the setup form (post-key fetch)
         if let AppEvent::ModelsRefreshed {
             provider_id,
             result,
@@ -651,7 +620,6 @@ impl App {
                 subagent_name,
             };
             match &mut self.state {
-                // Dialog already open: enqueue the new request instead of overwriting the current one
                 AppState::Permission { pending: queue, .. } => queue.push(pending),
                 _ => {
                     self.state = AppState::Permission {
@@ -664,8 +632,6 @@ impl App {
             return Ok(());
         }
 
-        // In non-Chat overlay states, non-keyboard events must still be forwarded to the Chat handler
-        // so agent responses, tool results, etc. aren't dropped.
         let is_overlay = !matches!(
             &self.state,
             AppState::Chat | AppState::AskUser { .. } | AppState::Permission { .. }
@@ -718,6 +684,9 @@ impl App {
             }
             AppState::Tasks { .. } => {
                 self.handle_tasks_event(event).await?;
+            }
+            AppState::QueueManager { .. } => {
+                self.handle_queue_manager_event(event).await?;
             }
             AppState::Stats { .. } => {
                 self.handle_stats_event(event).await?;

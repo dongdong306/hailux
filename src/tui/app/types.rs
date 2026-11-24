@@ -14,8 +14,12 @@ pub enum Message {
     User {
         text: String,
         plan_mode: bool,
-        /// @ mention display ranges (byte offsets in text; empty = no mention metadata)
         mentions: Vec<std::ops::Range<usize>>,
+        /// Optimistic interjection bubble: rendered on delivery, carries the
+        /// client_id until the `CoreEvent::UserMessage` echo. While set, the
+        /// previous turn's output inserts before this bubble (see
+        /// `turn_output_insert_index`); stripped on echo / turn end
+        pending_interject: Option<String>,
     },
     Agent(String),
     AgentStreaming(String),
@@ -38,16 +42,12 @@ pub enum Message {
         result: String,
         display: Option<String>,
     },
-    /// One step during subagent execution (tool call + result)
     SubagentStep {
         summary: String,
         is_done: bool,
-        /// Source agent name when multiple subagents run concurrently
         agent: Option<String>,
-        /// Index of the source task in the tasks array (distinguishes same-named concurrent subagent instances)
         index: Option<usize>,
     },
-    /// Context compaction separator marker (visible in the UI, not fed into the LLM context)
     CompactMarker {
         compacted_count: usize,
         total_ms: Option<u64>,
@@ -66,7 +66,6 @@ pub(super) enum ModelPickerAction {
     Close,
     Switch(ModelEntry),
     AddModel,
-    /// Fetch the selected provider's `/models` list and open the multi-select dialog
     Refresh(String),
 }
 
@@ -81,16 +80,12 @@ pub(crate) enum AppState {
     ModelPicker {
         models: Vec<ModelEntry>,
         selected_index: usize,
-        /// Provider id whose `/models` list is being fetched right now (at most one fetch in flight)
         refreshing: Option<String>,
-        /// Outcome of the last fetch shown in the footer: (ok, text)
         refresh_note: Option<(bool, String)>,
     },
-    /// Reasoning effort submenu (opened by /effort without arguments)
     EffortPicker {
         selected_index: usize,
     },
-    /// Form shared by first-run setup and add-model (append_only distinguishes the two)
     Setup(SetupForm),
     Skills {
         selected_index: usize,
@@ -115,14 +110,14 @@ pub(crate) enum AppState {
         selected_index: usize,
         entries: Vec<TaskEntry>,
     },
+    QueueManager {
+        selected_index: usize,
+    },
     Stats {
         data: crate::tui::stats_viewer::StatsData,
         selected_index: usize,
-        /// Project filter; None = all projects
         work_dir: Option<String>,
-        /// Known project list (for the project picker)
         projects: Vec<crate::storage::WorkDirInfo>,
-        /// Selected entry when the project picker is open (0 = all projects, i = projects[i-1])
         picker_index: Option<usize>,
     },
     TaskDetail {
@@ -157,6 +152,28 @@ pub(crate) struct PermissionPending {
     pub subagent_name: Option<String>,
 }
 
+pub(crate) struct QueuedItem {
+    pub client_id: String,
+    pub text: String,
+    pub images: Vec<(String, crate::agent::media::Attachment)>,
+    pub mention_images: Vec<crate::agent::media::Attachment>,
+    pub mention_display: Vec<(String, String)>,
+    /// Delivery in progress (accepted by the agent, waiting for the
+    /// `CoreEvent::UserMessage` echo / `InterjectDropped` release); blocks
+    /// double-interject, edit and delete
+    pub in_flight: bool,
+}
+
+impl QueuedItem {
+    pub(crate) fn all_attachments(&self) -> Vec<crate::agent::media::Attachment> {
+        self.images
+            .iter()
+            .map(|(_, a)| a.clone())
+            .chain(self.mention_images.iter().cloned())
+            .collect()
+    }
+}
+
 pub(crate) fn locate_mentions(text: &str, values: &[String]) -> Vec<std::ops::Range<usize>> {
     let mut ordered: Vec<&String> = values.iter().collect();
     ordered.sort_by_key(|v| std::cmp::Reverse(v.len()));
@@ -181,7 +198,6 @@ pub(crate) fn locate_mentions(text: &str, values: &[String]) -> Vec<std::ops::Ra
     hits
 }
 
-/// Replace each `@value` match with `@display`; returns (new text, byte ranges of the mention spans)
 pub(crate) fn rewrite_mentions(
     text: &str,
     mentions: &[(String, String)],
@@ -204,7 +220,6 @@ pub(crate) fn rewrite_mentions(
     (out, spans)
 }
 
-/// Byte range → Unicode code point range
 pub(crate) fn byte_range_to_char_range(
     text: &str,
     range: &std::ops::Range<usize>,
@@ -214,7 +229,6 @@ pub(crate) fn byte_range_to_char_range(
     start..start + len
 }
 
-/// Unicode code point range → byte range (returns None when out of bounds)
 pub(crate) fn char_range_to_byte_range(
     text: &str,
     start_cp: usize,
@@ -231,7 +245,6 @@ pub(crate) fn char_range_to_byte_range(
     }
 }
 
-/// Shared state passed between App, TaskTool and subagents
 pub struct AppSharedState {
     pub current_session: Arc<Mutex<Option<String>>>,
     pub mcp_backends: SharedMcpBackends,
@@ -241,6 +254,26 @@ pub struct AppSharedState {
 #[cfg(test)]
 mod tests {
     use super::rewrite_mentions;
+
+    #[test]
+    fn queued_item_all_attachments_merges_placeholder_and_inline() {
+        use super::QueuedItem;
+        use crate::agent::media::Attachment;
+        let placeholder_img = Attachment::from_bytes("image/png", &[0x89, b'P']);
+        let inline_img = Attachment::from_bytes("image/png", b"NG");
+        let item = QueuedItem {
+            client_id: "c1".to_string(),
+            text: "看图 [Image 1] 与 @D:/p/a.png".to_string(),
+            images: vec![("[Image 1] ".to_string(), placeholder_img)],
+            mention_images: vec![inline_img],
+            mention_display: Vec::new(),
+            in_flight: false,
+        };
+        let all = item.all_attachments();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].data_url, item.images[0].1.data_url);
+        assert_eq!(all[1].data_url, item.mention_images[0].data_url);
+    }
 
     #[test]
     fn rewrite_mentions_expanded_to_display() {

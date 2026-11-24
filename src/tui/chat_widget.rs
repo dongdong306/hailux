@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::types::Message;
 use super::command;
 use super::history_cell::{
-    CHAT_FG, CHAT_FILE_MENTION, CHAT_IMAGE, CHAT_PASTE, CHAT_PLACEHOLDER, HistoryCell, PLAN_BADGE,
+    CHAT_FG, CHAT_FILE_MENTION, CHAT_IMAGE, CHAT_PASTE, HistoryCell, PLAN_BADGE,
 };
 use super::input::ElementKind;
 
@@ -38,7 +38,6 @@ impl RenderCache {
         }
     }
 
-    /// 确保 key 对应的 lines 已缓存，返回行数（不 clone）
     fn ensure_cached(
         &mut self,
         key: u64,
@@ -49,12 +48,10 @@ impl RenderCache {
         self.entries.entry(key).or_insert_with(compute).len()
     }
 
-    /// 按 key 查已缓存的 lines 引用
     fn get_lines(&self, key: u64) -> Option<&Vec<Line<'static>>> {
         self.entries.get(&key)
     }
 
-    /// 仅保留 active_keys 中存在的条目，淘汰其余陈旧缓存
     pub fn retain_keys(&mut self, active_keys: &HashSet<u64>) {
         self.entries.retain(|k, _| active_keys.contains(k));
     }
@@ -69,6 +66,17 @@ pub struct RenderResult {
     pub scroll_offset: u16,
 }
 
+/// Queue strip height, shared by the chat_widget layout and the app_render
+/// cursor-Y math (must stay in sync): 0 when empty, else min(N,3) preview
+/// rows + overflow hint row + 2 border rows
+pub fn queue_strip_height(total: usize) -> u16 {
+    if total == 0 {
+        0
+    } else {
+        (total.min(3) + usize::from(total > 3)) as u16 + 2
+    }
+}
+
 pub struct ChatWidget<'a> {
     pub messages: &'a [Message],
     pub cells: &'a [Box<dyn HistoryCell>],
@@ -78,6 +86,10 @@ pub struct ChatWidget<'a> {
     pub should_auto_scroll: bool,
     pub last_total_lines: u16,
     pub is_processing: bool,
+    pub queued: Vec<String>,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub cursor_blink_on: bool,
     pub model_name: &'a str,
     pub input_scroll_row: u16,
     pub input_area_height: u16,
@@ -162,9 +174,17 @@ fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
 
 impl<'a> ChatWidget<'a> {
     pub fn render(mut self, area: Rect, buf: &mut Buffer) -> RenderResult {
-        let [messages_area, timing_area, input_area, status_area] = Layout::vertical([
+        let queue_height: u16 = queue_strip_height(self.queued.len());
+        let [
+            messages_area,
+            timing_area,
+            queue_area,
+            input_area,
+            status_area,
+        ] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(queue_height),
             Constraint::Length(self.input_area_height),
             Constraint::Length(1),
         ])
@@ -186,6 +206,9 @@ impl<'a> ChatWidget<'a> {
 
         let (_, total_lines) = self.render_messages(messages_area, buf, indent);
         self.render_timing(timing_area, buf);
+        if queue_height > 0 {
+            self.render_queue(queue_area, buf);
+        }
         self.render_input(input_area, buf);
         self.render_status(status_area, buf);
 
@@ -215,7 +238,6 @@ impl<'a> ChatWidget<'a> {
 
         let cells = self.cells;
 
-        // Phase 1: ensure all cells' lines are cached, collect (key, line_count)
         let segments: Vec<(u64, usize)> = (0..cells.len())
             .map(|i| {
                 let key = cells[i].cache_key();
@@ -226,7 +248,6 @@ impl<'a> ChatWidget<'a> {
             })
             .collect();
 
-        // total = sum of (cell lines + 1 separator) per cell
         let total_lines: usize = segments.iter().map(|&(_, n)| n + 1).sum();
         let total_lines_u16 = total_lines as u16;
         let max_hide = total_lines_u16.saturating_sub(visible_height);
@@ -244,7 +265,6 @@ impl<'a> ChatWidget<'a> {
         let hide_from_bottom = self.scroll_offset.min(max_hide);
         let ratatui_scroll = max_hide.saturating_sub(hide_from_bottom);
 
-        // Phase 2: collect only lines within the visible window
         let win_start = ratatui_scroll as usize;
         let win_end = (win_start + visible_height as usize).min(total_lines);
         let mut all_lines: Vec<Line<'static>> =
@@ -254,7 +274,6 @@ impl<'a> ChatWidget<'a> {
 
         let mut pos = 0usize;
         for &(key, cell_count) in &segments {
-            // cell lines
             let cell_end = pos + cell_count;
             if cell_end > win_start
                 && pos < win_end
@@ -264,7 +283,6 @@ impl<'a> ChatWidget<'a> {
                 let e = win_end.min(cell_end) - pos;
                 all_lines.extend(cached[s..e].iter().cloned());
             }
-            // separator
             let sep_pos = cell_end;
             if sep_pos >= win_start && sep_pos < win_end {
                 all_lines.push(Line::from(""));
@@ -272,7 +290,6 @@ impl<'a> ChatWidget<'a> {
             pos = cell_end + 1;
         }
 
-        // Lines belonging to the header cell (no indent); rest are indented
         let header_visible = if win_start < header_total {
             header_total.min(win_end) - win_start
         } else {
@@ -294,7 +311,6 @@ impl<'a> ChatWidget<'a> {
         let messages_paragraph = Paragraph::new(all_lines.clone());
         messages_paragraph.render(text_area, buf);
 
-        // Render header lines without indent (align with input box border)
         if header_visible > 0 {
             let header_area = Rect::new(
                 text_area.x.saturating_sub(indent),
@@ -317,8 +333,8 @@ impl<'a> ChatWidget<'a> {
             }
         }
 
-        // 将 diff 行的背景色延伸到行尾，避免 ratatui 宽字符 trailing cell
-        // diff 不更新背景色（PR#2308）导致滚动残留
+        // Extend the diff lines' background to end-of-line: ratatui leaves
+        // trailing wide-char cells unstyled (PR#2308), which smears on scroll
         for (row, line) in all_lines.iter().enumerate() {
             if row as u16 >= text_area.height {
                 break;
@@ -423,18 +439,6 @@ impl<'a> ChatWidget<'a> {
             Style::default().fg(CHAT_IMAGE)
         };
 
-        if self.input_buffer.is_empty() && !self.is_processing {
-            let input_paragraph = Paragraph::new(Line::from(vec![
-                input_prefix,
-                Span::styled(
-                    "输入消息... (Shift+Enter 换行)",
-                    Style::default().fg(CHAT_PLACEHOLDER),
-                ),
-            ]));
-            input_paragraph.render(input_render_area, buf);
-            return;
-        }
-
         let mut visual_lines: Vec<Line<'static>> = Vec::new();
         let logical_lines: Vec<&str> = self.input_buffer.split('\n').collect();
         let text_avail = area_w.saturating_sub(prefix_w).max(1);
@@ -534,11 +538,66 @@ impl<'a> ChatWidget<'a> {
 
         let input_paragraph = Paragraph::new(visual_lines).scroll((self.input_scroll_row, 0));
         input_paragraph.render(input_render_area, buf);
+
+        // Fake cursor: a thin bar over the cursor cell (rests after the
+        // prefix when the input is empty). The native cursor stays hidden in
+        // Chat; the blink phase flips every 500ms via the idle event loop.
+        if self.cursor_blink_on {
+            let row = self.cursor_row.saturating_sub(self.input_scroll_row);
+            let col = self.cursor_col;
+            if (row as usize) < input_render_area.height as usize
+                && (col as usize) < input_render_area.width as usize
+            {
+                buf[(input_render_area.x + col, input_render_area.y + row)].set_symbol("▏");
+            }
+        }
     }
 
-    /// 渲染状态横幅（输入框上方）
-    /// 处理中: spinner + shimmer("Thinking"/"Working") + 耗时 + Esc 提示
-    /// 完成后: 不显示（耗时渲染在最后一条消息后）
+    fn render_queue(&self, area: Rect, buf: &mut Buffer) {
+        let total = self.queued.len();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title_top(
+                Line::from(vec![
+                    Span::styled(
+                        " 排队消息 ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("({total}) "), Style::default().fg(Color::DarkGray)),
+                ])
+                .left_aligned(),
+            )
+            .title_bottom(
+                Line::from(Span::styled(
+                    "Ctrl+Q 管理",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .right_aligned(),
+            );
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let avail = inner.width.saturating_sub(3) as usize;
+        let mut lines = Vec::new();
+        for text in self.queued.iter().take(3) {
+            lines.push(Line::from(Span::styled(
+                format!("> {}", truncate_chars(text, avail)),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        if total > 3 {
+            lines.push(Line::from(Span::styled(
+                format!("… 还有 {} 条", total - 3),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        Paragraph::new(lines).render(inner, buf);
+    }
+
     fn render_timing(&self, area: Rect, buf: &mut Buffer) {
         if !self.is_processing {
             return;
@@ -643,7 +702,6 @@ impl<'a> ChatWidget<'a> {
             .map(|cmd| cmd.name.width())
             .max()
             .unwrap_or(0);
-        // 列宽："/" + name + "  " + description + " " + 边框
         let content_width = 1
             + max_name_width
             + 2
@@ -654,7 +712,7 @@ impl<'a> ChatWidget<'a> {
                 .max()
                 .unwrap_or(0);
         let popup_width = (content_width as u16 + 5).min(full_area.width);
-        let popup_height = suggestion_count + 2; // +2 为上下边框
+        let popup_height = suggestion_count + 2;
 
         let popup_x = full_area.x;
         let popup_y = input_area.y.saturating_sub(popup_height);
@@ -764,6 +822,21 @@ impl<'a> ChatWidget<'a> {
     }
 }
 
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > max.saturating_sub(1) {
+            out.push('…');
+            return out;
+        }
+        w += cw;
+        out.push(ch);
+    }
+    out
+}
+
 fn format_tokens(n: i64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -799,17 +872,14 @@ fn build_progress_bar(ratio: f64, width: usize) -> Vec<Span<'static>> {
 
     let mut spans = Vec::with_capacity(3);
 
-    // Filled full cells with track background
     if full_cells > 0 {
         spans.push(Span::styled("█".repeat(full_cells), full_style));
     }
 
-    // Partial cell using foreground color on track background
     if remainder > 0 && full_cells < width {
         spans.push(Span::styled(BLOCK_PARTIALS[remainder], full_style));
     }
 
-    // Empty cells with track background only
     let filled_count = full_cells + (if remainder > 0 { 1 } else { 0 });
     if filled_count < width {
         spans.push(Span::styled(" ".repeat(width - filled_count), empty_style));

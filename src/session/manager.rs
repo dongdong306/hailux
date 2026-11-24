@@ -1,17 +1,6 @@
-//! SessionManager: lazy registry of session_id -> ChatSession instance
-//! (one instance per session).
-//!
-//! Core difference from the old design (work_dir -> single instance): sessions
-//! in the same work_dir each get their own instance (own Agent context /
-//! EventHub / cancel flag / lock), so top-level runs run in parallel within a
-//! work_dir; concurrent requests for the same session_id are still serialized
-//! by the instance lock.
-//!
-//! Instances are built lazily: on first use, the owning work_dir is read from
-//! the DB and the full discovery pass (skills/subagents/commands/AGENTS.md)
-//! plus the session binding runs. In-flight requests keep their Arc across
-//! invalidate; the next access rebuilds.
-//! Storage / Config / MCP connections are global.
+//! SessionManager: lazy session_id -> ChatSession registry, one instance
+//! per session (not per work_dir), so runs in the same work_dir parallelize;
+//! same-session requests serialize on the instance lock.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,31 +18,23 @@ use super::session::ChatSession;
 
 type SessionEntry = Arc<tokio::sync::Mutex<ChatSession>>;
 
-/// Registry entry: the instance plus lock-free handles (cancel flag and
-/// permission manager snapshot extracted at build time, so broadcasts and
-/// interrupts never take the session lock).
 struct EntryRecord {
     session: SessionEntry,
-    /// Owning work dir (canonical); invalidate(dir) matches on this
     work_dir: PathBuf,
-    /// Cancel flag (takes effect without the session lock)
     cancel: Arc<AtomicBool>,
-    /// Permission manager handle (YOLO broadcast without the session lock)
     perm: PermissionManager,
+    interject: crate::agent::event::InterjectSlot,
 }
 
 pub struct SessionManager {
-    /// session_id -> instance registry
     sessions: RwLock<HashMap<String, EntryRecord>>,
     resolved: RwLock<config::ResolvedModel>,
     cfg: RwLock<config::Config>,
     storage: ChatStorage,
     mcp_backends: SharedMcpBackends,
-    /// Web-global YOLO mode (shared across work_dirs; new instances inherit)
+    /// Web-global modes; new instances inherit them
     global_yolo: AtomicBool,
-    /// Web-global plan mode (shared across work_dirs; new instances inherit)
     global_plan: AtomicBool,
-    /// Web-global reasoning effort (shared across work_dirs; new instances inherit)
     global_effort: RwLock<crate::agent::ReasoningEffort>,
 }
 
@@ -104,10 +85,8 @@ impl SessionManager {
         }
     }
 
-    /// Get the instance for a session_id (lazy build). A session_id always
-    /// maps to the same instance; different session_ids — even in the same
-    /// work_dir — hold different locks and can run in parallel. The target
-    /// session must already exist in the DB (session ids come from DB rows).
+    /// A session_id always maps to the same instance; different session_ids
+    /// (even in one work_dir) hold different locks and run in parallel
     pub async fn get_or_create_for_session(&self, session_id: &str) -> Result<SessionEntry> {
         if let Some(existing) = self
             .sessions
@@ -125,8 +104,7 @@ impl SessionManager {
             .ok_or_else(|| color_eyre::eyre::eyre!("会话不存在: {session_id}"))?;
         let record = self.build_entry(session_id, PathBuf::from(&dir)).await?;
 
-        // Spawn race: another request may have built the same session's
-        // instance meanwhile; the existing one wins.
+        // Spawn race: the existing instance wins
         let entry = match self.sessions.write() {
             Ok(mut map) => match map.get(session_id) {
                 Some(existing) => existing.session.clone(),
@@ -138,6 +116,7 @@ impl SessionManager {
                             work_dir: record.work_dir.clone(),
                             cancel: record.cancel.clone(),
                             perm: record.perm.clone(),
+                            interject: record.interject.clone(),
                         },
                     );
                     record.session.clone()
@@ -148,8 +127,6 @@ impl SessionManager {
         Ok(entry)
     }
 
-    /// Build a new instance bound to session_id (not registered; the caller
-    /// registers or drops it).
     async fn build_entry(&self, session_id: &str, dir: PathBuf) -> Result<EntryRecord> {
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
@@ -165,31 +142,28 @@ impl SessionManager {
         )?;
         session.register_task_tool(&resolved);
         session.register_mcp_tools(&self.mcp_backends);
-        // Persist session-scoped "always" rules to the DB (parity with the
-        // TUI; without this they live in memory only and die with the instance)
+        // Session-scoped "always" rules must survive instance rebuilds
         session
             .permission_manager()
             .with_storage_ref(self.storage.clone());
-        // Inherit global modes (persists across project switches on the web)
         session.set_yolo(self.global_yolo.load(Ordering::Relaxed));
         session.set_plan_mode(self.global_plan.load(Ordering::Relaxed));
         session.set_reasoning_effort(self.global_effort());
-        // Bind the target session: load its permission rules + rebuild the
-        // agent context (the instance is not shared yet — no lock contention)
         session.switch_session(session_id).await?;
 
         let cancel = session.cancel_flag();
         let perm = session.permission_manager();
+        let interject = session.interject_slot();
         Ok(EntryRecord {
             session: Arc::new(tokio::sync::Mutex::new(session)),
             work_dir: canonical,
             cancel,
             perm,
+            interject,
         })
     }
 
-    /// Precisely interrupt the run of one session (no session lock taken).
-    /// Returns false = no instance for that session.
+    /// No session lock taken. False = no instance.
     pub fn interrupt_session(&self, session_id: &str) -> bool {
         self.sessions
             .read()
@@ -202,7 +176,24 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
-    /// All built ChatSession instances (for model-switch style broadcasts).
+    /// No session lock taken (the runner holds it for the whole run).
+    /// False = no instance / no active run / run cancelling / queue full.
+    pub fn try_interject(
+        &self,
+        session_id: &str,
+        interjection: crate::agent::event::Interjection,
+    ) -> bool {
+        let tx = self
+            .sessions
+            .read()
+            .ok()
+            .and_then(|m| m.get(session_id).map(|r| r.interject.clone()));
+        let Some(slot) = tx else {
+            return false;
+        };
+        crate::agent::event::deliver_interjection(&slot, interjection)
+    }
+
     pub fn all_sessions(&self) -> Vec<SessionEntry> {
         self.sessions
             .read()
@@ -210,8 +201,6 @@ impl SessionManager {
             .map(|m| m.values().map(|r| r.session.clone()).collect())
             .unwrap_or_default()
     }
-
-    // ── Web-global modes (YOLO / Plan, shared across work_dirs) ──────────
 
     pub fn global_yolo(&self) -> bool {
         self.global_yolo.load(Ordering::Relaxed)
@@ -221,9 +210,8 @@ impl SessionManager {
         self.global_plan.load(Ordering::Relaxed)
     }
 
-    /// Set global YOLO. Broadcast through permission-manager handles — never
-    /// through the session lock: instances locked by in-flight runs pick it up
-    /// immediately on the next tool permission check.
+    /// Via permission handles (never the session lock): locked instances
+    /// pick it up on the next permission check
     pub fn set_global_yolo(&self, on: bool) {
         self.global_yolo.store(on, Ordering::Relaxed);
         let mode = if on {
@@ -238,9 +226,8 @@ impl SessionManager {
         }
     }
 
-    /// Set global plan mode. plan_mode lives on the Agent (not the permission
-    /// manager), so broadcasting needs the session lock; locked instances
-    /// (in-flight runs) are skipped — the chat entry re-syncs as a fallback.
+    /// plan_mode lives on the Agent, so this try_locks; locked instances are
+    /// skipped and re-synced at the chat entry
     pub fn set_global_plan(&self, on: bool) {
         self.global_plan.store(on, Ordering::Relaxed);
         for entry in self.all_sessions() {
@@ -250,7 +237,6 @@ impl SessionManager {
         }
     }
 
-    /// Current global reasoning effort.
     pub fn global_effort(&self) -> crate::agent::ReasoningEffort {
         *self
             .global_effort
@@ -258,9 +244,7 @@ impl SessionManager {
             .expect("global_effort lock poisoned")
     }
 
-    /// Set global reasoning effort. Same semantics as `set_global_plan`:
-    /// locked instances are skipped, the chat entry re-syncs (the effort
-    /// snapshot is read per request anyway).
+    /// Same try_lock semantics as `set_global_plan`
     pub fn set_global_effort(&self, effort: crate::agent::ReasoningEffort) {
         if let Ok(mut guard) = self.global_effort.write() {
             *guard = effort;
@@ -272,10 +256,8 @@ impl SessionManager {
         }
     }
 
-    /// Invalidate all instances of a work dir (after skills etc. changed on
-    /// disk). In-flight requests keep their Arc; the next access rebuilds.
-    /// Note: the cancel flags go away with the instances — in-flight requests
-    /// lose interruptability (same as the old design).
+    /// In-flight requests keep their Arc but lose interruptability (their
+    /// cancel flag dies with the evicted instance); the next access rebuilds
     pub fn invalidate(&self, work_dir: &Path) {
         let key = super::session::normalize_key(work_dir);
         if let Ok(mut map) = self.sessions.write() {
@@ -283,8 +265,6 @@ impl SessionManager {
         }
     }
 
-    /// Remove a session's instance and interrupt its run (session deletion).
-    /// Returns false = no instance.
     pub fn remove_session(&self, session_id: &str) -> bool {
         let record = self
             .sessions
@@ -300,15 +280,12 @@ impl SessionManager {
         }
     }
 
-    /// Invalidate every instance (after global config changes like MCP).
     pub fn invalidate_all(&self) {
         if let Ok(mut map) = self.sessions.write() {
             map.clear();
         }
     }
 
-    /// All work dirs that ever appeared in sessions (sessions table DISTINCT,
-    /// with session counts / last activity).
     pub async fn list_work_dirs(&self) -> Result<Vec<crate::storage::WorkDirInfo>> {
         self.storage.list_work_dirs().await
     }
@@ -359,8 +336,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Config `permission.mode = "yolo"` -> the server boots into YOLO
-    /// (`GET /api/mode` reports it; the frontend syncMode shows it right).
     #[tokio::test]
     async fn manager_initializes_yolo_from_config() {
         let storage = ChatStorage::new_in_memory().await.unwrap();
@@ -379,8 +354,6 @@ mod tests {
         assert!(manager.global_yolo());
     }
 
-    /// A session_id always maps to the same instance; different session_ids
-    /// get independent instances.
     #[tokio::test]
     async fn session_id_maps_to_stable_instance() {
         let (manager, dir_a, _dir_b) = make_manager().await;
@@ -411,8 +384,6 @@ mod tests {
         );
     }
 
-    /// Parallel sessions in one work_dir: instance locks are independent
-    /// (both held simultaneously).
     #[tokio::test]
     async fn same_dir_sessions_lock_independently() {
         let (manager, dir_a, _dir_b) = make_manager().await;
@@ -430,8 +401,6 @@ mod tests {
         assert_eq!(g2.current_session_id().as_deref(), Some(s2.as_str()));
     }
 
-    /// interrupt_session flips exactly the target instance's cancel flag,
-    /// leaving same-dir siblings alone.
     #[tokio::test]
     async fn interrupt_session_is_precise() {
         let (manager, dir_a, _dir_b) = make_manager().await;
@@ -453,8 +422,24 @@ mod tests {
         assert!(!manager.interrupt_session("nonexistent"));
     }
 
-    /// Global YOLO: broadcasts through permission handles (no session lock,
-    /// works while locked), new instances inherit it.
+    #[tokio::test]
+    async fn try_interject_requires_active_run() {
+        let (manager, dir_a, _dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let _entry = manager.get_or_create_for_session(&s1).await.unwrap();
+
+        let interjection = crate::agent::event::Interjection {
+            client_id: "c1".to_string(),
+            content: "hello".to_string(),
+            attachments: vec![],
+            mentions: Vec::new(),
+        };
+        // Unknown session: no registry entry
+        assert!(!manager.try_interject("nonexistent", interjection.clone()));
+        // Known session but no active chat run (slot still None)
+        assert!(!manager.try_interject(&s1, interjection));
+    }
+
     #[tokio::test]
     async fn global_yolo_broadcasts_and_inherits() {
         let (manager, dir_a, dir_b) = make_manager().await;
@@ -489,8 +474,6 @@ mod tests {
         );
     }
 
-    /// Global plan: try_lock broadcast, locked instances skipped (no deadlock);
-    /// the chat entry re-syncs as the fallback.
     #[tokio::test]
     async fn global_plan_broadcast_skips_locked_session() {
         let (manager, dir_a, _dir_b) = make_manager().await;
@@ -516,7 +499,6 @@ mod tests {
         assert!(!entry_a.lock().await.plan_mode());
     }
 
-    /// A rebuilt instance inherits current global modes (skills/MCP change).
     #[tokio::test]
     async fn rebuilt_session_inherits_global_modes() {
         let (manager, dir_a, _dir_b) = make_manager().await;
@@ -536,7 +518,6 @@ mod tests {
         assert!(session.plan_mode());
     }
 
-    /// invalidate only removes instances of the target dir.
     #[tokio::test]
     async fn invalidate_is_scoped_to_dir() {
         let (manager, dir_a, dir_b) = make_manager().await;
@@ -557,8 +538,6 @@ mod tests {
         );
     }
 
-    /// remove_session: the instance is evicted and its cancel flag set
-    /// (session deletion interrupts a running task).
     #[tokio::test]
     async fn remove_session_cancels_and_evicts() {
         let (manager, dir_a, _dir_b) = make_manager().await;
@@ -581,7 +560,6 @@ mod tests {
         );
     }
 
-    /// An unknown session_id errors out (nothing is conjured).
     #[tokio::test]
     async fn unknown_session_id_is_rejected() {
         let (manager, _dir_a, _dir_b) = make_manager().await;
@@ -593,8 +571,6 @@ mod tests {
         assert!(err.to_string().contains("会话不存在"));
     }
 
-    /// Session-scoped "always" rules persist: a rebuilt instance restores them
-    /// from the DB (with_storage_ref closed loop).
     #[tokio::test]
     async fn session_permission_rules_persist_across_rebuild() {
         let (manager, dir_a, _dir_b) = make_manager().await;

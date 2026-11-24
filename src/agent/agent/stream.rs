@@ -17,7 +17,7 @@ use async_openai::{
 use futures_util::StreamExt;
 
 use super::messages::{ensure_tool_call_parity, sanitize_messages_for_request};
-use crate::agent::event::{CoreEvent, CoreEventTx, MessageUsage, TaskStatus};
+use crate::agent::event::{CoreEvent, CoreEventTx, Interjection, MessageUsage, TaskStatus};
 use crate::agent::models::{
     CompatibleChatCompletionRequestAssistantMessage, CompatibleChatCompletionRequestMessage,
     CompatibleCreateChatCompletionRequestArgs, CompatibleCreateChatCompletionStreamResponse,
@@ -29,11 +29,8 @@ use crate::permission::PermissionManager;
 
 use super::CANCEL_POLL_INTERVAL;
 
-/// 规划模式提示词。开启 plan 模式时，会注入到本轮最后一条用户消息中，
-/// 作为软约束提醒模型处于只读阶段。
 const PLAN_MODE_PROMPT: &str = crate::prompts::PLAN_MODE;
 
-/// 用于在流式响应中累加 tool_calls 的分片
 #[derive(Default)]
 pub(super) struct PartialToolCall {
     pub(super) id: String,
@@ -41,26 +38,25 @@ pub(super) struct PartialToolCall {
     pub(super) arguments: String,
 }
 
-/// 流式处理过程中的 Agent 状态，用于在独立 tokio task 中运行
 pub(super) struct AgentStreamState {
     pub(super) client: Client<OpenAIConfig>,
     pub(super) tool_registry: ToolRegistry,
     pub(super) messages: Vec<SharedMessage>,
     pub(super) model: String,
-    /// 快照的展示模型名（事件携带，用量统计归属依据）
     pub(super) model_display: String,
     pub(super) max_tokens: u32,
-    /// 当前模型是否支持视觉输入（决定图片附件是否降级）
     pub(super) supports_vision: bool,
-    /// 是否为 DeepSeek/GLM 原生推理接口（决定是否发送私有 `thinking` 开关）
     pub(super) native_reasoning: bool,
-    /// 思考强度（请求体顶层 reasoning_effort）
     pub(super) reasoning_effort: ReasoningEffort,
     pub(super) plan_mode: bool,
     pub(super) permission: PermissionManager,
     pub(super) work_dir: String,
-    /// 瞬态错误自动重试策略（chat_stream 启动时的快照）
     pub(super) retry: RetryConfig,
+    /// Swapped per run; drained at loop boundaries
+    pub(super) interject_rx: tokio::sync::mpsc::Receiver<Interjection>,
+    /// client_ids already injected this run: a repeated client_id is
+    /// reported as dropped instead of being injected twice
+    pub(super) delivered_interject_ids: std::collections::HashSet<String>,
 }
 
 impl AgentStreamState {
@@ -69,7 +65,6 @@ impl AgentStreamState {
     ) -> Result<CompatibleCreateChatCompletionRequestArgs, Box<dyn Error + Send + Sync>> {
         let tools = self.tool_registry.to_chat_tools_filtered(self.plan_mode);
         let mut messages = self.messages.clone();
-        // 规划模式下，把只读提示词注入到最后一条用户消息（在克隆上操作，不污染存储）。
         if self.plan_mode {
             for msg in messages.iter_mut().rev() {
                 let msg_mut = Arc::make_mut(msg);
@@ -81,7 +76,7 @@ impl AgentStreamState {
                             t.push_str("\n\n");
                             t.push_str(PLAN_MODE_PROMPT);
                         }
-                        // 带图片附件的消息：提示词追加为独立的 text part
+                        // Separate text part for messages with image attachments
                         async_openai::types::chat::ChatCompletionRequestUserMessageContent::Array(
                             parts,
                         ) => {
@@ -98,11 +93,9 @@ impl AgentStreamState {
                 }
             }
         }
-        // 视觉能力兜底校验：
-        // 不支持视觉的模型收到图片时替换为错误文本，由模型转告用户
         let messages = sanitize_messages_for_request(&messages, self.supports_vision);
-        // 悬挂 tool_calls 兜底：中断/断连/崩溃遗留的脏数据（经 DB 重建进入上下文）
-        // 会在请求前就地补齐 tool result，任何 Provider 都不会收到悬挂序列
+        // Fill in tool results for dangling tool_calls left by interrupts /
+        // disconnects / crashes so no provider ever sees the sequence
         let messages = ensure_tool_call_parity(&messages);
         let mut builder = CompatibleCreateChatCompletionRequestArgs::default();
         builder
@@ -114,11 +107,10 @@ impl AgentStreamState {
                 ToolChoiceOptions::Auto,
             ))
             .messages(messages)
-            // stream_options.include_usage 是 OpenAI 标准，所有 provider 通用
             .extra("stream_options", serde_json::json!({"include_usage": true}));
-        // reasoning_effort：low/high/max 均在 OpenAI 值域内（GPT-5.6+ 全量支持，
-        // DeepSeek/GLM 原生三档），直传即可；仅 `thinking` 是 DeepSeek/GLM 私有
-        // 约定，OpenAI 兼容链路不发送，避免严格校验的服务端拒绝未知字段。
+        // Only `thinking` is DeepSeek/GLM-private and stays off the OpenAI
+        // path so strictly validating servers never reject an unknown field;
+        // reasoning_effort values are all within the OpenAI range.
         if self.native_reasoning {
             builder.thinking(ThinkingConfig::enabled());
         }
@@ -145,9 +137,60 @@ pub(super) fn emit_persist_message(
     });
 }
 
-/// 确保消息列表以 Assistant 消息结尾，然后发送 AgentComplete 事件。
-/// 若最后一条不是 Assistant，则追加一条内容为 `fallback_content` 的 Assistant 消息。
-/// 被 `chat_stream` 错误路径和 `finalize_cancelled` 共用，避免逻辑重复。
+/// Drain pending interjections into the context at a loop boundary; emits
+/// `CoreEvent::UserMessage` per item (awaited: the echo is the delivery
+/// confirmation — losing it would leave the submitter's item in-flight
+/// forever). Non-zero return during the final answer stream means another
+/// request round is needed.
+pub(super) async fn drain_interjections(
+    state: &mut AgentStreamState,
+    event_tx: &CoreEventTx,
+) -> usize {
+    let mut injected = 0;
+    while let Ok(interjection) = state.interject_rx.try_recv() {
+        // Server-side idempotence: a repeated client_id is not injected
+        // twice; report it dropped so no submitter's item hangs in-flight
+        if !state
+            .delivered_interject_ids
+            .insert(interjection.client_id.clone())
+        {
+            let _ = event_tx
+                .send(CoreEvent::InterjectDropped {
+                    client_id: interjection.client_id,
+                })
+                .await;
+            continue;
+        }
+        let msg: SharedMessage = Arc::new(super::build_user_message(
+            &interjection.content,
+            &interjection.attachments,
+        ));
+        state.messages.push(Arc::clone(&msg));
+        let _ = event_tx.send(CoreEvent::UserMessage { interjection }).await;
+        injected += 1;
+    }
+    injected
+}
+
+/// Report interjections that were accepted but never injected (run cancelled
+/// / errored / completed before a boundary, or the narrow teardown window
+/// after the last drain). Without this the submitter's queued item would
+/// hang in-flight forever with no echo and no DB row. Never awaits in a way
+/// that blocks teardown meaningfully — the event channel is 4096 deep and
+/// the consumer keeps draining it until `RunComplete`.
+pub(super) async fn drop_residual_interjections(
+    state: &mut AgentStreamState,
+    event_tx: &CoreEventTx,
+) {
+    while let Ok(interjection) = state.interject_rx.try_recv() {
+        let _ = event_tx
+            .send(CoreEvent::InterjectDropped {
+                client_id: interjection.client_id,
+            })
+            .await;
+    }
+}
+
 pub(super) fn finalize_messages(
     messages: &mut Vec<SharedMessage>,
     fallback_content: String,
@@ -187,7 +230,6 @@ pub(super) fn finalize_messages(
     });
 }
 
-/// 单次 LLM 请求（连接 + 流消费）的累积输出
 #[derive(Default)]
 pub(super) struct StreamOutput {
     pub(super) ai_message: String,
@@ -197,19 +239,15 @@ pub(super) struct StreamOutput {
     pub(super) last_usage: Option<MessageUsage>,
 }
 
-/// 单次 LLM 请求尝试的结果
 enum AttemptOutcome {
-    /// 流正常结束（完整输出）
     Done(StreamOutput),
-    /// 用户取消（携带已收到的部分输出，供中断收尾保留）
+    /// Partial output kept for the interrupt finalizer
     Cancelled(StreamOutput),
-    /// 瞬态错误（部分输出直接丢弃，不进入上下文）
+    /// Partial output is discarded and never enters context
     Retryable(OpenAIError),
-    /// 不可重试错误
     Fatal(OpenAIError),
 }
 
-/// 按可重试性归类请求错误
 fn classify_stream_error(e: OpenAIError) -> AttemptOutcome {
     if retry::is_retryable(&e) {
         AttemptOutcome::Retryable(e)
@@ -218,9 +256,9 @@ fn classify_stream_error(e: OpenAIError) -> AttemptOutcome {
     }
 }
 
-/// 执行一次 LLM 请求：建立流连接并消费完毕，累积输出。
-/// 任何失败都不修改 `state.messages` —— 重试或报错由调用方决定；
-/// 失败尝试的部分输出只存在于本函数返回值与 UI 流式缓冲中。
+/// Failures never mutate `state.messages`: retry vs error is the caller's
+/// decision, and partial output of a failed attempt lives only in this
+/// return value.
 async fn attempt_once(
     state: &AgentStreamState,
     cancel: &AtomicBool,
@@ -243,7 +281,6 @@ async fn attempt_once(
                 }
                 _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
                     if cancel.load(Ordering::Relaxed) {
-                        // 连接阶段取消：尚无任何输出
                         return Ok(AttemptOutcome::Cancelled(StreamOutput::default()));
                     }
                 }
@@ -323,16 +360,33 @@ pub(super) async fn run_stream_loop(
     cancel: Arc<AtomicBool>,
     event_tx: &CoreEventTx,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Error exits (`?` from tool dispatch / fatal LLM errors / finalizers)
+    // must still report accepted-but-uninjected interjections
+    match run_stream_loop_inner(state, cancel, event_tx).await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            drop_residual_interjections(state, event_tx).await;
+            Err(e)
+        }
+    }
+}
+
+async fn run_stream_loop_inner(
+    state: &mut AgentStreamState,
+    cancel: Arc<AtomicBool>,
+    event_tx: &CoreEventTx,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut all_usages: Vec<MessageUsage> = Vec::new();
     loop {
         if cancel.load(Ordering::Relaxed) {
+            drop_residual_interjections(state, event_tx).await;
             super::dispatch::finalize_cancelled(state, event_tx, all_usages).await?;
             return Ok(());
         }
+        // Interjection injection point: after tool results entered context,
+        // before the next LLM request
+        drain_interjections(state, event_tx).await;
 
-        // ── 单次 LLM 请求（连接 + 流消费），瞬态错误自动重试 ──
-        // 失败尝试的部分输出不进入消息上下文、不落库；仅通过 AgentRetry
-        // 事件通知 UI 丢弃已流式渲染的内容后重新生成。
         let mut retry_no: u32 = 0;
         let output = loop {
             match attempt_once(state, &cancel, event_tx).await? {
@@ -348,6 +402,7 @@ pub(super) async fn run_stream_loop(
                         event_tx,
                     )
                     .await?;
+                    drop_residual_interjections(state, event_tx).await;
                     super::dispatch::finalize_cancelled(state, event_tx, all_usages).await?;
                     return Ok(());
                 }
@@ -360,8 +415,8 @@ pub(super) async fn run_stream_loop(
                         delay_ms: delay.as_millis() as u64,
                         reason: err.to_string(),
                     });
-                    // 退避等待期间用户取消：中止重试，走中断收尾
                     if !retry::sleep_cancellable(delay, &cancel).await {
+                        drop_residual_interjections(state, event_tx).await;
                         super::dispatch::finalize_cancelled(state, event_tx, all_usages).await?;
                         return Ok(());
                     }
@@ -440,6 +495,7 @@ pub(super) async fn run_stream_loop(
                 .await?;
 
             if cancel.load(Ordering::Relaxed) {
+                drop_residual_interjections(state, event_tx).await;
                 super::dispatch::finalize_cancelled(state, event_tx, all_usages).await?;
                 return Ok(());
             }
@@ -480,10 +536,17 @@ pub(super) async fn run_stream_loop(
                 &state.model_display,
                 None,
             );
+            // A late interjection keeps the run alive for another round
+            if drain_interjections(state, event_tx).await > 0 {
+                continue;
+            }
             break;
         }
     }
 
+    // The run is over: interjections accepted in the narrow window since the
+    // last drain (or while the final answer streamed) will never be injected
+    drop_residual_interjections(state, event_tx).await;
     let final_messages = std::mem::take(&mut state.messages);
     let _ = event_tx.try_send(CoreEvent::AgentComplete {
         messages: final_messages,
@@ -506,8 +569,8 @@ pub(super) async fn push_partial_assistant(
         return Ok(());
     }
 
-    // 空 id 的条目是流式中断的半成品（id 分片未到达）：无法被任何 tool result
-    // 应答，放进 assistant.tool_calls 即产生悬挂（严格 Provider 400），直接剔除。
+    // Empty-id entries are stream-interrupted half-deliveries no tool result
+    // can answer — including them would create a dangling sequence
     let tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls_map
         .values()
         .filter(|partial| !partial.id.is_empty())

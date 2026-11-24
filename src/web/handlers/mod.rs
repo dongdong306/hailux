@@ -46,6 +46,7 @@ pub fn api_router() -> Router<Arc<WebServerState>> {
         )
         .route("/api/ask/{request_id}/reply", post(permissions::ask_reply))
         .route("/api/interrupt", post(sessions::interrupt))
+        .route("/api/interject", post(sessions::interject))
         .route(
             "/api/models",
             get(models::list_models).post(models::switch_model),

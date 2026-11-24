@@ -116,6 +116,27 @@ pub enum ServerEvent {
         /// and resync instead of treating this as a normal turn end
         abnormal: bool,
     },
+    /// A mid-run interjection entered the agent context at a loop
+    /// boundary. Persisted by the runner; the frontend renders the user bubble
+    /// and removes the matching queued item by `client_id`.
+    UserMessage {
+        /// Client-generated id (echo confirmation: the submitting tab removes
+        /// its queued item only when this arrives)
+        client_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<ChatAttachment>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<ChatMention>,
+    },
+    /// An accepted interjection was discarded without entering the agent
+    /// context (run interrupted/errored/completed before the injection
+    /// boundary). Transient like `Error`: never persisted, the frontend
+    /// releases the queued item (stays queued for a manual resend).
+    InterjectDropped {
+        /// Matches the queued item id / optimistic bubble marker
+        client_id: String,
+    },
 }
 
 pub fn status_str(status: &TaskStatus) -> &'static str {
@@ -158,7 +179,7 @@ pub struct StatsResponse {
 // ── Request bodies (frontend → backend) ──────────────────────────
 
 /// Image attachments carried by the user message (uploaded by the frontend as data URLs).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ChatAttachment {
     pub mime: String,
     /// Full data URL in the form `data:<mime>;base64,<data>`
@@ -166,7 +187,7 @@ pub struct ChatAttachment {
 }
 
 /// @ mention metadata: `start`/`end` are Unicode code point offsets into content
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ChatMention {
     /// Start code point offset (token includes the `@` prefix)
     pub start: usize,
@@ -184,6 +205,22 @@ pub struct ChatRequest {
     pub mentions: Vec<ChatMention>,
     pub session_id: Option<String>,
     pub work_dir: Option<String>,
+}
+
+/// Mid-run interjection (POST /api/interject). Requires an active chat run for
+/// the session (409 otherwise): the message waits in a per-run channel and
+/// enters the agent context at the next loop boundary.
+#[derive(Debug, Deserialize)]
+pub struct InterjectRequest {
+    pub session_id: String,
+    /// Client-generated id; echoed back on `UserMessage` so the submitting tab
+    /// removes the queued item only after the message actually entered context
+    pub client_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
+    #[serde(default)]
+    pub mentions: Vec<ChatMention>,
 }
 
 #[derive(Debug, Deserialize)]

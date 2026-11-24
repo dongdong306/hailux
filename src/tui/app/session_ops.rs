@@ -11,13 +11,12 @@ impl App {
         };
 
         let compact_summary = self.storage.get_compact_summary(session_id).await?;
-        // 恢复路径兜底：修复历史中断遗留的悬挂 tool_calls（幂等），
-        // 避免崩溃/强杀留下的脏数据进入重建后的上下文触发 Provider 400
         if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
             eprintln!("[warn] repair_orphaned_tool_calls: {e}");
         }
         let stored = self.storage.load_messages(session_id).await?;
-        // 内存过滤替代第二次查询：避免同会话连查两遍（两遍都会解析附件 base64 大字段）
+        // In-memory filter: a second query would re-parse the base64
+        // attachment fields
         let active_stored: Vec<&crate::storage::StoredMessage> =
             stored.iter().filter(|m| !m.compacted).collect();
 
@@ -53,10 +52,10 @@ impl App {
 
             match msg.role {
                 MessageRole::User => {
-                    // 工具图片合成消息（read 读取图片等，agent 层为注入模型上下文
-                    // 生成）：runtime_meta 带 {"format":"tool-attachment"} 标记，
-                    // 跳过不渲染（TUI 无法显示图片，提示文本对用户无价值）。
-                    // 无标记的旧数据保持原样展示（容忍）。
+                    // Agent-layer synthesized tool images carry
+                    // {"format":"tool-attachment"}: never render them (the
+                    // TUI can't show images anyway). Legacy rows without the
+                    // marker still render.
                     let is_tool_attachment = msg
                         .runtime_meta
                         .as_deref()
@@ -79,6 +78,7 @@ impl App {
                         text,
                         plan_mode,
                         mentions: mention_spans,
+                        pending_interject: None,
                     });
                 }
                 MessageRole::Assistant => {
@@ -224,8 +224,6 @@ impl App {
         Ok(())
     }
 
-    /// `/share`：导出当前会话为自包含 HTML 分享文件，写入当前工作目录。
-    /// 含全量历史（compacted 消息照常渲染），复用 `share` 模块（与 Web 端点同源）。
     pub(super) async fn share_session_html(&mut self) -> Result<()> {
         let Some(session_id) = self.current_session_id.clone() else {
             self.messages.push(Message::Agent(
@@ -235,7 +233,6 @@ impl App {
             return Ok(());
         };
 
-        // 空会话（无消息且无压缩摘要）提示而非生成空文件
         let has_messages = self.storage.count_active_messages(&session_id).await? > 0
             || self
                 .storage
@@ -285,8 +282,6 @@ impl App {
             .to_string())
     }
 
-    /// 恢复当前工作目录下最近的一个顶层 session（用于 `--resume` 启动）。
-    /// 返回 `true` 表示已恢复，`false` 表示无历史 session。
     pub async fn resume_last_session(&mut self) -> Result<bool> {
         let work_dir = Self::current_work_dir()?;
         let sessions = self.storage.list_top_level_sessions(&work_dir).await?;
@@ -325,6 +320,7 @@ impl App {
         self.set_session_usage(pt as u32, ct as u32);
         self.messages.clear();
         self.tasks.records.clear();
+        self.queue.clear();
         self.render.dirty = true;
         self.render.force_clear = true;
         self.render.cache.clear();
@@ -351,6 +347,7 @@ impl App {
         self.context_completion_tokens = 0;
         self.messages.clear();
         self.tasks.records.clear();
+        self.queue.clear();
         self.render.dirty = true;
         self.render.force_clear = true;
         self.render.cache.clear();

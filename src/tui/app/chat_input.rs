@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::attachments::read_image_attachment;
 use super::paste::{CharDecision, FlushResult};
+use super::types::Message;
 use super::{App, EscClearedSnapshot};
 use crate::tui::command;
 use crate::tui::event::AppEvent;
@@ -13,16 +14,12 @@ use crate::tui::input::ElementKind;
 
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 200;
 
-// ===== App keyboard input handling =====
-
 impl App {
     pub(super) async fn handle_chat_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Ctrl+V 的 Release 泄漏（WT 把按键交给 paste 动作，Press 被终端消费）：
-        // 图片剪贴板场景下 conhost 丢弃空 bracketed paste 序列，这是唯一可达信号。
-        // 静默探测——文本粘贴场景（剪贴板有文本）探测无图时不产生提示噪音；
-        // 不拦截 Ctrl+V 的终端 Press+Release 成对到达，凭 300ms 窗口去重。
-        // 泄漏形态仅存在于 Windows（event.rs 已在非 Windows 拦下 Release），
-        // 此处再门控一层，Unix kitty 协议的 Release 到达时直接走常规按键路径。
+        // Ctrl+V Release leak (Windows Terminal only): with an image
+        // clipboard, conhost drops the empty bracketed-paste sequence, which
+        // is the only reachable signal — probe silently, deduped by the
+        // 300ms window against paired Press+Release arrivals
         #[cfg(windows)]
         if key.kind == KeyEventKind::Release
             && matches!(
@@ -58,12 +55,12 @@ impl App {
                     self.open_model_picker();
                     return Ok(());
                 }
-                // Ctrl+V（含 legacy 终端报为 \x16 控制字符、Ctrl+Shift+V 报为
-                // 'V' 的形态）：终端不拦截时 Press 直达应用，作为粘贴图片的入口之一
+                KeyCode::Char('q') => {
+                    self.open_queue_manager();
+                    return Ok(());
+                }
                 KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\x16') => {
                     self.spawn_clipboard_image_probe(true);
-                    // 探测发起后记时间戳：Release 泄漏在 Press 处理返回之后
-                    // 到达（事件循环串行），300ms 去重窗口据此抑制重复探测
                     self.last_ctrl_v_press = Some(Instant::now());
                     return Ok(());
                 }
@@ -71,8 +68,6 @@ impl App {
             }
         }
 
-        // Alt+V：粘贴剪贴板图片的可靠入口（多数终端不拦截 Alt 组合键；
-        // 现代 Windows Terminal 对图片剪贴板的 Ctrl+V 不产生任何事件）
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('\x16'))
         {
@@ -81,33 +76,15 @@ impl App {
         }
 
         if self.is_processing {
+            let now = Instant::now();
+            let input_empty = self.input.text().is_empty();
             match key.code {
                 KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.thinking_collapsed = !self.thinking_collapsed;
                     self.render.dirty = true;
-                }
-                KeyCode::Up => {
-                    self.should_auto_scroll = false;
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
-                }
-                KeyCode::Down => {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                    if self.scroll_offset == 0 {
-                        self.should_auto_scroll = true;
-                    }
-                }
-                KeyCode::PageUp => {
-                    self.should_auto_scroll = false;
-                    self.scroll_offset = self.scroll_offset.saturating_add(20);
-                }
-                KeyCode::PageDown => {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(20);
-                    if self.scroll_offset == 0 {
-                        self.should_auto_scroll = true;
-                    }
+                    return Ok(());
                 }
                 KeyCode::Esc => {
-                    let now = Instant::now();
                     if self
                         .last_esc_time
                         .is_some_and(|t| now.duration_since(t) < Duration::from_secs(5))
@@ -119,15 +96,55 @@ impl App {
                         self.last_esc_time = Some(now);
                         self.esc_hint_active = true;
                     }
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if self.paste_burst.append_newline_if_active(now) {
+                        return Ok(());
+                    }
+                    let want_newline = key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::ALT)
+                        || self.paste_burst.newline_should_insert(now);
+                    if want_newline {
+                        self.input.insert_str("\n");
+                        if self.paste_burst.newline_should_insert(now) {
+                            self.paste_burst.extend_window(now);
+                        }
+                    } else {
+                        self.enqueue_current();
+                    }
+                    return Ok(());
+                }
+                KeyCode::Up if input_empty => {
+                    self.should_auto_scroll = false;
+                    self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    return Ok(());
+                }
+                KeyCode::Down if input_empty => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    if self.scroll_offset == 0 {
+                        self.should_auto_scroll = true;
+                    }
+                    return Ok(());
+                }
+                KeyCode::PageUp if input_empty => {
+                    self.should_auto_scroll = false;
+                    self.scroll_offset = self.scroll_offset.saturating_add(20);
+                    return Ok(());
+                }
+                KeyCode::PageDown if input_empty => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                    if self.scroll_offset == 0 {
+                        self.should_auto_scroll = true;
+                    }
+                    return Ok(());
                 }
                 _ => {}
             }
-            return Ok(());
         }
 
         let now = Instant::now();
         self.handle_paste_burst_flush(now);
-
         if self.file_picker.active {
             match key.code {
                 KeyCode::Up => {
@@ -190,7 +207,6 @@ impl App {
                 } else {
                     let raw = self.input.text().to_string();
                     let input = self.expand_pending_pastes(&raw);
-                    // @图片提及在 expand 前基于 display 文本检测，读文件内联为附件
                     let mut attachments = self.take_mention_images(&input);
                     let (input, mention_display) = self.expand_file_mentions(&input);
                     attachments.extend(self.take_pending_images());
@@ -291,8 +307,8 @@ impl App {
                 if self.cmd_suggestion.show {
                     self.cmd_suggestion.show = false;
                 } else {
-                    // Windows 下 `\e[200~` / `\e[201~` 序列的 Esc 字节也会走到这里：
-                    // 记录完整状态快照，若紧接着出现 paste 标记则整体恢复（见 handle_paste）
+                    // An Esc byte inside `\e[200~`/`\e[201~` lands here: snapshot
+                    // and restore wholesale if a paste marker follows
                     let snapshot = EscClearedSnapshot::take_from(self);
                     self.esc_cleared = Some((snapshot, Instant::now()));
                     self.input.clear();
@@ -395,10 +411,8 @@ impl App {
 
     pub(super) fn handle_paste(&mut self, text: String) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        // Windows bracketed paste 标记配对（见 BracketPasteState 注释）
         let (clean, saw_start, saw_end) = Self::bracket_marker_info(&text);
         let now = Instant::now();
-        // 孤立 start 标记超时失效
         if self
             .bracket_paste
             .at
@@ -407,9 +421,8 @@ impl App {
             self.bracket_paste = Default::default();
         }
         if saw_start || saw_end {
-            // `\e[200~` / `\e[201~` 的首字节是 Esc：序列中途的 Esc 已把输入框
-            // 连同附件/粘贴/提及误清空 → 短窗内整体恢复（start/end 两个标记
-            // 场景都可能触发，end-only 时 pending_start 尚未建立）
+            // The sequence's own Esc byte already wiped the input box —
+            // restore wholesale within the short window
             if let Some((snapshot, at)) = self.esc_cleared.take()
                 && now.duration_since(at) < Duration::from_millis(500)
             {
@@ -427,7 +440,7 @@ impl App {
         if saw_end && self.bracket_paste.pending_start {
             self.bracket_paste = Default::default();
             if clean.is_empty() {
-                // 空 bracketed paste = 剪贴板只有图片（WT Ctrl+V 约定）→ 探测剪贴板
+                // Image-only clipboard (WT convention)
                 let _ = self.events.0.try_send(AppEvent::PasteImageProbe);
                 self.paste_burst.clear_after_explicit_paste();
                 return;
@@ -441,14 +454,11 @@ impl App {
             self.input.insert_element(&element_text, ElementKind::Paste);
             self.pending_pastes.push((element_text, clean));
         } else if !clean.is_empty() {
-            // 资源管理器复制文件 → WT paste 把 FileDrop 转成路径文本注入：
-            // 单个图片文件路径转为附件而非插入文本
             if let Some(path) = Self::image_path_from_paste(&clean)
                 && let Some(attachment) = read_image_attachment(&path)
             {
                 self.attach_image(attachment);
-                // 供泄漏探测结果配对去重（微信/QQ 复制图片双通道，见
-                // handle_clipboard_image_result）
+                // Dedupes against the leak-probe result (WeChat/QQ double-channel copies)
                 self.path_image_attached_at = Some(Instant::now());
                 self.render.dirty = true;
             } else {
@@ -457,6 +467,45 @@ impl App {
         }
         self.paste_burst.clear_after_explicit_paste();
         self.refresh_suggestions();
+    }
+
+    pub(super) fn enqueue_current(&mut self) {
+        let raw = self.input.text().to_string();
+        // UI commands cannot be queued: bail before any take/expand consumes
+        // pending state the input box still displays (placeholders would
+        // survive while the data behind them is gone)
+        let first_word = raw.split_whitespace().next().unwrap_or("");
+        if let Some(name) = first_word.strip_prefix('/')
+            && let Some(entry) = self.command_entries.iter().find(|e| e.name == name)
+            && entry.is_ui
+        {
+            self.messages.push(Message::Agent(
+                "UI 命令无法排队，请等待当前任务结束后直接执行".to_string(),
+            ));
+            self.render.dirty = true;
+            return;
+        }
+        let input = self.expand_pending_pastes(&raw);
+        let mention_images = self.take_mention_images(&input);
+        let (text, mention_display) = self.expand_file_mentions(&input);
+        let images = std::mem::take(&mut self.pending_images);
+        if text.trim().is_empty() && images.is_empty() && mention_images.is_empty() {
+            return;
+        }
+        self.queue.push(crate::tui::app::types::QueuedItem {
+            client_id: uuid::Uuid::new_v4().to_string(),
+            text,
+            images,
+            mention_images,
+            mention_display,
+            in_flight: false,
+        });
+        self.input.clear();
+        self.pending_pastes.clear();
+        self.file_picker.reset();
+        self.cmd_suggestion.show = false;
+        self.refresh_suggestions();
+        self.render.dirty = true;
     }
 
     fn next_large_paste_placeholder(&self, char_count: usize) -> String {
@@ -473,11 +522,6 @@ impl App {
         }
     }
 
-    /// 剥离 Windows 按键流形态的 bracketed paste 标记（`\e[200~` / `\e[201~`
-    /// 的 Esc 字节被 conhost 消化后剩余的 `[200~` / `[201~` 字符）。
-    /// 返回 (净文本, 是否含 start 标记, 是否含 end 标记)。
-    /// 正常粘贴文本不含这两个子串；手打字符不经过 handle_paste（PasteBurst
-    /// 仅将快速连续字符判定为粘贴），无误伤路径。
     fn bracket_marker_info(text: &str) -> (String, bool, bool) {
         let saw_start = text.contains("[200~");
         let saw_end = text.contains("[201~");
@@ -491,9 +535,6 @@ impl App {
         )
     }
 
-    /// 粘贴文本是否为单个图片文件的绝对路径（资源管理器复制文件后 Ctrl+V，
-    /// WT 的 paste 把 FileDrop 转成路径文本注入）。仅形态判定，不做 IO；
-    /// 多文件列表（引号夹空格）/相对路径/非图片扩展名均不匹配。
     fn image_path_from_paste(text: &str) -> Option<std::path::PathBuf> {
         let trimmed = text.trim().trim_matches('"').trim();
         if trimmed.is_empty() || trimmed.len() > 1024 {
@@ -522,7 +563,6 @@ impl App {
         result
     }
 
-    /// 把 `@rel` 展示替换为 `@abs`（持久化/发送形态），返回 (展开文本, (绝对路径, 展示相对路径) 对)
     pub(super) fn expand_file_mentions(&mut self, text: &str) -> (String, Vec<(String, String)>) {
         let pending = std::mem::take(&mut self.file_picker.pending_mentions);
         if pending.is_empty() {
@@ -597,8 +637,6 @@ impl App {
         {
             let text = format!("/{} ", cmd.name);
             self.input.set_text(text);
-            // set_text 替换整个输入框（元素一并清除）：同步清空 pending 状态，
-            // 避免残留附件附着到后续无关消息
             self.pending_images.clear();
             self.pending_pastes.clear();
             self.file_picker.pending_mentions.clear();
@@ -614,8 +652,6 @@ impl App {
         }
     }
 
-    /// 遍历工作目录，返回 (绝对路径, 小写形式) 列表，目录路径带尾部分隔符。
-    /// 仅在 picker 会话首次激活时调用一次，后续按键复用缓存。
     fn collect_paths(&self) -> Vec<(String, String)> {
         use ignore::WalkBuilder;
         let work_path = std::path::Path::new(&self.work_dir);
@@ -656,7 +692,6 @@ impl App {
             self.file_picker.active = false;
             return;
         };
-        // 懒构建缓存：picker 会话期间仅首次遍历文件系统，其余按键只做内存过滤
         if self.file_picker.cached.is_none() {
             self.file_picker.cached = Some(self.collect_paths());
         }
@@ -681,8 +716,6 @@ impl App {
         }
     }
 
-    /// 解析光标前输入中的 `@query` 片段；无有效 `@` 触发时返回 None。
-    /// 语义：`@` 前必须是行首或空白，query 内不含空白。
     fn file_picker_query(before_cursor: &str) -> Option<&str> {
         let at_idx = before_cursor.rfind('@')?;
         let before_at = &before_cursor[..at_idx];
@@ -714,8 +747,6 @@ impl App {
             let before_cursor = self.input.text_before_cursor();
             if let Some(at_idx) = before_cursor.rfind('@') {
                 self.input.drain_raw(at_idx..self.input.cursor());
-                // @文件（含图片）一律展示为 @相对路径；
-                // 图片内容在提交时由 take_mention_images 内联为附件
                 let display = format!("@{}", rel_path);
                 let element_text = format!("{} ", display);
                 self.input
@@ -734,8 +765,6 @@ impl App {
 mod tests {
     use super::App;
 
-    /// Windows WT 空 bracketed paste：Esc 被 conhost 消化后，
-    /// "[200~" 与 "[201~" 分两次 flush 到达（被序列中的 Esc 拆开）
     #[test]
     fn bracket_markers_start_and_end_fragments() {
         let (clean, start, end) = App::bracket_marker_info("[200~");
@@ -744,14 +773,12 @@ mod tests {
         assert_eq!((clean.as_str(), start, end), ("", false, true));
     }
 
-    /// 整个空序列一次 flush 到达
     #[test]
     fn bracket_markers_empty_paste_single_flush() {
         let (clean, start, end) = App::bracket_marker_info("[200~[201~");
         assert_eq!((clean.as_str(), start, end), ("", true, true));
     }
 
-    /// 文本粘贴：标记夹内容（一次 flush 或拆片）→ 剥标记保留正文
     #[test]
     fn bracket_markers_text_paste_stripped() {
         let (clean, start, end) = App::bracket_marker_info("[200~hello world[201~");
@@ -760,7 +787,6 @@ mod tests {
         assert_eq!((clean.as_str(), start, end), ("multi\nline", true, true));
     }
 
-    /// 普通粘贴文本不含标记 → 原样返回
     #[test]
     fn bracket_markers_plain_text_untouched() {
         let (clean, start, end) = App::bracket_marker_info("just some pasted text");
@@ -772,8 +798,6 @@ mod tests {
         assert_eq!(clean, "");
     }
 
-    /// 资源管理器复制文件 → WT paste 注入的路径文本（带/不带引号、含空格）。
-    /// `is_absolute` 是平台语义：Windows 用盘符路径，Unix 用绝对 POSIX 路径。
     #[test]
     fn image_path_from_paste_accepts_single_image_file() {
         #[cfg(windows)]
@@ -790,7 +814,6 @@ mod tests {
         assert!(App::image_path_from_paste(quoted).is_some());
     }
 
-    /// 多文件列表 / 相对路径 / 非图片扩展名 / 纯文本 → 不识别
     #[test]
     fn image_path_from_paste_rejects_non_single_image() {
         assert!(App::image_path_from_paste(r#""C:\a.png" "C:\b.png""#).is_none());

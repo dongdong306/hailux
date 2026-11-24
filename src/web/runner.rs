@@ -278,6 +278,60 @@ pub(super) async fn run_chat_task(
                         context_window: resolved.context_window,
                     });
                 }
+                CoreEvent::UserMessage { interjection } => {
+                    // Mid-run interjection entered the context at a loop
+                    // boundary: persist + echo. Persist first (watermark may
+                    // only cover seqs whose DB effects landed), then publish,
+                    // then advance — same rule as PersistMessage.
+                    let protocol_attachments = interjection
+                        .attachments
+                        .iter()
+                        .map(|a| protocol::ChatAttachment {
+                            mime: a.mime.clone(),
+                            data_url: a.data_url.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let mentions = interjection
+                        .mentions
+                        .iter()
+                        .map(|m| protocol::ChatMention {
+                            start: m.start,
+                            end: m.end,
+                            kind: m.kind.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    if let Err(e) = persist_user_message(
+                        &session,
+                        &session_id,
+                        &interjection.content,
+                        &interjection.attachments,
+                        &mentions,
+                    )
+                    .await
+                    {
+                        // The message is already in the in-memory context — the
+                        // run continues; surface the divergence instead of ending.
+                        bus.publish(ServerEvent::Error {
+                            message: format!("插话消息落库失败: {e}"),
+                        });
+                        continue;
+                    }
+                    bus.publish(ServerEvent::UserMessage {
+                        client_id: interjection.client_id,
+                        content: interjection.content,
+                        attachments: protocol_attachments,
+                        mentions,
+                    });
+                    bus.advance_durable(bus.last_seq());
+                }
+                CoreEvent::InterjectDropped { client_id } => {
+                    // Accepted interjection never entered the context (run
+                    // cancelled/errored/teardown race). Transient like Error:
+                    // publish only — no DB row, no durable advance — so
+                    // replay-after-reconnect never resurrects a message the
+                    // model never saw.
+                    bus.publish(ServerEvent::InterjectDropped { client_id });
+                }
                 CoreEvent::PersistMessage {
                     msg,
                     usage,

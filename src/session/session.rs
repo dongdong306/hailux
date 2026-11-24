@@ -1,9 +1,6 @@
-//! ChatSession：绑定单个 work_dir 的会话编排单元。
-//!
-//! 持有 Agent（含该目录发现的 skills/subagents/commands/system prompt）、
-//! 共享的 Storage / Config / MCP 后端，以及当前会话 ID。
-//! TUI 与 Web 后端通过同一组方法操作会话（新建/切换/发送/中断/压缩），
-//! 事件通过 [`EventHub`] + 每请求通道流出（见 `agent::event`）。
+//! ChatSession: session orchestration bound to one work_dir. Owns the Agent
+//! (with this dir's discovered skills/subagents/commands/system prompt),
+//! shared Storage / Config / MCP backends, and the current session id.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -18,7 +15,6 @@ use crate::config;
 use crate::mcp::SharedMcpBackends;
 use crate::storage::{ChatStorage, StoredMessage};
 
-/// 共享状态（ChatSession、TaskTool、subagent 之间传递）
 pub struct SessionShared {
     pub current_session: Arc<Mutex<Option<String>>>,
     pub mcp_backends: SharedMcpBackends,
@@ -33,19 +29,14 @@ pub struct ChatSession {
     pub command_registry: CommandRegistry,
     storage: ChatStorage,
     shared: Arc<SessionShared>,
-    /// Current bound work dir (absolute path; the SessionManager key)
+    /// Absolute path; the SessionManager key
     pub(crate) key: PathBuf,
-    /// Model display currently effective on this instance. The chat entry
-    /// reconciles it against the global config: broadcast switches skip locked
-    /// instances, and a drift detected at entry re-applies the switch.
+    /// The chat entry reconciles this against the global config: broadcast
+    /// switches skip locked instances, drift at entry re-applies the switch
     current_model_display: String,
 }
 
 impl ChatSession {
-    /// 按 work_dir 完成全部发现工作（skills/agents/commands/AGENTS.md）并构建 Agent。
-    ///
-    /// - `initial_tx`：初始事件通道（TUI 传进程级通道；Web 传 `None`，每请求再绑定）
-    /// - MCP 工具注册：`connect_mcp` 在外部完成后调用 [`ChatSession::register_mcp_tools`]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         resolved: &config::ResolvedModel,
@@ -88,7 +79,7 @@ impl ChatSession {
         Ok(session)
     }
 
-    /// 会话 key（canonicalize 归一化，剥离 Windows verbatim 前缀）
+    /// Canonicalized; Windows verbatim prefix stripped
     pub fn key_of(work_dir: &Path) -> PathBuf {
         normalize_key(work_dir)
     }
@@ -117,7 +108,7 @@ impl ChatSession {
         self.agent.event_hub().clone()
     }
 
-    /// 注册 subagent TaskTool（模型配置完成后调用；setup 阶段不注册）
+    /// Not registered during setup
     pub fn register_task_tool(&mut self, resolved: &config::ResolvedModel) {
         let task_tool = TaskTool::new(
             self.subagents.clone(),
@@ -134,7 +125,6 @@ impl ChatSession {
         self.agent.register_tool(Box::new(task_tool));
     }
 
-    /// 注册 MCP 工具（外部连接完成后调用）
     pub fn register_mcp_tools(&mut self, backends: &SharedMcpBackends) {
         let guard = match backends.lock() {
             Ok(g) => g,
@@ -151,10 +141,6 @@ impl ChatSession {
         }
     }
 
-    // ── 消息 ─────────────────────────────────────────────
-
-    /// 发送用户消息（可携带图片附件）并启动流式处理（不等待完成，事件经 `tx` 流出）。
-    /// 前置条件：已绑定事件通道（见 `bind_event_channel`）。
     pub fn send_message(
         &mut self,
         message: &str,
@@ -164,12 +150,10 @@ impl ChatSession {
         self.agent.chat_stream(message, attachments, tx)
     }
 
-    /// 为本次请求绑定事件通道（ask_user / subagent 转发走 hub）
     pub fn bind_event_channel(&self, tx: CoreEventTx) {
         self.agent.event_hub().set(tx);
     }
 
-    /// 请求结束解绑通道（Web 每请求调用；TUI 进程级通道无需）
     pub fn unbind_event_channel(&self) {
         self.agent.event_hub().clear();
     }
@@ -178,12 +162,21 @@ impl ChatSession {
         self.agent.interrupt();
     }
 
-    /// 取消标志句柄（Web 中断端点直接置位，不经过会话锁）
+    /// Web interrupt endpoint sets this without the session lock
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.agent.cancel_flag()
     }
 
-    /// 应用压缩结果到 in-memory 上下文
+    /// `&self` on purpose: the runner holds the session lock for the whole
+    /// run, so delivery must not take it
+    pub fn interject(&self, interjection: crate::agent::event::Interjection) -> bool {
+        self.agent.interject(interjection)
+    }
+
+    pub(crate) fn interject_slot(&self) -> crate::agent::event::InterjectSlot {
+        self.agent.interject_slot()
+    }
+
     pub fn apply_compaction_result(&mut self, summary: &str) {
         self.agent.apply_compaction(summary);
     }
@@ -192,9 +185,6 @@ impl ChatSession {
         self.agent.sync_messages(messages);
     }
 
-    // ── 会话管理 ─────────────────────────────────────────
-
-    /// 当前会话 ID（None = 下次发消息时新建）
     pub fn current_session_id(&self) -> Option<String> {
         self.shared
             .current_session
@@ -203,8 +193,8 @@ impl ChatSession {
             .and_then(|g| g.clone())
     }
 
-    /// 新建数据库会话并设为当前会话。
-    /// 同时清空内存上下文（Web 单实例跨会话复用 Agent，必须先清残留消息）
+    /// Clears the in-memory context: the Web reuses one Agent instance
+    /// across sessions, leftover messages must never leak
     pub async fn create_session(&mut self, model_display: &str) -> Result<String> {
         self.reset_context();
         let id = self
@@ -221,7 +211,8 @@ impl ChatSession {
         }
     }
 
-    /// 切换会话：加载权限规则 + 重建 agent 上下文（system prompt + 压缩摘要 + 活跃消息）
+    /// Switch sessions: load permission rules + rebuild the agent context
+    /// (system prompt + compaction summary + active messages)
     pub async fn switch_session(&mut self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.set_current_session(Some(session_id.to_string()));
         self.agent
@@ -229,14 +220,14 @@ impl ChatSession {
             .switch_session_async(session_id.to_string())
             .await;
 
-        // 恢复路径兜底：修复历史中断遗留的悬挂 tool_calls（幂等，只扫尾部件
-        // tool call 配对），避免 DB 脏数据进入重建后的上下文触发 Provider 400
+        // Repair dangling tool_calls left by historical interrupts so DB
+        // dirty data never reaches the rebuilt context
         if let Err(e) = self.storage.repair_orphaned_tool_calls(session_id).await {
             eprintln!("[warn] repair_orphaned_tool_calls: {e}");
         }
 
-        // 一次查询拉全量，内存中过滤 compacted 得到活跃上下文，
-        // 避免同会话连查两遍（两遍都会解析附件 base64 大字段）
+        // One query; filter compacted rows in memory — a second query would
+        // re-parse the large base64 attachment fields
         let stored = self.storage.load_messages(session_id).await?;
         let active: Vec<&crate::storage::StoredMessage> =
             stored.iter().filter(|m| !m.compacted).collect();
@@ -252,7 +243,8 @@ impl ChatSession {
             }
         }
 
-        // 无论目标会话是否有消息都整体重建：切到空会话时清掉上一会话的残留
+        // Always rebuild wholesale: switching to an empty session must clear
+        // the previous session's leftovers
         let system_prompt = self.agent.take_system_prompt();
         let mut final_messages = Vec::new();
         if let Some(prompt) = &system_prompt {
@@ -285,13 +277,11 @@ impl ChatSession {
         Ok(stored)
     }
 
-    /// 重置为空会话（不新建 DB 记录，下次发消息时懒创建）
     pub fn reset_session(&mut self) {
         self.set_current_session(None);
         self.reset_context();
     }
 
-    /// 清空内存上下文（消息历史 + 会话级权限规则），保留 system prompt
     pub(crate) fn reset_context(&mut self) {
         self.agent.permission().clear_session();
         let system_prompt = self.agent.take_system_prompt();
@@ -300,8 +290,6 @@ impl ChatSession {
             self.agent.set_system_prompt(&prompt);
         }
     }
-
-    // ── 模式 ─────────────────────────────────────────────
 
     pub fn set_plan_mode(&mut self, on: bool) {
         self.agent.set_plan_mode(on);
@@ -315,7 +303,7 @@ impl ChatSession {
         self.agent.permission().toggle_yolo()
     }
 
-    /// 绝对设置 YOLO 模式（Web 全局模式广播用，非 toggle 语义）
+    /// Web global-mode broadcast entry, not a toggle
     pub fn set_yolo(&self, on: bool) {
         let mode = if on {
             crate::permission::PermissionMode::Yolo
@@ -325,8 +313,8 @@ impl ChatSession {
         self.agent.permission().set_mode(mode);
     }
 
-    /// 权限管理器共享句柄（SessionManager 注册广播通道用；
-    /// TaskTool 等内部已共享同一实例，广播对 subagent 同步生效）
+    /// SessionManager broadcasts through this handle; TaskTool etc. already
+    /// share the instance, so broadcasts reach subagents immediately
     pub fn permission_manager(&self) -> crate::permission::PermissionManager {
         self.agent.permission().clone()
     }
@@ -343,22 +331,17 @@ impl ChatSession {
         );
     }
 
-    /// Model display currently effective on this instance (see the field doc)
     pub fn current_model_display(&self) -> &str {
         &self.current_model_display
     }
 
-    /// Set reasoning effort (effective on the next LLM request; broadcast entry)
     pub fn set_reasoning_effort(&mut self, effort: crate::agent::ReasoningEffort) {
         self.agent.set_reasoning_effort(effort);
     }
 
-    /// 当前思考强度
     pub fn reasoning_effort(&self) -> crate::agent::ReasoningEffort {
         self.agent.reasoning_effort()
     }
-
-    // ── 压缩 ─────────────────────────────────────────────
 
     pub fn request_compaction(
         &self,
@@ -373,8 +356,8 @@ impl ChatSession {
     }
 }
 
-/// 归一化目录键：canonicalize + 剥离 Windows `\\?\` verbatim 前缀。
-/// 同一目录的不同写法（`D:\a`、`d:/a`、`\\?\D:\a`）得到相同键。
+/// Canonicalize + strip the Windows `\\?\` verbatim prefix so different
+/// spellings of the same directory map to one key
 pub(crate) fn normalize_key(path: &Path) -> PathBuf {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let s = canonical.to_string_lossy().to_string();
@@ -460,13 +443,9 @@ mod tests {
         }
     }
 
-    /// Web 端「新建对话」只换 session ID 不清内存消息时，LLM 会带上上一会话的上下文。
-    /// create_session 必须清空 Agent 内存中的残留消息并保留 system prompt。
     #[tokio::test]
     async fn create_session_clears_stale_agent_context() {
         let (mut session, work_dir) = make_session().await;
-        // 模拟上一会话结束后残留的内存消息（AgentComplete → sync_messages 的结果，
-        // 生产路径中列表头部始终是 system 消息）
         session.sync_messages(vec![system_message("sys"), user_message("旧会话消息")]);
         assert_eq!(session.messages_excluding_system_count(), 1);
 
@@ -478,7 +457,6 @@ mod tests {
         std::fs::remove_dir_all(&work_dir).ok();
     }
 
-    /// 切换到空会话（无历史消息）同样不能残留上一个会话的上下文。
     #[tokio::test]
     async fn switch_session_to_empty_clears_stale_agent_context() {
         let (mut session, work_dir) = make_session().await;
@@ -494,7 +472,6 @@ mod tests {
         session.switch_session(&a).await.unwrap();
         assert_eq!(session.messages_excluding_system_count(), 1);
 
-        // 旧实现：目标会话为空则跳过重建，A 的消息残留
         session.switch_session(&b).await.unwrap();
         assert_eq!(session.messages_excluding_system_count(), 0);
         assert!(session.agent().take_system_prompt().is_some());
@@ -543,9 +520,6 @@ mod tests {
         }
     }
 
-    /// 断连/崩溃遗留的悬挂 tool_calls（assistant 后只落库了部分 tool result）
-    /// 在恢复路径（switch_session）被幂等修复：DB 补齐 stub，重建上下文完整，
-    /// 不会触发严格 Provider 400。
     #[tokio::test]
     async fn switch_session_repairs_orphaned_tool_calls() {
         let (mut session, work_dir) = make_session().await;
@@ -569,7 +543,6 @@ mod tests {
 
         session.switch_session(&id).await.unwrap();
 
-        // DB 已补齐 call_2 的 stub
         let stored = session.storage().load_messages(&id).await.unwrap();
         let stubs: Vec<_> = stored
             .iter()
@@ -578,10 +551,9 @@ mod tests {
         assert_eq!(stubs.len(), 1);
         assert_eq!(stubs[0].content, "Tool execution aborted");
 
-        // 重建上下文完整：user + assistant + tool(call_1) + tool(call_2 stub)
         assert_eq!(session.messages_excluding_system_count(), 4);
 
-        // 幂等：再次切换不产生重复 stub
+        // Idempotent: switching again produces no duplicate stubs
         session.switch_session(&id).await.unwrap();
         let stored = session.storage().load_messages(&id).await.unwrap();
         let stubs: Vec<_> = stored

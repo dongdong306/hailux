@@ -118,8 +118,6 @@ fn apply_compaction_then_append() {
     ));
 }
 
-// ── 图片附件 ─────────────────────────────────────────
-
 fn user_msg(text: &str) -> SharedMessage {
     Arc::new(build_user_message(text, &[]))
 }
@@ -137,8 +135,6 @@ fn named_attachment(name: &str) -> Attachment {
         ..png_attachment()
     }
 }
-
-// ── 工具附件合成消息的提示文本 ─────────────────────────
 
 #[test]
 fn tool_attachment_note_single_tool_lists_names() {
@@ -289,7 +285,6 @@ fn sanitize_plain_text_messages_untouched() {
     let msgs = vec![user_msg("纯文本"), user_msg("第二条")];
     let sanitized = sanitize_messages_for_request(&msgs, false);
     assert_eq!(sanitized.len(), 2);
-    // Arc 未被克隆重建（同一指针）时无需修复 —— 仅校验内容不变
     match sanitized[0].as_ref() {
         CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
             ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "纯文本"),
@@ -299,9 +294,6 @@ fn sanitize_plain_text_messages_untouched() {
     }
 }
 
-// ── 并行工具调用的附件注入 ──────────────────────────────
-
-/// 返回固定图片附件的测试工具（permission_category 为 None，跳过权限检查）
 struct AttachmentTool;
 
 impl crate::agent::tools::Tool for AttachmentTool {
@@ -374,6 +366,8 @@ fn test_stream_state_with(supports_vision: bool, native_reasoning: bool) -> Agen
         ),
         work_dir: ".".to_string(),
         retry: RetryConfig::default(),
+        interject_rx: tokio::sync::mpsc::channel(1).1,
+        delivered_interject_ids: std::collections::HashSet::new(),
     }
 }
 
@@ -393,11 +387,8 @@ fn build_request_openai_passthrough_effort_and_drops_thinking() {
     state.reasoning_effort = crate::agent::models::ReasoningEffort::Max;
     let req = state.build_request().unwrap().build().unwrap();
     let json = serde_json::to_value(&req).unwrap();
-    // thinking 是 DeepSeek/GLM 私有约定，OpenAI 兼容链路不发送；
-    // reasoning_effort 三档直传（low/high/max 均在 OpenAI 值域内）
     assert!(json.get("thinking").is_none());
     assert_eq!(json["reasoning_effort"], "max");
-    // stream_options 对所有 provider 通用
     assert_eq!(json["stream_options"]["include_usage"], true);
 }
 
@@ -415,8 +406,8 @@ async fn parallel_tool_attachments_go_after_all_tool_messages() {
         .await
         .unwrap();
 
-    // 期望序列：tool → tool → user(合成)。合成 user 消息若插在两条
-    // tool 消息之间，严格 Provider 会以 400 拒绝整轮请求。
+    // Expected order: tool -> tool -> user(synthesized). Inserting the
+    // synthesized user message between the two tool messages would 400 the whole request on strict providers.
     assert_eq!(state.messages.len(), 3);
     assert!(matches!(
         state.messages[0].as_ref(),
@@ -460,8 +451,6 @@ async fn text_only_tool_calls_produce_no_synthetic_message() {
         CompatibleChatCompletionRequestMessage::Tool(_)
     ));
 }
-
-// ── 悬挂 tool_calls 请求前净化（ensure_tool_call_parity）────────
 
 fn assistant_with_tool_calls(ids: &[&str]) -> SharedMessage {
     Arc::new(
@@ -521,7 +510,6 @@ fn tool_parity_clean_context_untouched() {
 
 #[test]
 fn tool_parity_fills_missing_results_in_place() {
-    // 断连遗留：assistant(3 个 tool_calls) 后只有 call_1 的结果 + 后续轮次消息
     let msgs = vec![
         user_msg("hi"),
         assistant_with_tool_calls(&["call_1", "call_2", "call_3"]),
@@ -530,7 +518,6 @@ fn tool_parity_fills_missing_results_in_place() {
     ];
     let out = ensure_tool_call_parity(&msgs);
     assert_eq!(out.len(), 6);
-    // stub 插在真实结果之后、后续消息之前，保持 tool 消息紧跟 assistant
     for (i, id) in ["call_2", "call_3"].iter().enumerate() {
         match out[3 + i].as_ref() {
             CompatibleChatCompletionRequestMessage::Tool(t) => {
@@ -552,7 +539,6 @@ fn tool_parity_fills_missing_results_in_place() {
 
 #[test]
 fn tool_parity_drops_empty_id_entries() {
-    // 流式中断的半成品（空 id）无法被应答：从 tool_calls 中剔除而非悬挂
     let msgs = vec![
         user_msg("hi"),
         assistant_with_tool_calls(&["", "call_1"]),
@@ -565,14 +551,11 @@ fn tool_parity_drops_empty_id_entries() {
 
 #[test]
 fn tool_parity_pure_empty_id_assistant_drops_tool_calls() {
-    // 全部条目都是空 id：tool_calls 清空后 assistant 保留（不再悬挂）
     let msgs = vec![user_msg("hi"), assistant_with_tool_calls(&[""])];
     let out = ensure_tool_call_parity(&msgs);
     assert_eq!(out.len(), msgs.len());
     assert_eq!(tool_call_ids(&out[1]), Vec::<String>::new());
 }
-
-// ── 取消路径全量补 stub ─────────────────────────────────
 
 #[tokio::test]
 async fn cancelled_tool_calls_all_get_stub_results() {
@@ -589,7 +572,6 @@ async fn cancelled_tool_calls_all_get_stub_results() {
         .await
         .unwrap();
 
-    // 预置取消：3 个 tool call 各补一条 stub，无悬挂
     assert_eq!(state.messages.len(), 3);
     for (i, id) in ["call_1", "call_2", "call_3"].iter().enumerate() {
         match state.messages[i].as_ref() {
@@ -632,7 +614,6 @@ async fn push_partial_assistant_skips_idless_tool_calls() {
         .await
         .unwrap();
 
-    // 空 id 条目不进 assistant.tool_calls 也不产生 stub：1 条 assistant + 1 条 stub
     assert_eq!(state.messages.len(), 2);
     assert_eq!(
         tool_call_ids(&state.messages[0]),
@@ -642,4 +623,200 @@ async fn push_partial_assistant_skips_idless_tool_calls() {
         state.messages[1].as_ref(),
         CompatibleChatCompletionRequestMessage::Tool(_)
     ));
+}
+
+#[test]
+fn agent_interject_fails_without_active_run() {
+    let agent = make_test_agent();
+    assert!(!agent.interject(crate::agent::event::Interjection {
+        client_id: "c1".to_string(),
+        content: "hello".to_string(),
+        attachments: vec![],
+        mentions: Vec::new(),
+    }));
+}
+
+#[tokio::test]
+async fn drain_interjections_appends_user_messages_and_emits_events() {
+    let mut state = test_stream_state(false);
+    let (interject_tx, interject_rx) = tokio::sync::mpsc::channel(8);
+    state.interject_rx = interject_rx;
+    let (event_tx, mut event_rx) = crate::agent::event::create_core_event_channel();
+
+    interject_tx
+        .send(crate::agent::event::Interjection {
+            client_id: "c1".to_string(),
+            content: "插话一".to_string(),
+            attachments: vec![],
+            mentions: Vec::new(),
+        })
+        .await
+        .unwrap();
+    interject_tx
+        .send(crate::agent::event::Interjection {
+            client_id: "c2".to_string(),
+            content: "插话二".to_string(),
+            attachments: vec![Attachment::from_bytes(
+                "image/png",
+                &[0x89, b'P', b'N', b'G'],
+            )],
+            mentions: vec![crate::agent::event::Mention {
+                start: 0,
+                end: 2,
+                kind: "file".to_string(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    let injected = super::stream::drain_interjections(&mut state, &event_tx).await;
+    assert_eq!(injected, 2);
+    assert_eq!(state.messages.len(), 2);
+    assert!(matches!(
+        state.messages[0].as_ref(),
+        CompatibleChatCompletionRequestMessage::User(_)
+    ));
+    assert!(matches!(
+        state.messages[1].as_ref(),
+        CompatibleChatCompletionRequestMessage::User(_)
+    ));
+
+    for expected_id in ["c1", "c2"] {
+        match event_rx.recv().await.unwrap() {
+            crate::agent::event::CoreEvent::UserMessage { interjection } => {
+                assert_eq!(interjection.client_id, expected_id);
+                assert!(interjection.content.starts_with("插话"));
+                if expected_id == "c2" {
+                    assert_eq!(interjection.attachments.len(), 1);
+                    assert_eq!(interjection.mentions.len(), 1);
+                } else {
+                    assert!(interjection.attachments.is_empty());
+                    assert!(interjection.mentions.is_empty());
+                }
+            }
+            other => panic!("expected UserMessage event, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        super::stream::drain_interjections(&mut state, &event_tx).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn drain_interjections_dedupes_by_client_id() {
+    let mut state = test_stream_state(false);
+    let (interject_tx, interject_rx) = tokio::sync::mpsc::channel(8);
+    state.interject_rx = interject_rx;
+    let (event_tx, mut event_rx) = crate::agent::event::create_core_event_channel();
+
+    for _ in 0..2 {
+        interject_tx
+            .send(crate::agent::event::Interjection {
+                client_id: "c1".to_string(),
+                content: "同一条插话".to_string(),
+                attachments: vec![],
+                mentions: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let injected = super::stream::drain_interjections(&mut state, &event_tx).await;
+    // Only the first occurrence enters the context
+    assert_eq!(injected, 1);
+    assert_eq!(state.messages.len(), 1);
+
+    // The duplicate is reported dropped, not silently swallowed
+    match event_rx.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::UserMessage { interjection } => {
+            assert_eq!(interjection.client_id, "c1");
+        }
+        other => panic!("expected UserMessage event, got {other:?}"),
+    }
+    match event_rx.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::InterjectDropped { client_id } => {
+            assert_eq!(client_id, "c1");
+        }
+        other => panic!("expected InterjectDropped event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn drop_residual_interjections_emits_dropped_events_without_injecting() {
+    let mut state = test_stream_state(false);
+    let (interject_tx, interject_rx) = tokio::sync::mpsc::channel(8);
+    state.interject_rx = interject_rx;
+    let (event_tx, mut event_rx) = crate::agent::event::create_core_event_channel();
+
+    for id in ["c1", "c2"] {
+        interject_tx
+            .send(crate::agent::event::Interjection {
+                client_id: id.to_string(),
+                content: "插话".to_string(),
+                attachments: vec![],
+                mentions: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    super::stream::drop_residual_interjections(&mut state, &event_tx).await;
+
+    // Never injected: the context must stay untouched
+    assert!(state.messages.is_empty());
+    // Both client_ids are reported so consumers can release/re-queue
+    for expected_id in ["c1", "c2"] {
+        match event_rx.recv().await.unwrap() {
+            crate::agent::event::CoreEvent::InterjectDropped { client_id } => {
+                assert_eq!(client_id, expected_id);
+            }
+            other => panic!("expected InterjectDropped event, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn interject_rejects_when_bounded_queue_is_full() {
+    let agent = make_test_agent();
+    // Simulate an active run: bind a channel at the interjection queue limit
+    let (tx, _rx) = tokio::sync::mpsc::channel::<crate::agent::event::Interjection>(
+        crate::agent::event::INTERJECT_QUEUE_LIMIT,
+    );
+    *agent.interject_slot().lock().unwrap() = Some(tx);
+    let make = |id: &str| crate::agent::event::Interjection {
+        client_id: id.to_string(),
+        content: "hello".to_string(),
+        attachments: vec![],
+        mentions: Vec::new(),
+    };
+    for i in 0..crate::agent::event::INTERJECT_QUEUE_LIMIT {
+        assert!(
+            agent.interject(make(&format!("c{i}"))),
+            "slot below the limit must accept"
+        );
+    }
+    assert!(
+        !agent.interject(make("overflow")),
+        "the {LIMIT}-item limit must reject further interjections",
+        LIMIT = crate::agent::event::INTERJECT_QUEUE_LIMIT
+    );
+}
+
+#[test]
+fn interject_rejects_while_cancelling() {
+    let agent = make_test_agent();
+    let (tx, _rx) = tokio::sync::mpsc::channel::<crate::agent::event::Interjection>(4);
+    *agent.interject_slot().lock().unwrap() = Some(tx);
+    agent.interrupt();
+    assert!(
+        !agent.interject(crate::agent::event::Interjection {
+            client_id: "c1".to_string(),
+            content: "hello".to_string(),
+            attachments: vec![],
+            mentions: Vec::new(),
+        }),
+        "a cancelling run must reject interjections so callers fall back"
+    );
 }
