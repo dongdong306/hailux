@@ -164,6 +164,32 @@ fn parse_task_specs_blank_prompt() {
     assert!(parse_task_specs(&args).is_err());
 }
 
+#[test]
+fn parse_task_specs_non_object_item_reports_shape() {
+    let args = serde_json::json!({"tasks": [{"subagent": "general", "prompt": "p"}, null]});
+    let err = parse_task_specs(&args).unwrap_err();
+    assert!(err.contains("tasks[1]"));
+    assert!(err.contains("must be an object"));
+    assert!(err.contains("null"));
+    assert!(err.contains("received 2 task(s)"));
+}
+
+#[test]
+fn parse_task_specs_missing_field_echoes_task_count() {
+    // A phantom extra element shifts the indexes: the error must let the
+    // model notice that the array it sent differs from the one it intended
+    let args = serde_json::json!({
+        "tasks": [
+            {"subagent": "general", "description": "a", "prompt": "p"},
+            {"description": "b", "prompt": "p"}
+        ]
+    });
+    let err = parse_task_specs(&args).unwrap_err();
+    assert!(err.contains("tasks[1]"));
+    assert!(err.contains("\"subagent\" is required"));
+    assert!(err.contains("received 2 task(s)"));
+}
+
 fn spec(subagent: &str, task_id: Option<&str>) -> TaskSpec {
     TaskSpec {
         subagent: subagent.to_string(),

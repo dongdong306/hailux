@@ -1,8 +1,17 @@
-//! SessionManager：work_dir → ChatSession 的惰性注册表。
+//! SessionManager: lazy registry of session_id -> ChatSession instance
+//! (one instance per session).
 //!
-//! TUI 模式只有一个条目（保持现有行为）；Web 模式每个工作目录一个实例。
-//! Storage / Config / MCP 连接全局共享，skills / subagents / commands /
-//! system prompt 随 work_dir 独立发现与构建。
+//! Core difference from the old design (work_dir -> single instance): sessions
+//! in the same work_dir each get their own instance (own Agent context /
+//! EventHub / cancel flag / lock), so top-level runs run in parallel within a
+//! work_dir; concurrent requests for the same session_id are still serialized
+//! by the instance lock.
+//!
+//! Instances are built lazily: on first use, the owning work_dir is read from
+//! the DB and the full discovery pass (skills/subagents/commands/AGENTS.md)
+//! plus the session binding runs. In-flight requests keep their Arc across
+//! invalidate; the next access rebuilds.
+//! Storage / Config / MCP connections are global.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,25 +25,35 @@ use crate::mcp::SharedMcpBackends;
 use crate::permission::{PermissionManager, PermissionMode};
 use crate::storage::ChatStorage;
 
-use super::session::{ChatSession, normalize_key};
+use super::session::ChatSession;
 
 type SessionEntry = Arc<tokio::sync::Mutex<ChatSession>>;
 
+/// Registry entry: the instance plus lock-free handles (cancel flag and
+/// permission manager snapshot extracted at build time, so broadcasts and
+/// interrupts never take the session lock).
+struct EntryRecord {
+    session: SessionEntry,
+    /// Owning work dir (canonical); invalidate(dir) matches on this
+    work_dir: PathBuf,
+    /// Cancel flag (takes effect without the session lock)
+    cancel: Arc<AtomicBool>,
+    /// Permission manager handle (YOLO broadcast without the session lock)
+    perm: PermissionManager,
+}
+
 pub struct SessionManager {
-    sessions: RwLock<HashMap<PathBuf, SessionEntry>>,
-    /// 每 work_dir 的中断标志（不经过会话锁，立即生效）
-    cancel_flags: RwLock<HashMap<PathBuf, Arc<AtomicBool>>>,
-    /// 每 work_dir 的权限管理器句柄（YOLO 广播不经过会话锁，立即生效）
-    perm_managers: RwLock<HashMap<PathBuf, PermissionManager>>,
+    /// session_id -> instance registry
+    sessions: RwLock<HashMap<String, EntryRecord>>,
     resolved: RwLock<config::ResolvedModel>,
     cfg: RwLock<config::Config>,
     storage: ChatStorage,
     mcp_backends: SharedMcpBackends,
-    /// Web 全局 YOLO 模式（所有 work_dir 共享；新建会话继承）
+    /// Web-global YOLO mode (shared across work_dirs; new instances inherit)
     global_yolo: AtomicBool,
-    /// Web 全局规划模式（所有 work_dir 共享；新建会话继承）
+    /// Web-global plan mode (shared across work_dirs; new instances inherit)
     global_plan: AtomicBool,
-    /// Web 全局思考强度（所有 work_dir 共享；新建会话继承）
+    /// Web-global reasoning effort (shared across work_dirs; new instances inherit)
     global_effort: RwLock<crate::agent::ReasoningEffort>,
 }
 
@@ -45,14 +64,13 @@ impl SessionManager {
         storage: ChatStorage,
         mcp_backends: SharedMcpBackends,
     ) -> Self {
-        // 初始 YOLO 取配置默认（对齐 TUI 启动语义），plan 恒为 false
+        // Initial YOLO from the config default (mirrors TUI startup); plan is
+        // always false at boot.
         let global_yolo =
             AtomicBool::new(PermissionMode::from_str(&cfg.permission.mode) == PermissionMode::Yolo);
         let initial_effort = cfg.reasoning_effort;
         Self {
             sessions: RwLock::new(HashMap::new()),
-            cancel_flags: RwLock::new(HashMap::new()),
-            perm_managers: RwLock::new(HashMap::new()),
             resolved: RwLock::new(resolved),
             cfg: RwLock::new(cfg),
             storage,
@@ -86,21 +104,54 @@ impl SessionManager {
         }
     }
 
-    /// 已缓存的直接返回；新 work_dir 惰性构建（含目录存在性校验）。
-    /// 同一目录的不同写法归一到同一实例（键 canonicalize 归一化）。
-    pub async fn get_or_create(&self, work_dir: &Path) -> Result<SessionEntry> {
-        let key = normalize_key(work_dir);
-        if !key.is_dir() {
-            color_eyre::eyre::bail!("工作目录不存在: {}", key.display());
-        }
-
-        if let Some(existing) = self.sessions.read().ok().and_then(|m| m.get(&key).cloned()) {
+    /// Get the instance for a session_id (lazy build). A session_id always
+    /// maps to the same instance; different session_ids — even in the same
+    /// work_dir — hold different locks and can run in parallel. The target
+    /// session must already exist in the DB (session ids come from DB rows).
+    pub async fn get_or_create_for_session(&self, session_id: &str) -> Result<SessionEntry> {
+        if let Some(existing) = self
+            .sessions
+            .read()
+            .ok()
+            .and_then(|m| m.get(session_id).map(|r| r.session.clone()))
+        {
             return Ok(existing);
         }
 
-        // 写入 DB 的 work_dir 统一为 canonicalize 结果（Windows 保留 `\\?\` 前缀），
-        // 与 TUI 的 `current_work_dir()` 保持一致，避免两侧会话互相不可见。
-        let canonical = work_dir.canonicalize().unwrap_or_else(|_| key.clone());
+        let dir = self
+            .storage
+            .get_session_work_dir(session_id)
+            .await?
+            .ok_or_else(|| color_eyre::eyre::eyre!("会话不存在: {session_id}"))?;
+        let record = self.build_entry(session_id, PathBuf::from(&dir)).await?;
+
+        // Spawn race: another request may have built the same session's
+        // instance meanwhile; the existing one wins.
+        let entry = match self.sessions.write() {
+            Ok(mut map) => match map.get(session_id) {
+                Some(existing) => existing.session.clone(),
+                None => {
+                    map.insert(
+                        session_id.to_string(),
+                        EntryRecord {
+                            session: record.session.clone(),
+                            work_dir: record.work_dir.clone(),
+                            cancel: record.cancel.clone(),
+                            perm: record.perm.clone(),
+                        },
+                    );
+                    record.session.clone()
+                }
+            },
+            Err(_) => record.session.clone(),
+        };
+        Ok(entry)
+    }
+
+    /// Build a new instance bound to session_id (not registered; the caller
+    /// registers or drops it).
+    async fn build_entry(&self, session_id: &str, dir: PathBuf) -> Result<EntryRecord> {
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
         let resolved = self.resolved();
         let cfg = self.cfg();
@@ -114,50 +165,53 @@ impl SessionManager {
         )?;
         session.register_task_tool(&resolved);
         session.register_mcp_tools(&self.mcp_backends);
-        // 继承全局模式（Web 切换项目后保持 YOLO/Plan 状态）
+        // Persist session-scoped "always" rules to the DB (parity with the
+        // TUI; without this they live in memory only and die with the instance)
+        session
+            .permission_manager()
+            .with_storage_ref(self.storage.clone());
+        // Inherit global modes (persists across project switches on the web)
         session.set_yolo(self.global_yolo.load(Ordering::Relaxed));
         session.set_plan_mode(self.global_plan.load(Ordering::Relaxed));
         session.set_reasoning_effort(self.global_effort());
-        let perm = session.permission_manager();
-        let arc: SessionEntry = Arc::new(tokio::sync::Mutex::new(session));
-        let cancel = arc.lock().await.cancel_flag();
+        // Bind the target session: load its permission rules + rebuild the
+        // agent context (the instance is not shared yet — no lock contention)
+        session.switch_session(session_id).await?;
 
-        if let Ok(mut map) = self.sessions.write() {
-            map.insert(key.clone(), arc.clone());
-        }
-        if let Ok(mut flags) = self.cancel_flags.write() {
-            flags.insert(key.clone(), cancel);
-        }
-        if let Ok(mut perms) = self.perm_managers.write() {
-            perms.insert(key, perm);
-        }
-        Ok(arc)
+        let cancel = session.cancel_flag();
+        let perm = session.permission_manager();
+        Ok(EntryRecord {
+            session: Arc::new(tokio::sync::Mutex::new(session)),
+            work_dir: canonical,
+            cancel,
+            perm,
+        })
     }
 
-    /// 中断指定目录的当前运行（不经过会话锁）。返回 false = 无该目录实例。
-    pub fn interrupt(&self, work_dir: &Path) -> bool {
-        let key = normalize_key(work_dir);
-        self.cancel_flags
+    /// Precisely interrupt the run of one session (no session lock taken).
+    /// Returns false = no instance for that session.
+    pub fn interrupt_session(&self, session_id: &str) -> bool {
+        self.sessions
             .read()
             .ok()
-            .and_then(|m| m.get(&key).cloned())
-            .map(|flag| {
-                flag.store(true, Ordering::Relaxed);
-                true
+            .and_then(|m| {
+                m.get(session_id)
+                    .map(|r| r.cancel.store(true, Ordering::Relaxed))
+                    .map(|_| true)
             })
             .unwrap_or(false)
     }
 
-    /// 所有已构建的 ChatSession（模型切换等广播操作用）
+    /// All built ChatSession instances (for model-switch style broadcasts).
     pub fn all_sessions(&self) -> Vec<SessionEntry> {
         self.sessions
             .read()
             .ok()
-            .map(|m| m.values().cloned().collect())
+            .map(|m| m.values().map(|r| r.session.clone()).collect())
             .unwrap_or_default()
     }
 
-    // ── Web 全局模式（YOLO / Plan，跨 work_dir 共享）──────────
+    // ── Web-global modes (YOLO / Plan, shared across work_dirs) ──────────
 
     pub fn global_yolo(&self) -> bool {
         self.global_yolo.load(Ordering::Relaxed)
@@ -167,9 +221,9 @@ impl SessionManager {
         self.global_plan.load(Ordering::Relaxed)
     }
 
-    /// 设置全局 YOLO。经权限管理器句柄广播，**不经过会话锁**：
-    /// SSE 流长时间持锁（如等待权限弹窗）时也能立即生效，
-    /// 下一次工具权限检查即按新模式执行。
+    /// Set global YOLO. Broadcast through permission-manager handles — never
+    /// through the session lock: instances locked by in-flight runs pick it up
+    /// immediately on the next tool permission check.
     pub fn set_global_yolo(&self, on: bool) {
         self.global_yolo.store(on, Ordering::Relaxed);
         let mode = if on {
@@ -177,15 +231,16 @@ impl SessionManager {
         } else {
             PermissionMode::Normal
         };
-        if let Ok(perms) = self.perm_managers.read() {
-            for pm in perms.values() {
-                pm.set_mode(mode);
+        if let Ok(map) = self.sessions.read() {
+            for record in map.values() {
+                record.perm.set_mode(mode);
             }
         }
     }
 
-    /// 设置全局规划模式。plan_mode 存放在 Agent 上（非权限管理器），
-    /// 广播需会话锁；持锁中的会话（SSE 流运行）跳过，由 chat 入口同步兜底。
+    /// Set global plan mode. plan_mode lives on the Agent (not the permission
+    /// manager), so broadcasting needs the session lock; locked instances
+    /// (in-flight runs) are skipped — the chat entry re-syncs as a fallback.
     pub fn set_global_plan(&self, on: bool) {
         self.global_plan.store(on, Ordering::Relaxed);
         for entry in self.all_sessions() {
@@ -195,7 +250,7 @@ impl SessionManager {
         }
     }
 
-    /// 当前全局思考强度
+    /// Current global reasoning effort.
     pub fn global_effort(&self) -> crate::agent::ReasoningEffort {
         *self
             .global_effort
@@ -203,8 +258,9 @@ impl SessionManager {
             .expect("global_effort lock poisoned")
     }
 
-    /// 设置全局思考强度。语义对齐 `set_global_plan`：持锁中的会话跳过，
-    /// 由 chat 入口同步兜底（effort 快照在每次请求构建时读取，天然生效）。
+    /// Set global reasoning effort. Same semantics as `set_global_plan`:
+    /// locked instances are skipped, the chat entry re-syncs (the effort
+    /// snapshot is read per request anyway).
     pub fn set_global_effort(&self, effort: crate::agent::ReasoningEffort) {
         if let Ok(mut guard) = self.global_effort.write() {
             *guard = effort;
@@ -216,38 +272,43 @@ impl SessionManager {
         }
     }
 
-    /// 取指定目录已构建的会话条目（未构建返回 None；键归一化同 `get_or_create`）
-    pub fn get(&self, work_dir: &Path) -> Option<SessionEntry> {
-        let key = normalize_key(work_dir);
-        self.sessions.read().ok().and_then(|m| m.get(&key).cloned())
-    }
-
-    /// 使指定目录的会话缓存失效（skills 等磁盘配置变更后调用）。
-    /// 运行中的请求持有 Arc 不受影响；下次访问重新发现并构建。
-    /// Web 每个请求都携带 session_id 重建上下文（见 sse::ensure_session），可安全调用。
-    /// 注意：不清 cancel_flags，避免运行中的请求失去中断能力。
+    /// Invalidate all instances of a work dir (after skills etc. changed on
+    /// disk). In-flight requests keep their Arc; the next access rebuilds.
+    /// Note: the cancel flags go away with the instances — in-flight requests
+    /// lose interruptability (same as the old design).
     pub fn invalidate(&self, work_dir: &Path) {
-        let key = normalize_key(work_dir);
+        let key = super::session::normalize_key(work_dir);
         if let Ok(mut map) = self.sessions.write() {
-            map.remove(&key);
-        }
-        if let Ok(mut perms) = self.perm_managers.write() {
-            perms.remove(&key);
+            map.retain(|_, r| super::session::normalize_key(&r.work_dir) != key);
         }
     }
 
-    /// 使全部会话缓存失效（MCP 配置变更等全局影响后调用）。
-    /// cancel_flags 保留（理由同 `invalidate`）。
+    /// Remove a session's instance and interrupt its run (session deletion).
+    /// Returns false = no instance.
+    pub fn remove_session(&self, session_id: &str) -> bool {
+        let record = self
+            .sessions
+            .write()
+            .ok()
+            .and_then(|mut map| map.remove(session_id));
+        match record {
+            Some(r) => {
+                r.cancel.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Invalidate every instance (after global config changes like MCP).
     pub fn invalidate_all(&self) {
         if let Ok(mut map) = self.sessions.write() {
             map.clear();
         }
-        if let Ok(mut perms) = self.perm_managers.write() {
-            perms.clear();
-        }
     }
 
-    /// 列出历史会话中出现过的全部工作目录（sessions 表 DISTINCT，含会话数/最近活跃）
+    /// All work dirs that ever appeared in sessions (sessions table DISTINCT,
+    /// with session counts / last activity).
     pub async fn list_work_dirs(&self) -> Result<Vec<crate::storage::WorkDirInfo>> {
         self.storage.list_work_dirs().await
     }
@@ -290,8 +351,16 @@ mod tests {
         (manager, dir_a, dir_b)
     }
 
-    /// 持久化闭环：config.toml `permission.mode = "yolo"` → 服务器启动即 YOLO
-    /// （`GET /api/mode` 据此返回，前端 syncMode 展示正确）。
+    async fn create_session_in(manager: &SessionManager, dir: &Path) -> String {
+        manager
+            .storage()
+            .create_session("test-model", &dir.display().to_string())
+            .await
+            .unwrap()
+    }
+
+    /// Config `permission.mode = "yolo"` -> the server boots into YOLO
+    /// (`GET /api/mode` reports it; the frontend syncMode shows it right).
     #[tokio::test]
     async fn manager_initializes_yolo_from_config() {
         let storage = ChatStorage::new_in_memory().await.unwrap();
@@ -310,17 +379,95 @@ mod tests {
         assert!(manager.global_yolo());
     }
 
-    /// 全局 YOLO：绕会话锁广播（持锁中切换不阻塞不死锁）、新建会话自动继承。
+    /// A session_id always maps to the same instance; different session_ids
+    /// get independent instances.
+    #[tokio::test]
+    async fn session_id_maps_to_stable_instance() {
+        let (manager, dir_a, _dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let s2 = create_session_in(&manager, &dir_a).await;
+
+        let e1 = manager.get_or_create_for_session(&s1).await.unwrap();
+        let e1_again = manager.get_or_create_for_session(&s1).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&e1, &e1_again),
+            "same session_id reuses the instance"
+        );
+
+        let e2 = manager.get_or_create_for_session(&s2).await.unwrap();
+        assert!(
+            !Arc::ptr_eq(&e1, &e2),
+            "different session_ids get different instances"
+        );
+
+        // Each instance is bound to its own session context
+        assert_eq!(
+            e1.lock().await.current_session_id().as_deref(),
+            Some(s1.as_str())
+        );
+        assert_eq!(
+            e2.lock().await.current_session_id().as_deref(),
+            Some(s2.as_str())
+        );
+    }
+
+    /// Parallel sessions in one work_dir: instance locks are independent
+    /// (both held simultaneously).
+    #[tokio::test]
+    async fn same_dir_sessions_lock_independently() {
+        let (manager, dir_a, _dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let s2 = create_session_in(&manager, &dir_a).await;
+        let e1 = manager.get_or_create_for_session(&s1).await.unwrap();
+        let e2 = manager.get_or_create_for_session(&s2).await.unwrap();
+
+        // e1's lock must not block e2
+        let g1 = e1.lock().await;
+        let g2 = e2
+            .try_lock()
+            .expect("the other instance's lock must not be blocked");
+        assert_eq!(g1.current_session_id().as_deref(), Some(s1.as_str()));
+        assert_eq!(g2.current_session_id().as_deref(), Some(s2.as_str()));
+    }
+
+    /// interrupt_session flips exactly the target instance's cancel flag,
+    /// leaving same-dir siblings alone.
+    #[tokio::test]
+    async fn interrupt_session_is_precise() {
+        let (manager, dir_a, _dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let s2 = create_session_in(&manager, &dir_a).await;
+        let e1 = manager.get_or_create_for_session(&s1).await.unwrap();
+        let e2 = manager.get_or_create_for_session(&s2).await.unwrap();
+
+        assert!(manager.interrupt_session(&s1));
+        assert!(
+            e1.lock().await.cancel_flag().load(Ordering::Relaxed),
+            "target session's cancel flag should be set"
+        );
+        assert!(
+            !e2.lock().await.cancel_flag().load(Ordering::Relaxed),
+            "same-dir siblings must not be affected"
+        );
+        // Unknown session: no instance -> false
+        assert!(!manager.interrupt_session("nonexistent"));
+    }
+
+    /// Global YOLO: broadcasts through permission handles (no session lock,
+    /// works while locked), new instances inherit it.
     #[tokio::test]
     async fn global_yolo_broadcasts_and_inherits() {
         let (manager, dir_a, dir_b) = make_manager().await;
-        let entry_a = manager.get_or_create(&dir_a).await.unwrap();
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let s2 = create_session_in(&manager, &dir_b).await;
+        let entry_a = manager.get_or_create_for_session(&s1).await.unwrap();
         assert_eq!(
             entry_a.lock().await.agent().permission().mode(),
             PermissionMode::Normal
         );
 
-        // 持锁期间设置全局 YOLO（模拟 SSE 流运行中切换）
+        // Set while the instance is locked (simulating a switch mid-run):
+        // the perm-handle broadcast lands immediately
         {
             let guard = entry_a.lock().await;
             manager.set_global_yolo(true);
@@ -328,8 +475,8 @@ mod tests {
             assert_eq!(guard.agent().permission().mode(), PermissionMode::Yolo);
         }
 
-        // 新 work_dir 的会话继承全局模式
-        let entry_b = manager.get_or_create(&dir_b).await.unwrap();
+        // A new work_dir's instance inherits the global mode
+        let entry_b = manager.get_or_create_for_session(&s2).await.unwrap();
         assert_eq!(
             entry_b.lock().await.agent().permission().mode(),
             PermissionMode::Yolo
@@ -342,18 +489,21 @@ mod tests {
         );
     }
 
-    /// 全局 Plan：try_lock 广播，持锁会话跳过（不阻塞），入口同步兜底。
+    /// Global plan: try_lock broadcast, locked instances skipped (no deadlock);
+    /// the chat entry re-syncs as the fallback.
     #[tokio::test]
     async fn global_plan_broadcast_skips_locked_session() {
         let (manager, dir_a, _dir_b) = make_manager().await;
-        let entry_a = manager.get_or_create(&dir_a).await.unwrap();
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let entry_a = manager.get_or_create_for_session(&s1).await.unwrap();
 
-        // 空闲时直接生效
+        // Applies directly while idle
         manager.set_global_plan(true);
         assert!(manager.global_plan());
         assert!(entry_a.lock().await.plan_mode());
 
-        // 持锁时跳过广播（不死锁），标志仍更新，会话旧值由入口同步纠正
+        // Locked: broadcast skipped (no deadlock), the flag still updates,
+        // the stale instance value gets corrected by the entry sync
         {
             let guard = entry_a.lock().await;
             manager.set_global_plan(false);
@@ -361,23 +511,122 @@ mod tests {
             assert!(guard.plan_mode());
         }
 
-        // 锁释放后再次广播生效
+        // Broadcast again after the lock is released
         manager.set_global_plan(false);
         assert!(!entry_a.lock().await.plan_mode());
     }
 
-    /// invalidate 后重建的会话继承当前全局模式（skills/MCP 变更场景）。
+    /// A rebuilt instance inherits current global modes (skills/MCP change).
     #[tokio::test]
     async fn rebuilt_session_inherits_global_modes() {
         let (manager, dir_a, _dir_b) = make_manager().await;
-        let _ = manager.get_or_create(&dir_a).await.unwrap();
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let _ = manager.get_or_create_for_session(&s1).await.unwrap();
         manager.set_global_yolo(true);
         manager.set_global_plan(true);
 
         manager.invalidate(&dir_a);
-        let entry = manager.get_or_create(&dir_a).await.unwrap();
+        assert!(
+            manager.all_sessions().is_empty(),
+            "invalidate removes the dir's instances"
+        );
+        let entry = manager.get_or_create_for_session(&s1).await.unwrap();
         let session = entry.lock().await;
         assert_eq!(session.agent().permission().mode(), PermissionMode::Yolo);
         assert!(session.plan_mode());
+    }
+
+    /// invalidate only removes instances of the target dir.
+    #[tokio::test]
+    async fn invalidate_is_scoped_to_dir() {
+        let (manager, dir_a, dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let s2 = create_session_in(&manager, &dir_b).await;
+        manager.get_or_create_for_session(&s1).await.unwrap();
+        manager.get_or_create_for_session(&s2).await.unwrap();
+
+        manager.invalidate(&dir_a);
+        let remaining = manager.all_sessions().len();
+        assert_eq!(remaining, 1, "only dir_a's instance is removed");
+
+        // s2's instance survives; s1 rebuilds on demand
+        let e2 = manager.get_or_create_for_session(&s2).await.unwrap();
+        assert_eq!(
+            e2.lock().await.current_session_id().as_deref(),
+            Some(s2.as_str())
+        );
+    }
+
+    /// remove_session: the instance is evicted and its cancel flag set
+    /// (session deletion interrupts a running task).
+    #[tokio::test]
+    async fn remove_session_cancels_and_evicts() {
+        let (manager, dir_a, _dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let entry = manager.get_or_create_for_session(&s1).await.unwrap();
+
+        assert!(manager.remove_session(&s1));
+        assert!(manager.all_sessions().is_empty());
+        assert!(
+            entry.lock().await.cancel_flag().load(Ordering::Relaxed),
+            "the evicted instance's cancel flag should be set"
+        );
+        assert!(!manager.remove_session(&s1), "double removal returns false");
+
+        // A fresh instance rebuilds and binds to the same session (DB row kept)
+        let e1 = manager.get_or_create_for_session(&s1).await.unwrap();
+        assert_eq!(
+            e1.lock().await.current_session_id().as_deref(),
+            Some(s1.as_str())
+        );
+    }
+
+    /// An unknown session_id errors out (nothing is conjured).
+    #[tokio::test]
+    async fn unknown_session_id_is_rejected() {
+        let (manager, _dir_a, _dir_b) = make_manager().await;
+        let err = manager
+            .get_or_create_for_session("no-such-session")
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("会话不存在"));
+    }
+
+    /// Session-scoped "always" rules persist: a rebuilt instance restores them
+    /// from the DB (with_storage_ref closed loop).
+    #[tokio::test]
+    async fn session_permission_rules_persist_across_rebuild() {
+        let (manager, dir_a, _dir_b) = make_manager().await;
+        let s1 = create_session_in(&manager, &dir_a).await;
+        let entry = manager.get_or_create_for_session(&s1).await.unwrap();
+
+        // User picks "always" -> the rule lands in the DB
+        entry
+            .lock()
+            .await
+            .permission_manager()
+            .add_session_rules_async("bash", &["git *".to_string()])
+            .await;
+        assert_eq!(
+            entry
+                .lock()
+                .await
+                .permission_manager()
+                .session_rules()
+                .len(),
+            1
+        );
+
+        // invalidate + rebuild: the rule comes back from the DB
+        manager.invalidate(&dir_a);
+        let entry = manager.get_or_create_for_session(&s1).await.unwrap();
+        let rules = entry.lock().await.permission_manager().session_rules();
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.permission == "bash" && r.pattern == "git *"),
+            "rebuilt instance must restore the always rule from the DB, got: {rules:?}"
+        );
     }
 }

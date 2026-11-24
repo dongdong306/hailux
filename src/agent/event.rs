@@ -19,13 +19,13 @@ pub struct MessageUsage {
     pub cached_tokens: u32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct QuestionOption {
     pub label: String,
     pub description: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct QuestionInfo {
     pub question: String,
     pub header: String,

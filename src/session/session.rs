@@ -33,8 +33,12 @@ pub struct ChatSession {
     pub command_registry: CommandRegistry,
     storage: ChatStorage,
     shared: Arc<SessionShared>,
-    /// 当前绑定的工作目录（绝对路径，作为 SessionManager 的键）
+    /// Current bound work dir (absolute path; the SessionManager key)
     pub(crate) key: PathBuf,
+    /// Model display currently effective on this instance. The chat entry
+    /// reconciles it against the global config: broadcast switches skip locked
+    /// instances, and a drift detected at entry re-applies the switch.
+    current_model_display: String,
 }
 
 impl ChatSession {
@@ -79,6 +83,7 @@ impl ChatSession {
             storage,
             shared,
             key: normalize_key(work_dir),
+            current_model_display: resolved.display.clone(),
         };
         Ok(session)
     }
@@ -221,7 +226,8 @@ impl ChatSession {
         self.set_current_session(Some(session_id.to_string()));
         self.agent
             .permission()
-            .switch_session(session_id.to_string());
+            .switch_session_async(session_id.to_string())
+            .await;
 
         // 恢复路径兜底：修复历史中断遗留的悬挂 tool_calls（幂等，只扫尾部件
         // tool call 配对），避免 DB 脏数据进入重建后的上下文触发 Provider 400
@@ -326,6 +332,7 @@ impl ChatSession {
     }
 
     pub fn switch_model(&mut self, resolved: &config::ResolvedModel) {
+        self.current_model_display = resolved.display.clone();
         self.agent.switch_model(
             resolved.config.clone(),
             &resolved.model_id,
@@ -336,7 +343,12 @@ impl ChatSession {
         );
     }
 
-    /// 设置思考强度（下一次 LLM 请求生效；广播入口）
+    /// Model display currently effective on this instance (see the field doc)
+    pub fn current_model_display(&self) -> &str {
+        &self.current_model_display
+    }
+
+    /// Set reasoning effort (effective on the next LLM request; broadcast entry)
     pub fn set_reasoning_effort(&mut self, effort: crate::agent::ReasoningEffort) {
         self.agent.set_reasoning_effort(effort);
     }

@@ -21,13 +21,13 @@ function SessionItem({
   title,
   updatedAt,
   active,
-  disabled,
+  running,
 }: {
   id: string;
   title: string;
   updatedAt: string;
   active: boolean;
-  disabled: boolean;
+  running: boolean;
 }) {
   const switchSession = useApp((s) => s.switchSession);
   const deleteSession = useApp((s) => s.deleteSession);
@@ -42,17 +42,24 @@ function SessionItem({
     >
       <button
         type="button"
-        disabled={disabled}
         onClick={() => switchSession(id)}
         title={updatedAt ? `${title || "新对话"} · ${relativeTime(updatedAt)}` : title}
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left focus-visible:rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left focus-visible:rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >
-        <MessageSquare
-          className={cn(
-            "size-3.5 shrink-0 transition-colors",
-            active ? "text-primary" : "text-muted-foreground/60",
-          )}
-        />
+        {running ? (
+          // Live indicator: pulsing dot (visibility of parallel cross-session runs)
+          <span className="relative flex size-3.5 shrink-0 items-center justify-center">
+            <span className="absolute inline-flex size-2 animate-ping rounded-full bg-primary/60" />
+            <span className="relative inline-flex size-2 rounded-full bg-primary" />
+          </span>
+        ) : (
+          <MessageSquare
+            className={cn(
+              "size-3.5 shrink-0 transition-colors",
+              active ? "text-primary" : "text-muted-foreground/60",
+            )}
+          />
+        )}
         <span
           className={cn(
             "truncate text-sm transition-colors",
@@ -77,8 +84,7 @@ function SessionItem({
       <button
         type="button"
         title="删除对话"
-        disabled={disabled}
-        className="mr-1.5 flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md p-1.5 text-muted-foreground/40 transition-all opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive focus:opacity-100 disabled:cursor-not-allowed"
+        className="mr-1.5 flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md p-1.5 text-muted-foreground/40 transition-all opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive focus:opacity-100"
         onClick={() => setConfirming(true)}
       >
         <Trash2 className="size-3" />
@@ -122,7 +128,7 @@ export function Sidebar() {
   const sessions = useApp((s) => s.sessions);
   const sessionId = useApp((s) => s.sessionId);
   const workDir = useApp((s) => s.workDir);
-  const isRunning = useApp((s) => s.isRunning);
+  const runningSessions = useApp((s) => s.runningSessions);
   const activeView = useApp((s) => s.activeView);
   const newSession = useApp((s) => s.newSession);
   const setWorkdirPicker = useApp((s) => s.setWorkdirPicker);
@@ -159,10 +165,9 @@ export function Sidebar() {
         <button
           type="button"
           onClick={() => newSession()}
-          disabled={isRunning}
           aria-label="新建对话"
           title="在当前项目新建会话（Ctrl+N）"
-          className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <Plus className="size-4" />
         </button>
@@ -186,7 +191,9 @@ export function Sidebar() {
                 title={session.title}
                 updatedAt={session.updated_at}
                 active={session.id === sessionId}
-                disabled={isRunning}
+                running={Boolean(
+                  session.running || runningSessions[session.id],
+                )}
               />
             ))}
           </div>

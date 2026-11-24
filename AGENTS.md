@@ -60,17 +60,36 @@ subagent delegation, and custom slash commands.
   `--rebuild-db`, `--update`, `--web`.
 - `session/` — **UI-agnostic session orchestration**. Layering: `tui/` + `web/`
   (presentation) → `session/` (`ChatSession` / `SessionManager`) → `agent/` + domain layers.
-  TUI mode has a single session entry; Web mode has one per work_dir. Storage / Config /
-  MCP connections are global; skills / subagents / commands / system prompt are discovered
-  per work_dir. Interrupt uses a per-work_dir `AtomicBool` cancel flag (not session locks).
+  TUI mode has a single session entry and does NOT use `SessionManager` at all (`run_tui`
+  builds the Agent/App directly). Web mode keeps one `ChatSession` instance **per
+  session_id** (registry keyed by session_id, lazy-built on first use: discovery + bind
+  + context rebuild at creation; instances from the same work_dir have independent locks
+  so multiple sessions run in parallel). Storage / Config / MCP connections are global;
+  skills / subagents / commands / system prompt are discovered per work_dir. Interrupt is
+  precise: per-instance `AtomicBool` cancel flag targeted by session_id
+  (`SessionManager::interrupt_session`); the flag resets at each `chat_stream` start, so
+  stray interrupts on idle instances are harmless.
 - `web/` — Web backend (feature `web`): `handlers/` (REST routes under `/api/*`,
   `mod.rs::api_router()` + per-domain submodules: sessions/permissions/models/skills/mcp/misc),
-  `sse.rs` (chat/compact streams), `protocol.rs` — **the frontend JSON contract**
-  (`ServerEvent` with `#[serde(tag = "type")]`) mirrored by `web/src/runtime/types.ts`;
-  change both together. `task_registry.rs` tracks pending permission/ask requests per
-  connection; `ConnectionGuard::drop` sends fallback replies (Deny / `"[User Cancelled]"`);
-  `state.rs` holds `WebServerState` (SessionManager + registry + default work dir +
-  config write lock).
+  `sse.rs` (chat/compact endpoints + `GET /api/sessions/{id}/events` subscription),
+  `runner.rs` (**background task that owns the agent event loop** — runs are spawned by the
+  chat/compact handlers and keep executing after any SSE disconnect; persistence,
+  auto-compaction, interrupt repair, and permission/ask registration live here),
+  `bus.rs` (**SessionBus / BusRegistry** — per-session event fanout: monotonic seq,
+  run-scoped replay buffer, broadcast channel, `durable_seq` watermark making DB history
+  and replay complementary, `epoch` (server start timestamp) invalidating cursors across
+  restarts, CAS run-claim slot enforcing single run per session),
+  `protocol.rs` — **the frontend JSON contract**
+  (`ServerEvent` with `#[serde(tag = "type")]`, incl. `Snapshot` first frame and
+  `RunComplete` sentinel; SSE data frames carry an `Envelope { seq, event }`) mirrored by
+  `web/src/runtime/types.ts`; change both together. `task_registry.rs` tracks pending
+  permission/ask requests by session (they survive disconnects — no auto-deny on
+  connection loss; `cancel_session` sweeps at run end); `state.rs` holds
+  `WebServerState` (SessionManager + request registry + BusRegistry + epoch +
+  global run-permit semaphore + default work dir + config write lock).
+  Disconnect semantics: **SSE loss never interrupts a task** — the only interrupt entry
+  is `POST /api/interrupt` (requires session_id). Same session: second run → 409.
+  Global concurrency cap: `[session] max_concurrent_runs` (default 4, 0 = unlimited) → 429.
   Static assets embedded from `web/dist` via rust-embed, SPA fallback to index.html;
   index.html is `no-cache`, hashed assets immutable.
 - `agent/` — Core LLM interaction loop.
@@ -144,8 +163,8 @@ subagent delegation, and custom slash commands.
   model cannot be used.
   Built-in providers: `deepseek`, `zhipu-coding-plan` (endpoint + `thinking` switch only);
   custom supported. Selector format `provider/model`. `resolve()` returns `ResolvedModel`.
-  Also holds `compact_threshold`, `[retry]` (transient-error retry tuning), and
-  `reasoning_effort`.
+  Also holds `compact_threshold`, `[retry]` (transient-error retry tuning),
+  `reasoning_effort`, and `[session]` (`max_concurrent_runs` — web global run cap).
 - `mcp/` — MCP client via `rmcp`: `config.rs` reads `~/.hailux/mcp.toml` (stdio + http
   transports, auto-generates commented sample); `client.rs` connects in background and
   registers tools. `SharedMcpBackends` shared with `TaskTool` for subagent MCP access.
@@ -154,7 +173,12 @@ subagent delegation, and custom slash commands.
   `messages.rs` / `usage.rs` (CRUD per domain), `convert.rs` (OpenAI ↔ storage mapping).
   **Versioned migrations
   via `sqlx::migrate!`** (`migrations/*.sql`): new schema change = new migration file, no
-  hand-written fallbacks. Max pool connections = 1. Supports subsessions
+  hand-written fallbacks. File DB runs **WAL** journal mode, pool = 8 (parallel web
+  sessions read concurrently; writes serialize via busy_timeout 5s) — `backup_db_file`
+  snapshots via `VACUUM INTO` (WAL-aware consistent snapshot) with a
+  checkpoint+copy fallback. In-memory test pools stay `max_connections(1)` (`:memory:` is
+  per-connection).
+  Supports subsessions
   (parent/child for subagent isolation). `messages.compacted` + `sessions.compact_summary`
   support context compaction; active-context queries filter `compacted = 0`. Migration
   failure aborts startup and suggests `--rebuild-db`.
@@ -180,9 +204,15 @@ subagent delegation, and custom slash commands.
   markdown).
 - `web/` (frontend dir at repo root) — React 19 + assistant-ui + zustand + Tailwind 4 +
   vite. `src/runtime/hailux-runtime.tsx` bridges SSE events into assistant-ui message parts;
-  `src/store/` holds app state (`app-store.ts` main store, `types.ts` state contract,
+  `src/store/` holds app state (`app-store.ts` main store — chat/compact are **submit-only**
+  POSTs, run events always arrive via the subscription, `types.ts` state contract,
+  `stream-manager.ts` — **single-stream ownership** (generation-token guarded; exactly one
+  subscription app-wide, stale continuations inert by construction),
+  `run-sink.ts` — the envelope decoder + per-session event router
+  (Snapshot/seq dedupe; events only mutate `items` when their session is the
+  current view, so switching away never loses or duplicates a running task),
   `shared-events.ts` event helpers, `session-history.ts` pure history rebuild);
-  `src/components/` renders UI.
+  `src/components/` renders UI (sidebar shows a pulsing dot for sessions with active runs).
 
 ## Runtime File Locations (all under ~/.hailux/)
 
@@ -214,6 +244,18 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   repaint (`render.force_clear`) as belt-and-braces.
 - **Web is loopback-only by default** (`127.0.0.1`). Work-dir selection means the server can
   read any local directory — exposing `0.0.0.0` is an explicit trust decision (documented in `web/mod.rs`).
+- **Web run lifecycle is decoupled from SSE** (`web/runner.rs` + `web/bus.rs`): a run is a
+  spawned task; SSE connections are replaceable observers. Protocol invariants: every
+  event has a per-session monotonic `seq` (survives across runs; `durable_seq` watermark =
+  `head_seq` in `GET /api/sessions/{id}` marks what DB history already covers, replay =
+  buffered events with `seq > since`); `epoch` (server start) must match or the client
+  must discard cursors and rebuild from history; runs end with a `RunComplete` sentinel
+  (POST observer streams close on it; `GET /api/sessions/{id}/events` subscriptions stay
+  open across runs for idle→live transitions). Pending permission/ask requests live for
+  the run, not the connection — a closed tab no longer auto-denies; replays re-surface the
+  dialog; reply endpoints return 410 Gone once consumed. Model/plan/effort broadcasts use
+  `try_lock` and skip locked instances — the chat entry re-syncs modes AND model
+  (`ChatSession::current_model_display` vs `manager.resolved()`) at every request start.
 - **ask_user reply contract** (5 implementations must stay in lockstep): TUI submits
   `"question"="answer"` pairs, comma-joined, with `\` and `"` escaped
   (`tui/ask_user.rs::ask_escape`); parsed back by

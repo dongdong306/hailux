@@ -58,8 +58,11 @@ async fn apply_model_config(
     }
     let sessions = state.manager.all_sessions();
     for session_arc in sessions {
-        let mut session = session_arc.lock().await;
-        session.switch_model(&resolved);
+        // try_lock: locked instances (in-flight runs) are skipped so the
+        // broadcast never blocks; drift is reconciled by the chat entry
+        if let Ok(mut session) = session_arc.try_lock() {
+            session.switch_model(&resolved);
+        }
     }
     state.manager.set_resolved(resolved);
     state.manager.set_cfg(new_cfg);

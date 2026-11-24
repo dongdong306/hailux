@@ -28,7 +28,9 @@ pub(super) async fn permission_reply(
             let _ = tx.send(decision);
             StatusCode::OK
         }
-        None => StatusCode::NOT_FOUND,
+        // Answered elsewhere / swept at run end: Gone; the frontend silently
+        // clears the dialog
+        None => StatusCode::GONE,
     }
 }
 
@@ -42,6 +44,6 @@ pub(super) async fn ask_reply(
             let _ = tx.send(reply.answer);
             StatusCode::OK
         }
-        None => StatusCode::NOT_FOUND,
+        None => StatusCode::GONE,
     }
 }

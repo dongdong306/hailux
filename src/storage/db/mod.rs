@@ -37,10 +37,14 @@ impl ChatStorage {
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
+            // WAL: multiple parallel web sessions read concurrently while writes
+            // serialize through SQLite's single-writer lock (guarded by busy_timeout
+            // below). The pool size only gates reads + queued writers.
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5));
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(8)
             .acquire_timeout(std::time::Duration::from_secs(10))
             .connect_with(options)
             .await?;
@@ -91,14 +95,31 @@ impl ChatStorage {
         Ok(backup_path)
     }
 
-    /// 复制 DB 文件做备份（非 WAL 模式，主文件始终包含最新数据）。
-    /// 仅生产路径使用：测试环境（in-memory 库）不备份，避免复制真实用户数据。
+    /// Back up the DB file. In WAL mode the latest commits may still live in
+    /// the `-wal` file, so copying the main file alone can miss the tail
+    /// (and the checkpoint can fail under concurrent connections). The primary
+    /// path is `VACUUM INTO` (SQLite 3.27+): a consistent snapshot that
+    /// includes WAL content by construction; the checkpoint+copy fallback is
+    /// best effort. Production path only: tests use in-memory DBs (never back
+    /// up real user data).
     #[cfg(not(test))]
     async fn backup_db_file(&self) -> Result<PathBuf> {
         let db_path = Self::db_path()?;
         let stamp = Local::now().format("%Y%m%d-%H%M%S");
         let backup_path = db_path.with_file_name(format!("chat.db.bak-{stamp}"));
-        tokio::fs::copy(&db_path, &backup_path).await?;
+        let vacuum = sqlx::query("VACUUM INTO ?1")
+            .bind(backup_path.as_os_str().to_string_lossy().as_ref())
+            .execute(&self.pool)
+            .await;
+        if vacuum.is_err() {
+            // Fallback: merge WAL into the main file, then copy (best effort —
+            // checkpoint may fail with concurrent connections; the main file
+            // still contains the vast majority of the data)
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+                .execute(&self.pool)
+                .await;
+            tokio::fs::copy(&db_path, &backup_path).await?;
+        }
         Ok(backup_path)
     }
 

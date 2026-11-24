@@ -48,16 +48,14 @@ export function itemOps(
 
 export type ItemOps = ReturnType<typeof itemOps>;
 
-/** Shared event branches for chat/compact streams; returns true if consumed. */
+/** Shared event branches for chat/compact streams; returns true if consumed.
+ *  SessionStarted is handled by run-sink (session binding + running state). */
 export function handleSharedEvent(
   event: ServerEvent,
   ops: ItemOps,
   set: StoreApi<AppState>["setState"],
 ): boolean {
   switch (event.type) {
-    case "SessionStarted":
-      set({ sessionId: event.session_id });
-      return true;
     case "Notice":
       ops.push({ kind: "notice", text: event.text });
       return true;

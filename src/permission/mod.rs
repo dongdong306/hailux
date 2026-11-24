@@ -135,6 +135,34 @@ pub struct PermissionManager {
     inner: Arc<Mutex<PermissionInner>>,
 }
 
+/// DB rules JSON -> in-memory rules (empty on parse failure; tolerate dirty data)
+fn deserialize_session_rules(rules: Option<String>) -> Vec<PermissionRule> {
+    rules
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<SerializableRule>>(json).ok())
+        .map(|v| {
+            v.into_iter()
+                .map(|r| PermissionRule {
+                    permission: r.permission,
+                    pattern: r.pattern,
+                    action: r.action,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist session rules (best effort; failures are silent).
+async fn persist_session_rules(
+    storage: &crate::storage::ChatStorage,
+    session_id: &str,
+    rules: &[SerializableRule],
+) {
+    if let Ok(json) = serde_json::to_string(rules) {
+        let _ = storage.set_session_permission(session_id, &json).await;
+    }
+}
+
 impl PermissionManager {
     pub fn new(mode: PermissionMode, config_rules: Vec<PermissionRule>) -> Self {
         Self {
@@ -191,7 +219,9 @@ impl PermissionManager {
         PermissionMode::Normal
     }
 
-    /// 切换到指定会话，从 DB 加载该会话的权限规则
+    /// Switch to a session, loading its permission rules from the DB (sync
+    /// wrapper; async contexts use [`Self::switch_session_async`] to avoid
+    /// `block_in_place` panicking on a single-threaded runtime)
     pub fn switch_session(&self, session_id: String) {
         let storage = {
             let inner = self.inner.lock();
@@ -210,19 +240,7 @@ impl PermissionManager {
                         .flatten()
                 })
             });
-            let loaded = rules
-                .as_deref()
-                .and_then(|json| serde_json::from_str::<Vec<SerializableRule>>(json).ok())
-                .map(|v| {
-                    v.into_iter()
-                        .map(|r| PermissionRule {
-                            permission: r.permission,
-                            pattern: r.pattern,
-                            action: r.action,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let loaded = deserialize_session_rules(rules);
             if let Ok(mut inner) = self.inner.lock() {
                 inner.session_id = Some(session_id);
                 inner.session_rules = loaded;
@@ -235,6 +253,40 @@ impl PermissionManager {
         }
     }
 
+    /// Async variant of [`Self::switch_session`] (web path).
+    pub async fn switch_session_async(&self, session_id: String) {
+        let storage = {
+            let inner = self.inner.lock();
+            match inner {
+                Ok(inner) => inner.storage.clone(),
+                Err(_) => return,
+            }
+        };
+        let loaded = match storage {
+            Some(storage) => {
+                let rules = storage
+                    .get_session_permission(&session_id)
+                    .await
+                    .ok()
+                    .flatten();
+                deserialize_session_rules(rules)
+            }
+            None => Vec::new(),
+        };
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.session_id = Some(session_id);
+            inner.session_rules = loaded;
+        }
+    }
+
+    /// Snapshot of the current session's in-memory rules (diagnostics/tests).
+    pub fn session_rules(&self) -> Vec<PermissionRule> {
+        self.inner
+            .lock()
+            .map(|i| i.session_rules.clone())
+            .unwrap_or_default()
+    }
+
     /// 清除当前会话的内存规则和 session_id（新建会话 / 无会话时调用）
     pub fn clear_session(&self) {
         if let Ok(mut inner) = self.inner.lock() {
@@ -243,8 +295,9 @@ impl PermissionManager {
         }
     }
 
-    /// 添加会话级规则（用户选择 "always" 后调用）。
-    /// 同时持久化到 DB（如果绑定了 storage）。
+    /// Add session-scoped rules (after the user picks "always"). Also persisted
+    /// to the DB when storage is bound. Sync wrapper; async contexts use
+    /// [`Self::add_session_rules_async`].
     pub fn add_session_rules(&self, permission: &str, always_patterns: &[String]) {
         let (session_id, storage) = {
             let inner = self.inner.lock();
@@ -253,6 +306,38 @@ impl PermissionManager {
                 Err(_) => return,
             }
         };
+        let all_rules = self.add_rules_in_memory(permission, always_patterns);
+        if let (Some(sid), Some(storage)) = (session_id, storage) {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    persist_session_rules(&storage, &sid, &all_rules).await;
+                })
+            });
+        }
+    }
+
+    /// Async variant of [`Self::add_session_rules`] (web path).
+    pub async fn add_session_rules_async(&self, permission: &str, always_patterns: &[String]) {
+        let (session_id, storage) = {
+            let inner = self.inner.lock();
+            match inner {
+                Ok(inner) => (inner.session_id.clone(), inner.storage.clone()),
+                Err(_) => return,
+            }
+        };
+        let all_rules = self.add_rules_in_memory(permission, always_patterns);
+        if let (Some(sid), Some(storage)) = (session_id, storage) {
+            persist_session_rules(&storage, &sid, &all_rules).await;
+        }
+    }
+
+    /// In-memory part: merge new rules into session_rules with dedup, returning
+    /// the full merged set (for persistence).
+    fn add_rules_in_memory(
+        &self,
+        permission: &str,
+        always_patterns: &[String],
+    ) -> Vec<SerializableRule> {
         let new_rules: Vec<PermissionRule> = always_patterns
             .iter()
             .map(|pattern| PermissionRule {
@@ -276,31 +361,20 @@ impl PermissionManager {
             }
         }
 
-        // 持久化到 DB
-        if let (Some(sid), Some(storage)) = (session_id, storage) {
-            let all_rules: Vec<SerializableRule> = {
-                let inner = self.inner.lock();
-                match inner {
-                    Ok(inner) => inner
-                        .session_rules
-                        .iter()
-                        .map(|r| SerializableRule {
-                            permission: r.permission.clone(),
-                            pattern: r.pattern.clone(),
-                            action: r.action,
-                        })
-                        .collect(),
-                    Err(_) => return,
-                }
-            };
-            if let Ok(json) = serde_json::to_string(&all_rules) {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let _ = storage.set_session_permission(&sid, &json).await;
-                    });
-                });
-            }
-        }
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .session_rules
+                    .iter()
+                    .map(|r| SerializableRule {
+                        permission: r.permission.clone(),
+                        pattern: r.pattern.clone(),
+                        action: r.action,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 判断工具是否应被禁用（config 规则中该 permission 的最后一条匹配规则为 `*` + deny）。

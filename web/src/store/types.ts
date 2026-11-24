@@ -14,7 +14,6 @@ import type {
   UpdateModelInput,
   UpdateProviderInput,
 } from "../runtime/types";
-import type { SseSession } from "../runtime/sse-client";
 
 export interface ChatItem {
   kind:
@@ -205,7 +204,15 @@ export interface AppState {
   // Interrupt hint (double-Esc semantics)
   escHint: boolean;
 
-  sse: SseSession | null;
+  /** Server epoch of the current session's bus (restart detection; null =
+   * never subscribed). Owned by stream-manager.ts */
+  epoch: number | null;
+  /** Consumed event seq cursor of the current session (subscription since
+   * baseline) */
+  lastSeq: number;
+  /** Running state per session (sidebar indicator; visibility of parallel
+   * cross-session runs) */
+  runningSessions: Record<string, boolean>;
 
   // actions
   /** Startup init: determine initial project dir (last visited > server default) and fetch sessions */
@@ -277,7 +284,7 @@ export interface AppState {
   switchModel: (selector: string) => Promise<void>;
   /** show=true opens the add-model dialog; preset is the prefill (provider / model id) */
   setAddModel: (show: boolean, preset?: { provider: string; modelId?: string } | null) => void;
-  /** Switch project dir: interrupt running request, reset session context, fetch that project's sessions */
+  /** Switch project dir: keep running tasks alive (session-routed events), reset view state, fetch that project's sessions */
   setWorkDir: (dir: string) => Promise<void>;
   setWorkdirPicker: (show: boolean) => void;
   setModelMenu: (show: boolean) => void;
