@@ -22,6 +22,9 @@ pub enum Message {
         pending_interject: Option<String>,
     },
     Agent(String),
+    /// Transient LLM retry notice; consecutive retries replace the previous
+    /// notice in place (one line instead of one line per attempt)
+    Retry(String),
     AgentStreaming(String),
     AgentThinking {
         text: String,

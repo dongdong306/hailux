@@ -126,6 +126,18 @@ pub enum CoreEvent {
         model: String,
         display: Option<String>,
     },
+    /// A transient `<system-reminder>` was appended to the current turn's
+    /// user message in memory (previous-run failure notice). Consumers:
+    /// persist into that session's last user row's
+    /// `runtime_meta.system_reminder` array so a rebuild reproduces the exact
+    /// request bytes (prompt-cache stable). `session_id` anchors the target
+    /// row at injection time — consumers must use it, not their ambient
+    /// "current session" (a mid-queue session switch would otherwise misfile
+    /// the row). Content itself is never polluted — UI reads `content` only.
+    PersistUserReminder {
+        session_id: String,
+        reminder: String,
+    },
     ToolCallStart {
         name: String,
         arguments: String,

@@ -152,7 +152,22 @@ export function createRunSink(
         items: [...s.items.slice(0, i), patch(s.items[i]!), ...s.items.slice(i + 1)],
       }));
     };
-    const items = get().items;
+    let items = get().items;
+    // A retry notice is transient: the next attempt's first streamed output
+    // (content / reasoning / tool call) removes it — a successful retry
+    // leaves no trace; a fully failed retry keeps its last notice as the
+    // error trail (aligns with the TUI drop_trailing_retry_notice)
+    if (
+      event.type === "AgentChunk" ||
+      event.type === "AgentReasoningChunk" ||
+      event.type === "ToolCallStart"
+    ) {
+      const i = lastRealIndex(items);
+      if (i >= 0 && items[i]!.kind === "notice" && items[i]!.retry) {
+        set({ items: [...items.slice(0, i), ...items.slice(i + 1)] });
+        items = get().items;
+      }
+    }
     const ops = { items, push, patchLast };
     if (handleSharedEvent(event, ops, set)) return;
 
@@ -184,7 +199,8 @@ export function createRunSink(
       }
       case "AgentRetry": {
         // Partial output of failed attempts must not enter context: clear the trailing streaming items in sync
-        // (align with TUI pop semantics); the notice ends the current acc, retried content starts a new message
+        // (align with TUI pop semantics); the notice replaces a previous retry notice in place,
+        // so one retry sequence shows a single line instead of one line per attempt
         const cur = [...items];
         let i = lastRealIndex(cur);
         while (
@@ -196,11 +212,15 @@ export function createRunSink(
           i = lastRealIndex(cur);
         }
         const secs = (event.delay_ms / 1000).toFixed(1);
-        set({ items: cur });
-        push({
-          kind: "notice",
-          text: `请求失败，${secs}s 后进行第 ${event.attempt}/${event.max_retries} 次重试：${event.reason}`,
-        });
+        const text = `请求失败，${secs}s 后进行第 ${event.attempt}/${event.max_retries} 次重试：${event.reason}`;
+        const last = i >= 0 ? cur[i] : undefined;
+        if (last?.kind === "notice" && last.retry) {
+          cur[i] = { ...last, text };
+          set({ items: cur });
+        } else {
+          set({ items: cur });
+          push({ kind: "notice", text, retry: true });
+        }
         break;
       }
       case "ToolCallStart":

@@ -209,7 +209,7 @@ pub(super) async fn run_chat_task(
     {
         let (tx, mut rx) = create_core_event_channel();
         session.bind_event_channel(tx.clone());
-        if let Err(e) = session.send_message(&message, attachments, tx.clone()) {
+        if let Err(e) = session.send_message(&session_id, &message, attachments, tx.clone()) {
             bus.publish(ServerEvent::Error {
                 message: e.to_string(),
             });
@@ -361,6 +361,22 @@ pub(super) async fn run_chat_task(
                     think_total_ms = 0;
                     let _ = session.storage().append_message(&session_id, &stored).await;
                     bus.advance_durable(bus.last_seq());
+                }
+                CoreEvent::PersistUserReminder {
+                    session_id: reminder_session,
+                    reminder,
+                } => {
+                    // Land the in-memory reminder into the row's runtime_meta
+                    // so rebuilds reproduce the exact request bytes (not pushed
+                    // to the frontend — the user-facing content stays clean).
+                    // Session anchored at injection time, matching the path id.
+                    if let Err(e) = session
+                        .storage()
+                        .append_user_message_reminder(&reminder_session, &reminder)
+                        .await
+                    {
+                        eprintln!("[warn] failed to persist user reminder: {e}");
+                    }
                 }
                 CoreEvent::ToolCallStart {
                     name,

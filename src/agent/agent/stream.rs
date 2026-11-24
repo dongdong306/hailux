@@ -66,32 +66,7 @@ impl AgentStreamState {
         let tools = self.tool_registry.to_chat_tools_filtered(self.plan_mode);
         let mut messages = self.messages.clone();
         if self.plan_mode {
-            for msg in messages.iter_mut().rev() {
-                let msg_mut = Arc::make_mut(msg);
-                if let CompatibleChatCompletionRequestMessage::User(u) = msg_mut {
-                    match &mut u.content {
-                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
-                            t,
-                        ) => {
-                            t.push_str("\n\n");
-                            t.push_str(PLAN_MODE_PROMPT);
-                        }
-                        // Separate text part for messages with image attachments
-                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Array(
-                            parts,
-                        ) => {
-                            parts.push(
-                                async_openai::types::chat::ChatCompletionRequestUserMessageContentPart::Text(
-                                    async_openai::types::chat::ChatCompletionRequestMessageContentPartText {
-                                        text: format!("\n\n{PLAN_MODE_PROMPT}"),
-                                    },
-                                ),
-                            );
-                        }
-                    }
-                    break;
-                }
-            }
+            super::messages::append_text_to_last_user_message(&mut messages, PLAN_MODE_PROMPT);
         }
         let messages = sanitize_messages_for_request(&messages, self.supports_vision);
         // Fill in tool results for dangling tool_calls left by interrupts /
@@ -200,10 +175,15 @@ pub(super) fn finalize_messages(
     reasoning_effort: ReasoningEffort,
     status: TaskStatus,
 ) {
-    let needs_assistant = !matches!(
-        messages.last().map(|m| m.as_ref()),
-        Some(CompatibleChatCompletionRequestMessage::Assistant(_))
-    );
+    // Errors leave no trace in the stored context: the failed attempt
+    // produced no content, and the failure reaches the next turn as a
+    // transient system-reminder (Agent::last_error) instead of a synthetic
+    // [Error: ...] assistant message
+    let needs_assistant = status != TaskStatus::Error
+        && !matches!(
+            messages.last().map(|m| m.as_ref()),
+            Some(CompatibleChatCompletionRequestMessage::Assistant(_))
+        );
     if needs_assistant {
         let msg: SharedMessage = Arc::new(
             CompatibleChatCompletionRequestAssistantMessage {

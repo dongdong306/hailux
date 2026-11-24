@@ -342,7 +342,7 @@ async fn run_subagent_task_inner(
 
     // 启动 subagent 流式对话
     agent
-        .chat_stream(&prompt, Vec::new(), sub_tx)
+        .chat_stream(&sub_session_id, &prompt, Vec::new(), sub_tx)
         .map_err(|e| ToolExecuteError {
             message: e.to_string(),
         })?;
@@ -360,16 +360,28 @@ async fn run_subagent_task_inner(
                 // 场景把两次生成的文本拼在一起返回
                 final_text.clear();
             }
-            CoreEvent::AgentComplete { messages, .. } => {
-                // 从最终消息中提取最后一条 assistant 消息的文本
-                for msg in messages.iter().rev() {
-                    if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg.as_ref()
-                        && let Some(ref content) = assistant.base.content
-                            && let async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(t) = content
-                                && !t.is_empty() {
-                                    final_text = t.clone();
-                                    break;
-                                }
+            CoreEvent::AgentComplete {
+                messages, status, ..
+            } => {
+                // Extract the final assistant text only on non-error completion.
+                // On error the context no longer carries a synthesized
+                // [Error: ...] assistant message, and a reverse scan would
+                // wrongly surface an *earlier* turn's text (masking the
+                // failure) — keep the chunk-accumulated text instead.
+                // Deliberately still a success-shaped return: the accumulated
+                // text ends with the run's "\n[Error: ...]" chunk, so the
+                // caller sees the failure reason inline; converting to
+                // ToolExecuteError here would also discard any partial output.
+                if status != crate::agent::event::TaskStatus::Error {
+                    for msg in messages.iter().rev() {
+                        if let CompatibleChatCompletionRequestMessage::Assistant(assistant) = msg.as_ref()
+                            && let Some(ref content) = assistant.base.content
+                                && let async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(t) = content
+                                    && !t.is_empty() {
+                                        final_text = t.clone();
+                                        break;
+                                    }
+                    }
                 }
                 completed = true;
                 break;
@@ -394,6 +406,20 @@ async fn run_subagent_task_inner(
                 }
                 if let Err(e) = ctx.storage.append_message(&sub_session_id, &stored).await {
                     eprintln!("[warn] Failed to persist subagent message: {e}");
+                }
+            }
+            CoreEvent::PersistUserReminder {
+                session_id: reminder_session,
+                reminder,
+            } => {
+                // Land the in-memory reminder into the subagent row's
+                // runtime_meta (resume rebuilds splice it back in order)
+                if let Err(e) = ctx
+                    .storage
+                    .append_user_message_reminder(&reminder_session, &reminder)
+                    .await
+                {
+                    eprintln!("[warn] Failed to persist subagent user reminder: {e}");
                 }
             }
             CoreEvent::UsageUpdate {

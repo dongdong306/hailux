@@ -117,6 +117,39 @@ pub fn build_user_message(
     }
 }
 
+/// Append transient text to the last User message (shared injection point
+/// for the plan-mode prompt and the previous-run failure system-reminder).
+/// Clone-on-write via `Arc::make_mut`: callers either operate on a cloned
+/// list (plan mode) or on a just-pushed user message with refcount 1 (error
+/// reminder), so stored history and shared in-memory references are never
+/// polluted. No-op when the list has no User message.
+pub(super) fn append_text_to_last_user_message(messages: &mut [SharedMessage], text: &str) {
+    let Some(idx) = messages
+        .iter()
+        .rposition(|m| matches!(m.as_ref(), CompatibleChatCompletionRequestMessage::User(_)))
+    else {
+        return;
+    };
+    let msg_mut = Arc::make_mut(&mut messages[idx]);
+    let CompatibleChatCompletionRequestMessage::User(u) = msg_mut else {
+        return;
+    };
+    match &mut u.content {
+        ChatCompletionRequestUserMessageContent::Text(t) => {
+            t.push_str("\n\n");
+            t.push_str(text);
+        }
+        // Array form (image attachments): push a separate text part
+        ChatCompletionRequestUserMessageContent::Array(parts) => {
+            parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: format!("\n\n{text}"),
+                },
+            ));
+        }
+    }
+}
+
 /// 按模型视觉能力清洗消息列表中用户消息的图片附件。
 /// - 支持视觉：仅校验空 base64，替换为损坏提示文本
 /// - 不支持视觉：所有图片替换为「不支持」提示文本（在克隆上操作，不污染存储历史）

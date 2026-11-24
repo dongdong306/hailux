@@ -143,11 +143,12 @@ impl ChatSession {
 
     pub fn send_message(
         &mut self,
+        session_id: &str,
         message: &str,
         attachments: Vec<crate::agent::media::Attachment>,
         tx: CoreEventTx,
     ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.agent.chat_stream(message, attachments, tx)
+        self.agent.chat_stream(session_id, message, attachments, tx)
     }
 
     pub fn bind_event_channel(&self, tx: CoreEventTx) {

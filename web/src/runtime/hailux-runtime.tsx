@@ -338,7 +338,7 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
             item.kind === "error"
               ? { kind: "error", text: item.text ?? "", tone: "danger" }
               : item.kind === "notice"
-                ? { kind: "notice", text: item.text ?? "", tone: "info" }
+                ? { kind: "notice", text: item.text ?? "", tone: item.retry ? "warn" : "info" }
                 : item.kind === "compacting"
                   ? {
                       kind: "compact",

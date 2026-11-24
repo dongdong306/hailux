@@ -36,6 +36,9 @@ export interface ChatItem {
   subagent?: string;
   subagentIndex?: number; // Index of source task in tasks array (distinguishes same-name concurrent instances)
   status?: string; // done status
+  /** Retry notice marker: consecutive AgentRetry events replace the previous
+   *  retry notice in place (one line per run, not one line per attempt) */
+  retry?: boolean;
   totalMs?: number;
   model?: string;
   ctxPromptTokens?: number; // Context usage snapshot this run (last request input tokens; carried by done line)
