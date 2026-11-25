@@ -77,7 +77,7 @@ async fn attachment_roundtrip_via_storage() {
     let png_bytes: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     let att = Attachment::from_bytes("image/png", &png_bytes);
 
-    // 构造带图片附件的 user 消息 → 落库 → 读回 → 重建 Array content
+    // Build a user message with an image attachment → persist → load → rebuild Array content
     let with_image = crate::agent::build_user_message("看图", std::slice::from_ref(&att));
     let stored = to_stored_message(&with_image);
     assert!(stored.attachments.is_some());
@@ -107,14 +107,15 @@ async fn attachment_roundtrip_via_storage() {
         _ => panic!("expected User message"),
     }
 
-    // 无附件 user 消息保持纯文本 content
+    // User message without attachments keeps plain-text content
     let plain = to_stored_message(&crate::agent::build_user_message("纯文本", &[]));
     assert!(plain.attachments.is_none());
 }
 
 #[test]
 fn tool_attachments_not_persisted_in_tool_messages() {
-    // 工具消息本身不携带附件列（媒体剥离为合成 user 消息）
+    // Tool messages themselves carry no attachments column (media is
+    // stripped into a synthetic user message)
     let tool_msg: crate::agent::models::CompatibleChatCompletionRequestMessage =
         ChatCompletionRequestToolMessage {
             content: ChatCompletionRequestToolMessageContent::Text(
@@ -130,8 +131,9 @@ fn tool_attachments_not_persisted_in_tool_messages() {
 
 #[tokio::test]
 async fn migration4_backfills_message_model() {
-    // 模拟迁移 3 时代的库：每轮最后一条 assistant 行的 runtime_meta 带 {"model": ...}，
-    // 中间行为展示文本（非 JSON）；最后一行模拟崩溃轮次（本轮无标记行）。
+    // Simulate a migration-3-era DB: the last assistant row of each turn has
+    // runtime_meta carrying {"model": ...}, middle rows hold display text
+    // (not JSON); the last row simulates a crashed turn (no marker row).
     let storage = ChatStorage::new_in_memory().await.unwrap();
     let sid = storage
         .create_session("deepseek/chat", "/tmp")
@@ -167,7 +169,8 @@ async fn migration4_backfills_message_model() {
         .unwrap();
     }
 
-    // 回退到迁移 3 状态（移除版本 4 记录、model 列及其索引），重跑迁移触发回填
+    // Downgrade to the migration-3 state (remove the version 4 record, the
+    // model column and its index), then re-run migration to backfill
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
         .execute(&storage.pool)
         .await
@@ -188,20 +191,23 @@ async fn migration4_backfills_message_model() {
             .find(|m| m.content == content)
             .and_then(|m| m.model.clone())
     };
-    // 中间行取同轮后继标记行（含自身）的模型；user 行不在回填范围
+    // Middle rows take the model of the following marker row in the same
+    // turn (inclusive); user rows are not backfilled
     assert_eq!(model_of("a-mid1").as_deref(), Some("deepseek/chat"));
     assert_eq!(model_of("a-end1").as_deref(), Some("deepseek/chat"));
     assert_eq!(model_of("a-mid2").as_deref(), Some("glm-4.7"));
     assert_eq!(model_of("a-end2").as_deref(), Some("glm-4.7"));
-    // 崩溃轮次行后面无标记行，保持 NULL（统计时回退 sessions.model）
+    // The crashed-turn row has no marker row after it and stays NULL
+    // (usage stats fall back to sessions.model)
     assert_eq!(model_of("a-crash"), None);
     assert_eq!(msgs.iter().find(|m| m.content == "u1").unwrap().model, None);
 }
 
 #[tokio::test]
 async fn migration5_adds_attachments_column() {
-    // 模拟迁移 4 时代的库：有数据行但无 attachments 列；重跑迁移补列后
-    // 旧行应可正常加载（attachments = NULL → 视为无附件的纯文本消息）
+    // Simulate a migration-4-era DB: data rows exist but no attachments
+    // column; after re-running migration adds the column, old rows should
+    // load fine (attachments = NULL → plain-text message, no attachments)
     let storage = ChatStorage::new_in_memory().await.unwrap();
     let sid = storage
         .create_session("deepseek/chat", "/tmp")
@@ -216,7 +222,8 @@ async fn migration5_adds_attachments_column() {
         .await
         .unwrap();
 
-    // 回退到迁移 4 状态（移除版本 5 记录、attachments 列），重跑迁移
+    // Downgrade to the migration-4 state (remove the version 5 record and
+    // the attachments column), then re-run migration
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 5")
         .execute(&storage.pool)
         .await
@@ -232,7 +239,7 @@ async fn migration5_adds_attachments_column() {
     assert_eq!(msgs[0].content, "旧消息");
     assert_eq!(msgs[0].attachments, None);
 
-    // 重建的消息为纯文本 user 消息（无图片 part）
+    // The rebuilt message is a plain-text user message (no image part)
     let chat = from_stored_message(&msgs[0]).unwrap();
     match chat {
         CompatibleChatCompletionRequestMessage::User(u) => match u.content {
@@ -247,7 +254,8 @@ async fn migration5_adds_attachments_column() {
 
 #[tokio::test]
 async fn corrupted_attachments_json_falls_back_to_text() {
-    // attachments 列存了畸形 JSON：加载保留原始值，重建时静默回退为纯文本
+    // The attachments column holds malformed JSON: loading keeps the raw
+    // value, rebuilding silently falls back to plain text
     let storage = ChatStorage::new_in_memory().await.unwrap();
     let sid = storage.create_session("m", "/tmp").await.unwrap();
     sqlx::query(
@@ -280,9 +288,11 @@ async fn corrupted_attachments_json_falls_back_to_text() {
 
 #[tokio::test]
 async fn legacy_pre_040_db_fails_migration() {
-    // 模拟旧版（手写迁移时代，< 0.4.0）的库：没有 _sqlx_migrations 表，且缺列。
-    // 引导升级已移除：此类库在版本化迁移中报错（迁移 4 的回填引用 runtime_meta），
-    // 由上层捕获后提示用户 /rebuild-db 重建，不做静默升级。
+    // Simulate a legacy DB (hand-written migration era, < 0.4.0): no
+    // _sqlx_migrations table and missing columns. Bootstrap upgrade was
+    // removed: such DBs error during versioned migration (migration 4's
+    // backfill references runtime_meta); the caller catches the error and
+    // prompts the user to rebuild with /rebuild-db — no silent upgrade.
     let options = SqliteConnectOptions::new()
         .filename(":memory:")
         .create_if_missing(true);
@@ -311,7 +321,7 @@ async fn legacy_pre_040_db_fails_migration() {
     let result = storage.run_migration().await;
     assert!(result.is_err(), "pre-0.4.0 旧库应迁移失败而非静默升级");
 
-    // rebuild 后恢复正常
+    // Back to normal after rebuild
     storage.rebuild().await.unwrap();
     let sid = storage.create_session("m", "/tmp").await.unwrap();
     storage
@@ -488,21 +498,22 @@ fn make_assistant_with_tool_calls(ids: &[&str]) -> StoredMessage {
     }
 }
 
-/// 修复只作用于活跃区间（compacted = 0）：压缩区间内的悬挂 assistant 永远
-/// 不会进入重建上下文，若为其补 stub 反而造出孤儿 tool 消息（同样触发 400）
+/// The repair only covers the active range (compacted = 0): dangling
+/// assistants in the compacted range never re-enter the rebuilt context,
+/// and stubbing them would only create orphan tool messages (same 400)
 #[tokio::test]
 async fn repair_skips_compacted_dangling_tool_calls() {
     let storage = ChatStorage::new_in_memory().await.unwrap();
     let sid = storage.create_session("m", "/tmp").await.unwrap();
 
-    // 压缩区间：悬挂 call_old（compacted=1）
+    // Compacted range: dangling call_old (compacted=1)
     storage
         .append_message(&sid, &make_assistant_with_tool_calls(&["call_old"]))
         .await
         .unwrap();
     storage.mark_messages_compacted(&sid).await.unwrap();
 
-    // 活跃区间：悬挂 call_live
+    // Active range: dangling call_live
     storage
         .append_message(&sid, &make_assistant_with_tool_calls(&["call_live"]))
         .await
@@ -516,7 +527,7 @@ async fn repair_skips_compacted_dangling_tool_calls() {
     assert_eq!(stubs[0].tool_call_id.as_deref(), Some("call_live"));
     assert_eq!(stubs[0].content, "Tool execution aborted");
 
-    // 活跃上下文完整：assistant(call_live) + stub，无孤儿 tool 消息
+    // Active context intact: assistant(call_live) + stub, no orphan tool messages
     let active = storage.load_active_messages(&sid).await.unwrap();
     assert_eq!(active.len(), 2);
     assert!(active.iter().all(|m| !m.compacted));
@@ -549,8 +560,9 @@ async fn usage_stats_roundtrip() {
     assistant2.cached_tokens = Some(0);
     storage.append_message(&b, &assistant2).await.unwrap();
 
-    // 同一 session（a，创建模型 deepseek/chat）中途切换到 glm-4.7：
-    // 消息级 model 优先生效；NULL 则回退 sessions.model（旧数据）
+    // The same session (a, created with model deepseek/chat) switches to
+    // glm-4.7 mid-way: message-level model wins; NULL falls back to
+    // sessions.model (old data)
     let mut assistant3 = make_message(MessageRole::Assistant, "a3");
     assistant3.prompt_tokens = Some(400);
     assistant3.completion_tokens = Some(20);
@@ -558,36 +570,36 @@ async fn usage_stats_roundtrip() {
     assistant3.model = Some("glm-4.7".to_string());
     storage.append_message(&a, &assistant3).await.unwrap();
 
-    // 不带 usage 的消息不计入
+    // Messages without usage are not counted
     storage
         .append_message(&a, &make_message(MessageRole::User, "u"))
         .await
         .unwrap();
 
-    // load 往返保留消息级 model
+    // Load round-trip preserves the message-level model
     let loaded = storage.load_messages(&a).await.unwrap();
     assert_eq!(loaded[0].model, None);
     assert_eq!(loaded[1].model.as_deref(), Some("glm-4.7"));
 
-    // 全局汇总
+    // Global summary
     let summary = storage.usage_summary(None, 0).await.unwrap();
     assert_eq!(summary.requests, 3);
     assert_eq!(summary.prompt_tokens, 700);
     assert_eq!(summary.cached_tokens, 80);
     assert_eq!(summary.completion_tokens, 80);
 
-    // 按项目过滤
+    // Filtered by project
     let proj = storage.usage_summary(Some("/tmp/proj"), 0).await.unwrap();
     assert_eq!(proj.requests, 2);
     assert_eq!(proj.prompt_tokens, 500);
 
-    // 按日聚合
+    // Aggregated by day
     let daily = storage.usage_daily(None, 0).await.unwrap();
     assert_eq!(daily.len(), 1);
     assert_eq!(daily[0].requests, 3);
 
-    // 按模型聚合：消息级 model 优先，NULL 回退 sessions.model
-    // glm-4.7 = a3(400) + b 的 a2(200)；deepseek/chat = a1(100)
+    // By model: message-level model wins, NULL falls back to sessions.model
+    // glm-4.7 = a3(400) + a2 of b (200); deepseek/chat = a1(100)
     let by_model = storage.usage_by_model(None, 0).await.unwrap();
     assert_eq!(by_model.len(), 2);
     assert_eq!(by_model[0].model, "glm-4.7");
@@ -597,23 +609,23 @@ async fn usage_stats_roundtrip() {
     assert_eq!(by_model[1].requests, 1);
     assert_eq!(by_model[1].prompt_tokens, 100);
 
-    // 按项目聚合
+    // By project
     let by_project = storage.usage_by_project(None, 0, 10).await.unwrap();
     assert_eq!(by_project.len(), 2);
-    // 570 > 210，/tmp/proj 在前
+    // 570 > 210, so /tmp/proj comes first
     assert_eq!(by_project[0].work_dir, "/tmp/proj");
     assert_eq!(by_project[0].prompt_tokens, 500);
     assert_eq!(by_project[1].work_dir, "/tmp/other");
 
-    // 最近明细
+    // Recent details
     let recent = storage.list_recent_usage(None, 0, 10).await.unwrap();
     assert_eq!(recent.len(), 3);
-    assert_eq!(recent[0].model, "glm-4.7"); // id 降序，a3 消息级模型
+    assert_eq!(recent[0].model, "glm-4.7"); // id DESC; a3's message-level model
     assert_eq!(recent[0].work_dir, "/tmp/proj");
-    assert_eq!(recent[1].model, "glm-4.7"); // a2 回退 sessions.model
-    assert_eq!(recent[2].model, "deepseek/chat"); // a1 回退 sessions.model
+    assert_eq!(recent[1].model, "glm-4.7"); // a2 falls back to sessions.model
+    assert_eq!(recent[2].model, "deepseek/chat"); // a1 falls back to sessions.model
 
-    // 已知项目列表
+    // Known project list
     let dirs = storage.list_work_dirs().await.unwrap();
     assert_eq!(dirs.len(), 2);
     let names: Vec<&str> = dirs.iter().map(|d| d.work_dir.as_str()).collect();
@@ -621,12 +633,12 @@ async fn usage_stats_roundtrip() {
     assert!(names.contains(&"/tmp/other"));
     assert!(dirs.iter().all(|d| d.sessions == 1));
 
-    // verbatim 前缀变体匹配
+    // verbatim prefix variant matching
     let proj_verbatim = storage
         .usage_summary(Some(r"\\?\C:\tmp\proj"), 0)
         .await
         .unwrap();
-    assert_eq!(proj_verbatim.requests, 0); // 变体不同，不匹配 /tmp/proj
+    assert_eq!(proj_verbatim.requests, 0); // different variants, no match for /tmp/proj
 }
 
 #[tokio::test]
@@ -638,11 +650,11 @@ async fn usage_stats_respects_days_filter() {
     assistant.completion_tokens = Some(5);
     storage.append_message(&sid, &assistant).await.unwrap();
 
-    // days=0 全量可见
+    // days=0: everything visible
     let all = storage.usage_summary(None, 0).await.unwrap();
     assert_eq!(all.requests, 1);
 
-    // 旧库中 created_at 已是现在，30 天窗口内可见
+    // created_at is already "now" here, inside the 30-day window
     let recent = storage.usage_summary(None, 30).await.unwrap();
     assert_eq!(recent.requests, 1);
 }
@@ -677,14 +689,14 @@ async fn rebuild_drops_all_tables_and_recreates_schema() {
         .await
         .unwrap();
 
-    // 测试环境（in-memory）不备份文件
+    // Test environment (in-memory): no file backup
     let backup_path = storage.rebuild().await.unwrap();
     assert!(backup_path.is_none());
 
-    // 旧数据全部清空
+    // All old data wiped
     let sessions = storage.list_top_level_sessions("/tmp").await.unwrap();
     assert!(sessions.is_empty());
-    // 迁移错误被清除，schema 就绪
+    // Migration error cleared, schema ready
     assert!(storage.migration_error().is_none());
     let has_migrations: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
@@ -693,7 +705,7 @@ async fn rebuild_drops_all_tables_and_recreates_schema() {
     .await
     .unwrap();
     assert_eq!(has_migrations.0, 1);
-    // 重建后可正常写入
+    // Writes work normally after the rebuild
     let new_sid = storage.create_session("m", "/tmp").await.unwrap();
     storage
         .append_message(&new_sid, &make_message(MessageRole::User, "after"))

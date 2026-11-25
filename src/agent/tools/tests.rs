@@ -1,8 +1,8 @@
-use super::bash::{DRAIN_HARD_CAP, drain_channel_with_window};
-use super::bash::{decode_output, run_shell_command};
-#[cfg(windows)]
-use super::bash::{windows_shell_command_args, windows_shell_program, wrap_windows_command};
 use super::diff::serialize_diff_data;
+use super::shell::{DRAIN_HARD_CAP, drain_channel_with_window};
+use super::shell::{decode_output, run_shell_command};
+#[cfg(windows)]
+use super::shell::{windows_shell_command_args, windows_shell_program, wrap_windows_command};
 use super::*;
 use crate::permission::normalize_lexical;
 use serde_json::json;
@@ -34,7 +34,7 @@ fn diff_data_small_change_not_truncated() {
     assert_eq!(hunks[0]["old_start"], 1);
     assert_eq!(hunks[0]["new_start"], 1);
     let changes = hunks[0]["changes"].as_array().unwrap();
-    assert_eq!(changes.len(), 7); // 2 前置上下文 + 1 删 + 1 增 + 3 后置上下文
+    assert_eq!(changes.len(), 7); // 2 leading context + 1 del + 1 add + 3 trailing context
     let signs: Vec<&str> = changes.iter().map(|c| c[0].as_str().unwrap()).collect();
     assert_eq!(signs, vec![" ", " ", "-", "+", " ", " ", " "]);
 }
@@ -68,7 +68,7 @@ fn diff_data_keeps_large_diffs_untruncated() {
         serde_json::from_str(&serialize_diff_data(Some(&old), &new, "big.txt")).unwrap();
     assert_eq!(v["additions"], 100);
     assert_eq!(v["deletions"], 100);
-    // 全量保留：整文件替换无相同行 → 无上下文，100 删 + 100 增
+    // Kept in full: whole-file replacement has no common lines → no context, 100 dels + 100 adds
     let total: usize = v["hunks"]
         .as_array()
         .unwrap()
@@ -87,7 +87,7 @@ fn diff_data_identical_content_yields_no_hunks() {
     assert_eq!(v["hunks"].as_array().unwrap().len(), 0);
 }
 
-// ── read 工具图片附件 ────────────────────────────────
+// ── read tool image attachments ────────────────────────────────
 
 fn png_bytes() -> Vec<u8> {
     let mut v = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -119,7 +119,8 @@ async fn read_image_file_returns_attachment() {
     assert!(exec.content.contains("Image read successfully"));
     assert!(exec.content.contains("<type>image</type>"));
 
-    // execute_async 通道只回文本（附件经 execute_async_with_display 流转）
+    // The execute_async channel returns text only (attachments flow through
+    // execute_async_with_display)
     let text = ReadTool.execute_async(&args, &wd).await.unwrap();
     assert!(text.contains("Image read successfully"));
 
@@ -145,7 +146,7 @@ async fn read_text_file_has_no_attachments() {
 
 #[tokio::test]
 async fn read_fake_image_extension_sniffs_real_content() {
-    // 扩展名为 .png 但内容是文本 → 不当图片处理（魔数优先）
+    // .png extension but text content → not treated as an image (magic number wins)
     let dir = tmp_workdir("read_fake");
     let path = dir.join("fake.png");
     fs::write(&path, "just text").unwrap();
@@ -181,71 +182,73 @@ async fn read_oversized_image_rejected_without_attachment() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// BashTool::extract_permission 端到端语义（扫描细节见 bash_scan 模块测试）。
-fn bash_extract(command: &str, work_dir: &str) -> Vec<PermissionRequest> {
-    BashTool.extract_permission(&json!({ "command_string": command }).to_string(), work_dir)
+/// End-to-end semantics of ShellTool::extract_permission (scan details are covered by the shell_scan module tests).
+fn shell_extract(command: &str, work_dir: &str) -> Vec<PermissionRequest> {
+    ShellTool.extract_permission(&json!({ "command_string": command }).to_string(), work_dir)
 }
 
 #[test]
-fn bash_inside_workdir_single_bash_request() {
+fn shell_inside_workdir_single_request() {
     let wd = tmp_workdir("inside");
     let wd_str = wd.display().to_string();
-    // 普通命令 / 目录内文件 / 目录内写操作：单个 bash 请求，无 force_ask
+    // Plain command / in-workdir file / in-workdir write: single shell request, no force_ask
     for cmd in ["ls -la", "git status", "cat src/main.rs", "rm -rf ./target"] {
-        let reqs = bash_extract(cmd, &wd_str);
+        let reqs = shell_extract(cmd, &wd_str);
         assert_eq!(reqs.len(), 1, "expected single request for {cmd:?}");
-        assert_eq!(reqs[0].permission, "bash");
+        assert_eq!(reqs[0].permission, "shell");
         assert!(!reqs[0].force_ask, "expected no force_ask for {cmd:?}");
     }
 }
 
 #[test]
-fn bash_outside_appends_external_request_after_bash_request() {
+fn shell_outside_appends_external_request_after_shell_request() {
     let wd = tmp_workdir("outside");
     let wd_str = wd.display().to_string();
-    let reqs = bash_extract("cat ../secrets.txt", &wd_str);
-    // bash 请求在前（命令规则先评估），external_directory 请求在后
+    let reqs = shell_extract("cat ../secrets.txt", &wd_str);
+    // Shell request first (command rules evaluated first), external_directory second
     assert_eq!(reqs.len(), 2);
-    assert_eq!(reqs[0].permission, "bash");
+    assert_eq!(reqs[0].permission, "shell");
     assert_eq!(reqs[1].permission, "external_directory");
-    // 绝对路径外部文件
-    assert_eq!(bash_extract("cat /etc/hosts", &wd_str).len(), 2);
-    // 非文件命令不受文件路径检查影响（默认放行，走 bash 规则）
-    assert_eq!(bash_extract("npm install", &wd_str).len(), 1);
-    assert_eq!(bash_extract("curl https://example.com", &wd_str).len(), 1);
+    // External file with an absolute path
+    assert_eq!(shell_extract("cat /etc/hosts", &wd_str).len(), 2);
+    // Non-file commands bypass the file-path check (default allow, shell rules apply)
+    assert_eq!(shell_extract("npm install", &wd_str).len(), 1);
+    assert_eq!(shell_extract("curl https://example.com", &wd_str).len(), 1);
 }
 
 #[test]
-fn bash_executor_flags_force_ask() {
+fn shell_executor_flags_force_ask() {
     let wd = tmp_workdir("executor_flag");
     let wd_str = wd.display().to_string();
-    // sudo / 解释器无法静态分析 → force_ask（内置默认放行不豁免）
+    // sudo / interpreters cannot be statically analyzed → force_ask (the
+    // built-in default-allow does not exempt them)
     for cmd in [
         "sudo systemctl restart nginx",
         "sh -c 'echo hi'",
         "python script.py",
     ] {
-        let reqs = bash_extract(cmd, &wd_str);
+        let reqs = shell_extract(cmd, &wd_str);
         assert_eq!(reqs.len(), 1, "expected single request for {cmd:?}");
         assert!(reqs[0].force_ask, "expected force_ask for {cmd:?}");
     }
 }
 
 #[test]
-fn bash_skips_flags_and_dynamic_args() {
+fn shell_skips_flags_and_dynamic_args() {
     let wd = tmp_workdir("flags");
     let wd_str = wd.display().to_string();
-    // -l 标志、chmod +x 模式跳过；已知变量（$HOME）展开后仍被检查
-    assert_eq!(bash_extract("cat -n /etc/hosts", &wd_str).len(), 2);
-    // ls 不参与文件路径检查
-    assert_eq!(bash_extract("ls -l /etc", &wd_str).len(), 1);
-    assert_eq!(bash_extract("chmod +x script.sh", &wd_str).len(), 1);
-    assert_eq!(bash_extract("cat $HOME/.ssh/id_rsa", &wd_str).len(), 2);
-    assert_eq!(bash_extract("cat ~/.ssh/id_rsa", &wd_str).len(), 2);
+    // -l flags and chmod +x modes are skipped; known variables ($HOME) are
+    // still checked after expansion
+    assert_eq!(shell_extract("cat -n /etc/hosts", &wd_str).len(), 2);
+    // ls is not subject to the file-path check
+    assert_eq!(shell_extract("ls -l /etc", &wd_str).len(), 1);
+    assert_eq!(shell_extract("chmod +x script.sh", &wd_str).len(), 1);
+    assert_eq!(shell_extract("cat $HOME/.ssh/id_rsa", &wd_str).len(), 2);
+    assert_eq!(shell_extract("cat ~/.ssh/id_rsa", &wd_str).len(), 2);
 }
 
 #[test]
-fn bash_workdir_param_outside_wins() {
+fn shell_workdir_param_outside_wins() {
     let wd = tmp_workdir("wdparam");
     let wd_str = wd.display().to_string();
     let outside = wd.parent().unwrap().join("elsewhere");
@@ -254,7 +257,7 @@ fn bash_workdir_param_outside_wins() {
         "workdir": outside.display().to_string()
     })
     .to_string();
-    let reqs = BashTool.extract_permission(&args, &wd_str);
+    let reqs = ShellTool.extract_permission(&args, &wd_str);
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].permission, "external_directory");
 }
@@ -270,20 +273,20 @@ fn normalize_lexical_resolves_parent_dirs() {
 }
 
 #[test]
-fn plan_mode_denies_bash_write_commands() {
-    let deny = |args: &str| plan_mode_bash_denial(args);
-    // 写操作 → 拒绝
+fn plan_mode_denies_shell_write_commands() {
+    let deny = |args: &str| plan_mode_shell_denial(args);
+    // Write operation → deny
     assert!(deny(r#"{"command_string":"rm -rf target"}"#).is_some());
     assert!(deny(r#"{"command_string":"git commit -m x"}"#).is_some());
     assert!(deny(r#"{"command_string":"echo hi > f"}"#).is_some());
-    // 只读操作 → 放行
+    // Read-only operation → allow
     assert!(deny(r#"{"command_string":"git status"}"#).is_none());
     assert!(deny(r#"{"command_string":"git diff HEAD"}"#).is_none());
     assert!(deny(r#"{"command_string":"ls -la"}"#).is_none());
-    // 坏 JSON / 缺失参数 → 放行（由执行层报错）
+    // Bad JSON / missing arguments → allow (the execution layer reports the error)
     assert!(deny("not json").is_none());
     assert!(deny(r#"{}"#).is_none());
-    // 拒绝信息包含命令原文，便于模型理解
+    // The denial message includes the raw command so the model can understand it
     let reason = deny(r#"{"command_string":"rm -rf target"}"#).unwrap();
     assert!(reason.contains("rm -rf target"));
     assert!(reason.contains("plan mode"));
@@ -291,7 +294,7 @@ fn plan_mode_denies_bash_write_commands() {
 
 #[test]
 fn decode_output_passthrough_utf8() {
-    // 纯 ASCII 与合法 UTF-8（含中文）原样返回
+    // Pure ASCII and valid UTF-8 (including CJK) are returned as-is
     assert_eq!(decode_output(b"hello world"), "hello world");
     let text = "中文输出 cargo build";
     assert_eq!(decode_output(text.as_bytes()), text);
@@ -299,7 +302,8 @@ fn decode_output_passthrough_utf8() {
 
 #[test]
 fn decode_output_restores_gbk_text() {
-    // powershell.exe 在中文 Windows 上按 GBK 输出错误记录，应正确还原
+    // powershell.exe emits error records as GBK on Chinese Windows; decoding
+    // must restore them correctly
     let text = "拒绝访问。 (os error 5)\n所在位置 行:1 字符: 247";
     let (bytes, _, _) = encoding_rs::GBK.encode(text);
     assert_eq!(decode_output(&bytes), text);
@@ -307,7 +311,8 @@ fn decode_output_restores_gbk_text() {
 
 #[test]
 fn decode_output_prefers_utf8_on_error_tie() {
-    // UTF-8 主体 + 少量坏字节：错误数打平（或 UTF-8 更少）时不应整体转 GBK
+    // Mostly UTF-8 + a few bad bytes: on an error tie (or UTF-8 having fewer
+    // errors) the text must not be converted wholesale to GBK
     let mut bytes = "中文输出 cargo build".as_bytes().to_vec();
     bytes.extend_from_slice(&[0xFF, 0xFE]);
     let decoded = decode_output(&bytes);
@@ -318,7 +323,7 @@ fn decode_output_prefers_utf8_on_error_tie() {
 #[cfg(windows)]
 #[test]
 fn windows_shell_program_resolves() {
-    // PATH 探测不 panic，且返回两个候选之一
+    // PATH probing must not panic and must return one of the two candidates
     let shell = windows_shell_program();
     assert!(shell == "pwsh.exe" || shell == "powershell.exe");
 }
@@ -339,10 +344,12 @@ fn wrap_windows_command_injects_prologue() {
 
 #[cfg(windows)]
 #[tokio::test]
-async fn bash_utf8_prologue_preserves_unicode_output() {
-    // 回归：中文 Windows 上 PS 5.1 以 GBK 双重转码原生命令输出，
-    // 非 GBK 字符（✓）在 PS 层即被替换为 '?'，GBK 启发式解码无法还原。
-    // prologue 强制 UTF-8 后中文与特殊符号必须原样保留。
+async fn shell_utf8_prologue_preserves_unicode_output() {
+    // Regression: on Chinese Windows PS 5.1 double-transcodes native command
+    // output as GBK; non-GBK characters (✓) are replaced with '?' at the PS
+    // layer, and GBK heuristic decoding cannot restore them.
+    // With the prologue forcing UTF-8, CJK text and special symbols must be
+    // preserved as-is.
     let out = run_shell_command(
         windows_shell_program(),
         windows_shell_command_args("Write-Output '中文✓'"),
@@ -357,9 +364,9 @@ async fn bash_utf8_prologue_preserves_unicode_output() {
 
 #[cfg(windows)]
 #[test]
-fn bash_description_injects_shell_description() {
-    let desc = BashTool.description();
-    // 占位符已被替换为带版本号的 shell 描述
+fn shell_description_injects_shell_description() {
+    let desc = ShellTool.description();
+    // The placeholder has been replaced with the versioned shell description
     assert!(!desc.contains("{SHELL_DESC}"));
     assert!(desc.contains("PowerShell"));
     assert!(desc.contains("(pwsh.exe") || desc.contains("(powershell.exe"));
@@ -382,9 +389,10 @@ fn slow_output_command() -> (&'static str, Vec<String>) {
 }
 
 #[tokio::test]
-async fn bash_timeout_returns_partial_output() {
-    // 超时后已产生的输出必须随超时标记一并返回（不再被 wait_with_output 的
-    // 全有或全无语义丢弃），避免模型误判失败后反复重试
+async fn shell_timeout_returns_partial_output() {
+    // Output already produced before the timeout must be returned together with
+    // the timeout marker (no longer discarded by wait_with_output's all-or-nothing
+    // semantics), so the model does not misjudge failure and retry repeatedly
     let (program, args) = slow_output_command();
     let out = run_shell_command(program, args, None, Some(2))
         .await
@@ -397,8 +405,8 @@ async fn bash_timeout_returns_partial_output() {
 }
 
 #[tokio::test]
-async fn bash_normal_exit_returns_stdout() {
-    // 正常完成路径行为不变：无超时标记、输出完整
+async fn shell_normal_exit_returns_stdout() {
+    // The normal-completion path is unchanged: no timeout marker, complete output
     #[cfg(windows)]
     let (program, args) = (
         windows_shell_program(),
@@ -417,13 +425,15 @@ async fn bash_normal_exit_returns_stdout() {
 }
 
 #[tokio::test]
-async fn bash_grandchild_holding_pipe_returns_on_exit() {
-    // 回归：孙进程继承并持有管道写端（playwright-cli daemon 等常驻进程的场景）。
-    // 旧实现 wait_with_output 死等 EOF → 挂满超时；新实现以进程退出为准 + 限时排空。
+async fn shell_grandchild_holding_pipe_returns_on_exit() {
+    // Regression: a grandchild inherits and holds the pipe write end (resident
+    // processes like the playwright-cli daemon). The old wait_with_output waited
+    // forever for EOF → hung until timeout; the new implementation returns on
+    // process exit + a time-limited drain.
     #[cfg(windows)]
     let (program, args) = (
         windows_shell_program(),
-        // cmd 立即退出，ping 继承管道写端并存活 30s
+        // cmd exits immediately; ping inherits the pipe write end and lives for 30s
         windows_shell_command_args(
             "Write-Output 'grand-child-test'; cmd /c \"start /b ping -n 30 127.0.0.1\"",
         ),
@@ -433,7 +443,7 @@ async fn bash_grandchild_holding_pipe_returns_on_exit() {
         "bash",
         vec![
             "-c".to_string(),
-            // shell 立即退出，后台 sleep 持有管道写端
+            // shell exits immediately; the background sleep holds the pipe write end
             "echo grand-child-test; sleep 30 &".to_string(),
         ],
     );
@@ -452,11 +462,12 @@ async fn bash_grandchild_holding_pipe_returns_on_exit() {
 
 #[tokio::test]
 async fn drain_channel_stops_at_hard_cap_despite_chatty_writer() {
-    // 回归：持续低速写入会无限重置空闲窗口（chatty daemon 场景），
-    // 必须被硬性总上限截停，否则排空永不结束、命令永不返回。
+    // Regression: continuous slow writes reset the idle window indefinitely
+    // (chatty daemon scenario); they must be cut off by the hard overall cap,
+    // otherwise draining never ends and the command never returns.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let writer = tokio::spawn(async move {
-        // 每 100ms 写一块（< 500ms 空闲窗口），持续 20s 远超 3s 硬性上限
+        // Writes one chunk every 100ms (< the 500ms idle window) for 20s, exceeding the 3s cap
         for _ in 0..200 {
             if tx.send(vec![b'x'; 16]).await.is_err() {
                 break;
@@ -477,8 +488,8 @@ async fn drain_channel_stops_at_hard_cap_despite_chatty_writer() {
 }
 
 #[tokio::test]
-async fn bash_nonzero_exit_combines_stdout_and_stderr() {
-    // 失败命令：退出码非 0 → 合并 stdout 与 stderr（combine_output 路径）
+async fn shell_nonzero_exit_combines_stdout_and_stderr() {
+    // Failing command: nonzero exit code → stdout and stderr combined (combine_output path)
     #[cfg(windows)]
     let (program, args) = (
         windows_shell_program(),
@@ -502,8 +513,8 @@ async fn bash_nonzero_exit_combines_stdout_and_stderr() {
 }
 
 #[tokio::test]
-async fn bash_large_output_truncated() {
-    // 超过 10000 字符 → 截断标记 + 保留前 10000 字符
+async fn shell_large_output_truncated() {
+    // Over 10000 characters → truncation marker + first 10000 characters kept
     #[cfg(windows)]
     let (program, args) = (
         windows_shell_program(),
@@ -529,9 +540,9 @@ async fn bash_large_output_truncated() {
 }
 
 #[tokio::test]
-async fn bash_workdir_is_respected() {
-    // workdir 参数：命令在指定目录执行
-    let dir = std::env::temp_dir().join("hailux_bash_wd_test");
+async fn shell_workdir_is_respected() {
+    // workdir argument: the command runs in the given directory
+    let dir = std::env::temp_dir().join("hailux_shell_wd_test");
     std::fs::create_dir_all(&dir).expect("create temp dir");
     #[cfg(windows)]
     let (program, args) = (
@@ -544,15 +555,15 @@ async fn bash_workdir_is_respected() {
         .await
         .expect("workdir command");
     assert!(
-        out.contains("hailux_bash_wd_test"),
+        out.contains("hailux_shell_wd_test"),
         "expected workdir in output: {out}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn bash_timeout_with_no_output_returns_marker_only() {
-    // 超时且无任何输出 → 仅返回超时标记，不携带空 body
+async fn shell_timeout_with_no_output_returns_marker_only() {
+    // Timeout with no output at all → only the timeout marker is returned, without an empty body
     #[cfg(windows)]
     let (program, args) = (
         windows_shell_program(),
@@ -571,8 +582,8 @@ async fn bash_timeout_with_no_output_returns_marker_only() {
 }
 
 #[tokio::test]
-async fn bash_tool_rejects_invalid_json() {
-    let err = BashTool.execute_async("not json", ".").await.unwrap_err();
+async fn shell_tool_rejects_invalid_json() {
+    let err = ShellTool.execute_async("not json", ".").await.unwrap_err();
     assert!(
         err.message.contains("Invalid JSON parameter"),
         "unexpected error: {}",
@@ -581,8 +592,8 @@ async fn bash_tool_rejects_invalid_json() {
 }
 
 #[tokio::test]
-async fn bash_tool_rejects_missing_command() {
-    let err = BashTool.execute_async("{}", ".").await.unwrap_err();
+async fn shell_tool_rejects_missing_command() {
+    let err = ShellTool.execute_async("{}", ".").await.unwrap_err();
     assert!(
         err.message.contains("Missing 'command_string'"),
         "unexpected error: {}",
@@ -591,13 +602,13 @@ async fn bash_tool_rejects_missing_command() {
 }
 
 #[tokio::test]
-async fn bash_tool_end_to_end_json_roundtrip() {
-    // BashTool::execute_async 端到端：JSON 参数解析（含 timeout 字段）→ 执行 → 返回
+async fn shell_tool_end_to_end_json_roundtrip() {
+    // ShellTool::execute_async end to end: JSON argument parsing (incl. timeout field) → execution → result
     #[cfg(windows)]
     let arguments = r#"{"command_string":"Write-Output 'tool-e2e'","timeout":30}"#.to_string();
     #[cfg(not(windows))]
     let arguments = r#"{"command_string":"echo tool-e2e","timeout":30}"#.to_string();
-    let out = BashTool
+    let out = ShellTool
         .execute_async(&arguments, ".")
         .await
         .expect("e2e run");
@@ -606,9 +617,10 @@ async fn bash_tool_end_to_end_json_roundtrip() {
 }
 
 #[tokio::test]
-async fn bash_tool_defaults_to_work_dir_without_workdir_arg() {
-    // 未传 workdir 时命令必须落在会话工作目录，而不是进程 cwd
-    let dir = test_tmp_dir("hailux_bash_workdir_default");
+async fn shell_tool_defaults_to_work_dir_without_workdir_arg() {
+    // Without a workdir argument the command must land in the session working
+    // directory, not the process cwd
+    let dir = test_tmp_dir("hailux_shell_workdir_default");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let wd = dir.display().to_string();
@@ -616,11 +628,12 @@ async fn bash_tool_defaults_to_work_dir_without_workdir_arg() {
     let arguments = r#"{"command_string":"Write-Output (Get-Location).Path"}"#.to_string();
     #[cfg(not(windows))]
     let arguments = r#"{"command_string":"pwd"}"#.to_string();
-    let out = BashTool
+    let out = ShellTool
         .execute_async(&arguments, &wd)
         .await
-        .expect("bash run");
-    // 验证输出路径位于工作目录下（Windows canonicalize 可能带 \\?\ 前缀，宽松匹配）
+        .expect("shell run");
+    // Verify the output path is under the working directory (Windows
+    // canonicalize may add a \\?\ prefix; loose matching)
     let tail = dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -634,7 +647,8 @@ async fn bash_tool_defaults_to_work_dir_without_workdir_arg() {
 
 #[tokio::test]
 async fn grep_tool_caps_at_max_matches() {
-    // 超过 MAX_MATCHES → 恰好 100 条命中 + 截断标记（外层遍历提前终止，输出不变）
+    // Over MAX_MATCHES → exactly 100 hits + truncation marker (the outer walk
+    // terminates early; output unchanged)
     let dir = test_tmp_dir("hailux_grep_truncate_test");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -674,7 +688,8 @@ async fn grep_tool_no_matches_returns_marker() {
 
 #[tokio::test]
 async fn grep_skips_env_files_in_directory_search() {
-    // 回归：目录级搜索曾把 *.env.* 内容无询问直接返回（绕过 read 门禁）
+    // Regression: directory-level search used to return *.env.* contents
+    // directly without asking (bypassing the read gate)
     let dir = test_tmp_dir("hailux_grep_env_skip");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -706,8 +721,9 @@ async fn grep_skips_env_files_in_directory_search() {
 
 #[tokio::test]
 async fn grep_explicit_env_path_searches_root_file() {
-    // path 直指 env 文件 = 显式目标（extract_permission 已补发 read 询问），
-    // 执行层不得跳过遍历根本身
+    // path pointing directly at an env file = explicit target (extract_permission
+    // already issued the read ask); the executor must not skip the traversal
+    // root itself
     let dir = test_tmp_dir("hailux_grep_env_explicit");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -734,14 +750,14 @@ async fn grep_explicit_env_path_searches_root_file() {
 fn grep_extract_permission_adds_read_gate_for_env_file() {
     let wd = tmp_workdir("grep_env_perm");
     let wd_str = wd.display().to_string();
-    // 目录搜索：仅 grep 请求
+    // Directory search: grep request only
     let reqs = GrepTool.extract_permission(
         &serde_json::json!({ "pattern": "x", "path": "src" }).to_string(),
         &wd_str,
     );
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].permission, "grep");
-    // 显式 env 文件：追加 read 请求（命中内置 *.env 询问规则）
+    // Explicit env file: a read request is appended (hits the built-in *.env ask rule)
     let reqs = GrepTool.extract_permission(
         &serde_json::json!({ "pattern": "x", "path": ".env" }).to_string(),
         &wd_str,
@@ -749,7 +765,7 @@ fn grep_extract_permission_adds_read_gate_for_env_file() {
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[1].permission, "read");
     assert!(reqs[1].patterns[0].ends_with(".env"));
-    // 豁免文件不追加
+    // Exempt files get no appended request
     let reqs = GrepTool.extract_permission(
         &serde_json::json!({ "pattern": "x", "path": ".env.example" }).to_string(),
         &wd_str,
@@ -759,7 +775,7 @@ fn grep_extract_permission_adds_read_gate_for_env_file() {
 
 #[tokio::test]
 async fn grep_tool_defaults_to_work_dir() {
-    // 缺省 path（"."）→ 按会话工作目录搜索，而非进程 cwd
+    // Default path (".") → search the session working directory, not the process cwd
     let dir = test_tmp_dir("hailux_grep_default_path");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -793,7 +809,7 @@ async fn glob_tool_filters_by_pattern() {
 
 #[tokio::test]
 async fn glob_tool_defaults_to_work_dir() {
-    // 缺省 path（"."）→ 按会话工作目录搜索，而非进程 cwd
+    // Default path (".") → search the session working directory, not the process cwd
     let dir = test_tmp_dir("hailux_glob_default_path");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -809,8 +825,9 @@ async fn glob_tool_defaults_to_work_dir() {
 
 #[tokio::test]
 async fn glob_tool_matches_relative_subdir_pattern() {
-    // 回归：`src/tui/*.rs` 等带相对目录前缀的 pattern 之前永远匹配不上绝对
-    // entry 路径（前缀无法消耗），必须同时按遍历根的相对路径匹配
+    // Regression: patterns with a relative directory prefix like `src/tui/*.rs`
+    // never matched absolute entry paths (the prefix could not be consumed);
+    // matching must also run against the path relative to the traversal root
     let dir = test_tmp_dir("hailux_glob_relative_pattern");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src/tui")).expect("create dirs");
@@ -833,7 +850,7 @@ async fn glob_tool_matches_relative_subdir_pattern() {
     assert!(out.contains("mod.rs"), "missing match: {out}");
     assert!(out.contains("main.rs"), "missing match: {out}");
 
-    // 子目录作为遍历根时，相对 pattern 同样以根为基准
+    // With a subdirectory as the traversal root, relative patterns anchor at the root too
     let out = GlobTool
         .execute_async(&args("*.rs"), &dir.join("src/tui").display().to_string())
         .await
@@ -855,9 +872,9 @@ fn resolve_tool_path_resolves_relative_against_work_dir() {
             resolve_tool_path(r"D:\other\a.rs", r"D:\proj"),
             r"D:\other\a.rs"
         );
-        // 盘符相对路径（D:foo）不拼接，避免产生错误组合
+        // Drive-relative paths (D:foo) are not joined, avoiding a wrong combination
         assert_eq!(resolve_tool_path(r"D:foo", r"D:\proj"), r"D:foo");
-        // 实际运行时 work_dir 为 canonicalize 结果，带 \\?\ verbatim 前缀
+        // At runtime work_dir is a canonicalize result carrying the \\?\ verbatim prefix
         assert_eq!(resolve_tool_path("src", r"\\?\D:\proj"), r"\\?\D:\proj\src");
     }
     #[cfg(not(windows))]
@@ -871,7 +888,8 @@ fn resolve_tool_path_resolves_relative_against_work_dir() {
     }
 }
 
-/// 测试临时目录：放在 target/ 下（沙箱/受限环境常禁写 %TEMP%，target 必可写）
+/// Test temp directory: placed under target/ (sandboxed/restricted environments
+/// often forbid writes to %TEMP%; target is always writable)
 fn test_tmp_dir(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")

@@ -2,13 +2,13 @@ use crate::agent::CommandRegistry;
 
 pub use crate::agent::parse_slash_input;
 
-/// UI-action 命令的静态信息（仅用于内建 UI 命令的展示）。
+/// Static info of a UI-action command (for displaying built-in UI commands only).
 pub struct SlashCommand {
     pub name: &'static str,
     pub description: &'static str,
 }
 
-/// UI-action 命令（触发界面操作，不发送消息给 LLM）。
+/// UI-action command (triggers a UI action, never sends a message to the LLM).
 pub enum Command {
     New,
     Session,
@@ -25,7 +25,7 @@ pub enum Command {
     Exit,
 }
 
-/// 统一展示用的命令条目（UI 命令 + prompt 命令均可生成）。
+/// Command entry for unified display (generated from both UI and prompt commands).
 #[derive(Clone)]
 pub struct CommandEntry {
     pub name: String,
@@ -33,7 +33,7 @@ pub struct CommandEntry {
     pub is_ui: bool,
 }
 
-/// 匹配结果：UI-action 命令 vs prompt 命令。
+/// Match result: UI-action command vs prompt command.
 pub enum MatchedCommand {
     Ui { cmd: Command, args: String },
     Prompt { name: String, args: String },
@@ -113,7 +113,7 @@ fn match_ui_command(name: &str) -> Option<Command> {
     }
 }
 
-/// 尝试将用户输入匹配为命令（先查 UI-action 命令，再查 prompt 命令）。
+/// Try to match user input as a command (checks UI-action commands first, then prompt commands).
 pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedCommand> {
     let (name, args) = parse_slash_input(input)?;
 
@@ -128,14 +128,14 @@ pub fn match_command(input: &str, registry: &CommandRegistry) -> Option<MatchedC
     None
 }
 
-/// UI 命令与内建 prompt 命令的统一展示优先级。
-/// 不在此列表中的自定义命令按字母排序追加在末尾。
+/// Unified display priority for UI commands and built-in prompt commands.
+/// Custom commands not in this list are appended at the end in alphabetical order.
 const COMMAND_PRIORITY: &[&str] = &[
     "new", "sessions", "init", "plan", "models", "compact", "effort", "skills", "mcp", "tasks",
     "stats", "share", "yolo", "exit",
 ];
 
-/// 构建所有可用命令的展示列表（UI 命令 + prompt 命令按优先级混合排序）。
+/// Build the display list of all commands (UI + prompt commands, mixed, sorted by priority).
 pub fn build_all_entries(registry: &CommandRegistry) -> Vec<CommandEntry> {
     let mut entries: Vec<CommandEntry> = SLASH_COMMANDS
         .iter()
@@ -166,7 +166,7 @@ pub fn build_all_entries(registry: &CommandRegistry) -> Vec<CommandEntry> {
     entries
 }
 
-/// 根据前缀过滤命令列表，返回匹配的索引列表。
+/// Filter the command list by prefix, returning the matched indices.
 pub fn filter_completions(entries: &[CommandEntry], prefix: &str) -> Vec<usize> {
     if prefix.is_empty() {
         return (0..entries.len()).collect();

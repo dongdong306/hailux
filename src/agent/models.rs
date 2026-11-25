@@ -14,13 +14,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
-/// 共享消息类型：Arc 包裹的 Compatible 消息，使得 Vec 克隆变为 O(n) 指针拷贝。
+/// Shared message type: an Arc-wrapped Compatible message, making Vec clones an O(n) pointer copy.
 pub type SharedMessage = Arc<CompatibleChatCompletionRequestMessage>;
 
-/// 思考强度档位（请求体顶层 `reasoning_effort` 字段）。
-/// DeepSeek V4 / GLM-5.3 官方支持 low/high/max 三档，默认 high；OpenAI 侧
-/// 值域随模型演进（none/minimal/low/medium/high/xhigh/max，model-dependent），
-/// 但 low/high/max 三值均在其中，可直接透传。
+/// Reasoning-effort levels (top-level `reasoning_effort` field in the request body).
+/// DeepSeek V4 / GLM-5.3 officially support the low/high/max levels, defaulting to high;
+/// the OpenAI-side value domain evolves with models
+/// (none/minimal/low/medium/high/xhigh/max, model-dependent), but all three values
+/// low/high/max fall within it and can be passed through directly.
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -39,7 +40,7 @@ impl ReasoningEffort {
         }
     }
 
-    /// 大小写不敏感解析（TUI /effort 参数用）
+    /// Case-insensitive parsing (used by the TUI /effort argument)
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "low" => Some(Self::Low),
@@ -49,7 +50,7 @@ impl ReasoningEffort {
         }
     }
 
-    /// 循环切换：low → high → max → low
+    /// Cycles through: low → high → max → low
     pub fn next(&self) -> Self {
         match self {
             Self::Low => Self::High,
@@ -59,7 +60,7 @@ impl ReasoningEffort {
     }
 }
 
-/// 思考模式配置
+/// Thinking-mode configuration
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ThinkingConfig {
     #[serde(rename = "type")]
@@ -74,7 +75,7 @@ impl ThinkingConfig {
     }
 }
 
-/// 扩展的消息枚举，兼容标准 ChatCompletionRequestMessage 并支持 reasoning_content
+/// Extended message enum: standard ChatCompletionRequestMessage plus reasoning_content support
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum CompatibleChatCompletionRequestMessage {
@@ -86,7 +87,7 @@ pub enum CompatibleChatCompletionRequestMessage {
     Function(ChatCompletionRequestFunctionMessage),
 }
 
-/// 标准消息 → Compatible 消息（加载历史记录时使用）
+/// Standard message → Compatible message (used when loading history)
 impl From<ChatCompletionRequestMessage> for CompatibleChatCompletionRequestMessage {
     fn from(msg: ChatCompletionRequestMessage) -> Self {
         match msg {
@@ -105,7 +106,7 @@ impl From<ChatCompletionRequestMessage> for CompatibleChatCompletionRequestMessa
     }
 }
 
-/// Compatible 消息 → 标准消息（持久化存储时使用，reasoning_content 会被丢弃）
+/// Compatible message → standard message (used when persisting; reasoning_content is dropped)
 impl From<CompatibleChatCompletionRequestMessage> for ChatCompletionRequestMessage {
     fn from(msg: CompatibleChatCompletionRequestMessage) -> Self {
         match msg {
@@ -119,7 +120,7 @@ impl From<CompatibleChatCompletionRequestMessage> for ChatCompletionRequestMessa
     }
 }
 
-/// 各标准消息类型 → Compatible 消息（用于 .into() 链式调用）
+/// Each standard message type → Compatible message (for .into() call chains)
 impl From<ChatCompletionRequestSystemMessage> for CompatibleChatCompletionRequestMessage {
     fn from(m: ChatCompletionRequestSystemMessage) -> Self {
         Self::System(m)
@@ -155,7 +156,7 @@ impl From<CompatibleChatCompletionRequestAssistantMessage>
     }
 }
 
-/// 扩展的 Assistant 消息，在标准消息基础上增加 reasoning_content 字段
+/// Extended Assistant message that adds a reasoning_content field on top of the standard one
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct CompatibleChatCompletionRequestAssistantMessage {
     #[serde(flatten)]
@@ -165,7 +166,8 @@ pub struct CompatibleChatCompletionRequestAssistantMessage {
     pub reasoning_content: Option<String>,
 }
 
-/// 自定义聊天完成请求，序列化时替换 messages 字段以支持扩展消息类型
+/// Custom chat completion request: replaces the messages field during serialization
+/// to support the extended message types.
 pub struct CompatibleCreateChatCompletionRequest {
     base: CreateChatCompletionRequest,
     custom_messages: Vec<SharedMessage>,
@@ -173,7 +175,8 @@ pub struct CompatibleCreateChatCompletionRequest {
     extra: Map<String, Value>,
 }
 
-/// 自定义序列化：将 base 序列化后用 custom_messages 替换 messages 字段，再附加 thinking 和 extra
+/// Custom serialization: serializes base, replaces the messages field with custom_messages,
+/// then appends thinking and extra.
 impl Serialize for CompatibleCreateChatCompletionRequest {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -201,7 +204,7 @@ impl Serialize for CompatibleCreateChatCompletionRequest {
     }
 }
 
-/// 请求构建器，复用 CreateChatCompletionRequestArgs 并扩展特有字段
+/// Request builder that reuses CreateChatCompletionRequestArgs and adds extension-specific fields
 pub struct CompatibleCreateChatCompletionRequestArgs {
     base: CreateChatCompletionRequestArgs,
     custom_messages: Vec<SharedMessage>,
@@ -221,7 +224,7 @@ impl Default for CompatibleCreateChatCompletionRequestArgs {
 }
 
 impl CompatibleCreateChatCompletionRequestArgs {
-    // === 委托标准字段 ===
+    // === Delegated standard fields ===
 
     pub fn model(&mut self, model: impl Into<String>) -> &mut Self {
         self.base.model(model);
@@ -253,7 +256,7 @@ impl CompatibleCreateChatCompletionRequestArgs {
         self
     }
 
-    // === 特有字段 ===
+    // === Extension-specific fields ===
 
     pub fn thinking(&mut self, thinking: ThinkingConfig) -> &mut Self {
         self.thinking = Some(thinking);
@@ -265,9 +268,9 @@ impl CompatibleCreateChatCompletionRequestArgs {
         self
     }
 
-    /// 构建最终的请求对象
+    /// Builds the final request object
     pub fn build(&mut self) -> Result<CompatibleCreateChatCompletionRequest, OpenAIError> {
-        // base 中 messages 设为空，序列化时用 custom_messages 替代
+        // messages in base is set empty; custom_messages replaces it at serialization time
         self.base.messages(vec![]);
         let base = self.base.build()?;
         Ok(CompatibleCreateChatCompletionRequest {
@@ -279,8 +282,8 @@ impl CompatibleCreateChatCompletionRequestArgs {
     }
 }
 
-/// DeepSeek 兼容的 usage 统计：标准 OpenAI 字段 + flatten 捕获
-/// `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 等扩展字段。
+/// DeepSeek-compatible usage stats: standard OpenAI fields plus flatten-captured
+/// extension fields such as `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct CompatibleCompletionUsage {
     #[serde(default)]
@@ -298,9 +301,9 @@ pub struct CompatibleCompletionUsage {
 }
 
 impl CompatibleCompletionUsage {
-    /// 缓存命中的输入 token 数。
-    /// 优先 OpenAI 风格 `prompt_tokens_details.cached_tokens`，
-    /// 回退 DeepSeek 风格 `prompt_cache_hit_tokens`。
+    /// Number of input tokens that hit the cache.
+    /// Prefers the OpenAI-style `prompt_tokens_details.cached_tokens`,
+    /// falling back to the DeepSeek-style `prompt_cache_hit_tokens`.
     pub fn cached_tokens(&self) -> u32 {
         if let Some(details) = &self.prompt_tokens_details
             && let Some(cached) = details.cached_tokens
@@ -314,7 +317,7 @@ impl CompatibleCompletionUsage {
             .unwrap_or(0)
     }
 
-    /// 缓存未命中的输入 token 数（DeepSeek `prompt_cache_miss_tokens`，可推导）。
+    /// Input tokens that missed the cache (DeepSeek `prompt_cache_miss_tokens`, inferable).
     pub fn cache_miss_tokens(&self) -> u32 {
         self.extra
             .get("prompt_cache_miss_tokens")
@@ -397,8 +400,8 @@ mod tests {
 
     #[test]
     fn reasoning_effort_values_in_openai_domain() {
-        // low/high/max 均为 OpenAI reasoning_effort 的合法值（GPT-5.6+ 全量支持），
-        // 直传即可，无需映射
+        // low/high/max are all valid OpenAI reasoning_effort values (fully supported since
+        // GPT-5.6+); pass through directly, no mapping needed
         assert_eq!(ReasoningEffort::Low.as_str(), "low");
         assert_eq!(ReasoningEffort::High.as_str(), "high");
         assert_eq!(ReasoningEffort::Max.as_str(), "max");
@@ -406,7 +409,7 @@ mod tests {
 
     #[test]
     fn request_serializes_reasoning_effort() {
-        // 全链路：builder extra 字段 → 自定义序列化 → 请求 JSON
+        // End to end: builder extra field → custom serialization → request JSON
         let mut builder = CompatibleCreateChatCompletionRequestArgs::default();
         builder
             .model("test-model")

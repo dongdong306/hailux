@@ -117,8 +117,8 @@ subagent delegation, and custom slash commands.
     `SharedMessage = Arc<CompatibleChatCompletionRequestMessage>`:
     cloning a message list is O(n) pointer copies; reminder injection (plan-mode
     prompt / exit / failure) mutates only the modified message via `Arc::make_mut`.
-  - `tools/` — per-tool modules (`bash.rs`, `read.rs`, `edit.rs`, `write.rs`, `grep.rs`,
-    `glob.rs`, `web_fetch.rs`, `todo.rs`, `ask.rs`, plus shared `diff.rs`). `mod.rs` holds
+  - `tools/` — per-tool modules (`shell.rs`, `read.rs`, `edit.rs`, `write.rs`, `grep.rs`,
+    `glob.rs`, `web_fetch.rs`, `todo.rs`, `question.rs`, plus shared `diff.rs`). `mod.rs` holds
     the `Tool` trait, `ToolRegistry` (converts tools to OpenAI function-calling schema),
     and shared path/permission helpers. `allowed_in_plan_mode()` gates write tools.
     `execute_async_with_display()` returns optional UI display data (e.g. diff hunks,
@@ -140,7 +140,7 @@ subagent delegation, and custom slash commands.
     in isolated subsessions with their own tool set, skill whitelist, MCP server filter,
     and model; session resume via `task_id`; builtin `general` subagent always available.
     Isolation: own event channel — only the final text result returns to the main agent,
-    tool-call progress forwarded to the main UI (truncated to 2000 chars); `ask_user` and
+    tool-call progress forwarded to the main UI (truncated to 2000 chars); `question` and
     `task` tools are never registered for subagents; access filtered by frontmatter.
   - `command_def.rs` — Custom slash commands: `.md` files (frontmatter `description`).
     `CommandRegistry` unifies builtin and custom prompt commands; priority:
@@ -153,9 +153,9 @@ subagent delegation, and custom slash commands.
   `mod.rs::build_system_prompt()` assembles: base prompt + working directory + skills
   summary + AGENTS.md instructions + subagents summary — session and web layers both go
   through it, never hand-assemble prompts elsewhere. `system.txt` is English.
-  `tools/bash_windows.txt` vs `bash_unix.txt` selected via `cfg`.
-- `permission/` — Permission engine: rules (`mod.rs::default_rules()`), `bash_arity.rs`
-  (command-arity parsing for file-path detection), `bash_readonly.rs` (plan-mode bash gate).
+  `tools/shell_windows.txt` vs `shell_unix.txt` selected via `cfg`.
+- `permission/` — Permission engine: rules (`mod.rs::default_rules()`), `shell_arity.rs`
+  (command-arity parsing for file-path detection), `shell_readonly.rs` (plan-mode shell gate).
 - `config/` — Model/provider config in `~/.hailux/config.toml`, split into `mod.rs`
   (Config + load/resolve), `providers.rs` (built-in provider table: id / name / base_url /
   `native_reasoning` only — **no hardcoded models**), `types.rs` (TOML structs),
@@ -240,17 +240,17 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
 
 ## Key Quirks
 
-- **Platform**: Primarily developed on Windows. `BashTool` prefers `pwsh.exe` (PowerShell 7+)
+- **Platform**: Primarily developed on Windows. `ShellTool` prefers `pwsh.exe` (PowerShell 7+)
   on Windows, falling back to `powershell.exe` (5.1); and `bash -c` on Unix; the `workdir`
   parameter only exists on non-Windows. Windows commands are wrapped with a UTF-8 prologue
-  (`WINDOWS_UTF8_PROLOGUE` in `agent/tools/bash.rs`) to force UTF-8 on both pipe directions.
+  (`WINDOWS_UTF8_PROLOGUE` in `agent/tools/shell.rs`) to force UTF-8 on both pipe directions.
   Windows adds a `crossterm_winapi` dependency and different paste-detection timing constants.
   The Windows shell is spawned with `CREATE_NO_WINDOW` (own hidden console) and
   `stdin(null)`: GUI-subsystem grandchildren (e.g. headless Edge/Chrome) would otherwise
   `AttachConsole(ATTACH_PARENT_PROCESS)` and scribble the TUI's alternate screen directly
   (ratatui diff-rendering never repairs those cells). Side effect: PowerShell table output
   formats to the hidden console's default width (~120 cols), and console resize from within
-  commands is unreliable — don't "fix" either. After a bash tool run, TUI forces a full
+  commands is unreliable — don't "fix" either. After a shell tool run, TUI forces a full
   repaint (`render.force_clear`) as belt-and-braces.
 - **Web is loopback-only by default** (`127.0.0.1`). Work-dir selection means the server can
   read any local directory — exposing `0.0.0.0` is an explicit trust decision (documented in `web/mod.rs`).
@@ -266,7 +266,7 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   dialog; reply endpoints return 410 Gone once consumed. Model/plan/effort broadcasts use
   `try_lock` and skip locked instances — the chat entry re-syncs modes AND model
   (`ChatSession::current_model_display` vs `manager.resolved()`) at every request start.
-- **ask_user reply contract** (5 implementations must stay in lockstep): TUI submits
+- **question reply contract** (5 implementations must stay in lockstep): TUI submits
   `"question"="answer"` pairs, comma-joined, with `\` and `"` escaped
   (`tui/ask_user.rs::ask_escape`); parsed back by
   `tui/history_cell/ask_user_render.rs::parse_ask_user_pairs`;
@@ -274,7 +274,7 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   `web/src/components/assistant-ui/tool-fallback.tsx::parseAskUserPairs`);
   `share/mod.rs::parse_ask_user_pairs` re-parses for HTML export rendering. Magic strings:
   `"[User Cancelled]"` (sent as fallback by `tui/ask_user.rs` and `web/task_registry.rs`,
-  checked in `agent/tools/ask.rs`) and `"Unanswered"` (default in `tui/ask_user.rs`, rendered
+  checked in `agent/tools/question.rs`) and `"Unanswered"` (default in `tui/ask_user.rs`, rendered
   by `tui/history_cell/ask_user_render.rs`). A single question also routes through the Confirm tab — no
   auto-submit on selection (TUI and Web aligned).
 - **Permission defaults**: In-workdir operations allowed by default via builtin lowest-priority
@@ -284,22 +284,22 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   pointing directly at one appends a `read` request (`permission::is_env_gated_file_name`).
   Tools issue
   `external_directory` requests when a path resolves outside the workdir — read/edit/write/
-  grep/glob path args plus the bash `workdir` param. `[permission.xxx]` config rules
+  grep/glob path args plus the shell `workdir` param. `[permission.xxx]` config rules
   (session > config > builtin defaults) override the defaults; `read` in-workdir requests use
   absolute-path patterns so `.env` rules match via `wildcard_match` — a `\`→`/`-normalized,
   Windows case-insensitive, `*`/`?`-wildcard matcher with literal special chars.
-  `Tool::extract_permission` returns an **ordered** `Vec<PermissionRequest>`: bash puts its
-  command-rule request first, external-directory second, so `[permission.bash] "rm *"="deny"`
+  `Tool::extract_permission` returns an **ordered** `Vec<PermissionRequest>`: shell puts its
+  command-rule request first, external-directory second, so `[permission.shell] "rm *"="deny"`
   short-circuits before the out-of-workdir ask
   (`agent/agent/dispatch.rs::evaluate_permission_requests`
    evaluates in order; Deny short-circuits, first Ask dialogs, `Once` only covers that one
    request). Session "always" rules persist under the **request's** permission category, not the
    tool category.
-- **Bash static analysis** (`permission/bash_scan.rs`): best-effort gating, NOT a sandbox —
+- **Shell static analysis** (`permission/shell_scan.rs`): best-effort gating, NOT a sandbox —
   documented in tool prompts and help skill. Splits sub-commands on top-level `&&`/`;`/`|`/`&`
   (quote-aware); classifies first tokens as FileOps (`cat`, `rm`, `ln`, `tee`, ... — all
   args scanned as path candidates) / Executor (`sudo`, `sh`, `python`, `eval`, `xargs`, ... —
-  sets `force_ask` on the bash request so builtin `* allow` doesn't waive it; only explicit
+  sets `force_ask` on the shell request so builtin `* allow` doesn't waive it; only explicit
   session/config rules do) / Other (redirection targets still checked). `cd X` tracks a
   per-command resolution base (updated per segment) instead of gating cd itself: the hit
   lands on the segment that actually touches files, so `cd .. && ls` is silent while
@@ -315,7 +315,7 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   restored from the last *active* (non-compacted) user row's `runtime_meta.plan_mode` on
   session rebuild via `storage::stored_plan_mode` — compaction wipes the rows carrying
   the reminders from the rebuilt context, so nothing needs countermanding after it).
-  `bash` stays available but is hard-gated by `permission/bash_readonly.rs::is_read_only_bash_command`
+  `shell` stays available but is hard-gated by `permission/shell_readonly.rs::is_read_only_shell_command`
   (fail-closed allowlist: git read subcommands, ls/cat/grep, PowerShell Get-* cmdlets; redirects
   `>`/`>>` and unknown commands are denied) — rejected in the agent permission check without a dialog.
 - **CRLF handling**: `EditTool` normalizes line endings to match the file's style before

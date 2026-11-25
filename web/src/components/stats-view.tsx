@@ -1,6 +1,9 @@
-// 用量统计面板：汇总卡片 + 每日条形图 + 按模型聚合 + 最近请求明细。
-// 数据来自 GET /api/stats（messages 表中带 usage 的 assistant 行 = 一次 LLM 请求）。
-// 配色走计量三色令牌（--meter-in/cache/out），与应用灰阶体系区分数据编码与界面骨架。
+// Usage stats panel: summary cards + daily bar chart + per-model aggregation
+// + recent request details.
+// Data comes from GET /api/stats (assistant rows with usage in the messages
+// table = one LLM request).
+// Colors use the meter tri-color tokens (--meter-in/cache/out) to encode data,
+// distinguishing it from the app's grayscale UI skeleton.
 import { useEffect, useState } from "react";
 import {
   ArrowDownToLine,
@@ -32,7 +35,7 @@ function StatCard({
   value: string;
   sub?: string;
   tone: "in" | "cache" | "out" | "default";
-  /** 0-100 的比例指示条（缓存卡片 = 命中率） */
+  /** 0-100 proportional gauge bar (cache card = hit rate) */
   gauge?: number;
 }) {
   const textClass =
@@ -81,10 +84,11 @@ function StatCard({
   );
 }
 
-/** 图表模式：全部(三段堆叠) / 输入(命中+未命中) / 输出 */
+/** Chart mode: all (3-segment stacked) / input (hit + miss) / output */
 type ChartMode = "all" | "in" | "out";
 
-/** 每日条形图，按当前模式选定度量取窗口内最大值定标；tooltip 直接给出缓存命中率 */
+/** Daily bar chart, scaled by the max value of the mode-selected metric within
+ * the window; the tooltip shows the cache hit rate directly */
 function DailyChart({
   daily,
   mode,
@@ -158,7 +162,7 @@ function DailyChart({
   );
 }
 
-/** 图例小色块 */
+/** Legend swatch */
 function LegendKey({ className, label }: { className: string; label: string }) {
   return (
     <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
@@ -182,16 +186,16 @@ export function StatsView() {
 
   const close = () => setView("chat");
 
-  // 图表展示模式与最近请求折叠（本地 UI 状态，不进全局 store）
+  // Chart display mode and recent-request collapse (local UI state, not in the global store)
   const [chartMode, setChartMode] = useState<ChartMode>("all");
   const [showAllRecent, setShowAllRecent] = useState(false);
   const RECENT_CAP = 10;
 
-  // Esc 返回聊天
+  // Esc returns to chat
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
+      if (anyDialogOpen()) return; // Global dialogs take priority: Esc only closes dialogs, not the view
       close();
     };
     window.addEventListener("keydown", onKey);
@@ -205,12 +209,12 @@ export function StatsView() {
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
-      {/* 顶栏 */}
+      {/* Top bar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/40 px-4 py-3">
         <BarChart3 className="size-4.5 shrink-0 text-primary" />
         <h2 className="mr-2 text-[15px] font-semibold">用量统计</h2>
 
-        {/* 项目筛选 */}
+        {/* Project filter */}
         <select
           value={statsFilter}
           className="ml-auto cursor-pointer rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-primary/30"
@@ -225,7 +229,7 @@ export function StatsView() {
           ))}
         </select>
 
-        {/* 时间窗口 */}
+        {/* Time window */}
         <div className="flex overflow-hidden rounded-lg border border-border text-xs">
           {(
             [
@@ -268,7 +272,7 @@ export function StatsView() {
         </button>
       </div>
 
-      {/* 主体 */}
+      {/* Main body */}
       <div className="hlx-input-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
         {statsError ? (
           <div className="flex flex-col items-center gap-2.5 py-12 text-center">
@@ -288,7 +292,7 @@ export function StatsView() {
           </div>
         ) : (
           <>
-            {/* 汇总卡片 */}
+            {/* Summary cards */}
             <div className="flex flex-wrap gap-3">
               <StatCard
                 icon={<Repeat className="size-4" />}
@@ -321,11 +325,11 @@ export function StatsView() {
               />
             </div>
 
-            {/* 每日条形图 */}
+            {/* Daily bar chart */}
             <section className="rounded-xl border border-border/60 bg-card p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold">每日用量</h3>
-                {/* 模式切换：全部 / 只看输入 / 只看输出 */}
+                {/* Mode switch: all / input only / output only */}
                 <div className="flex overflow-hidden rounded-lg border border-border text-xs">
                   {(
                     [
@@ -350,7 +354,7 @@ export function StatsView() {
                   ))}
                 </div>
               </div>
-              {/* 图例随模式自适应 */}
+              {/* Legend adapts to the mode */}
               <div className="mb-2.5 flex items-center gap-3">
                 {chartMode !== "out" && (
                   <>
@@ -367,7 +371,7 @@ export function StatsView() {
             </section>
 
             <div className="grid gap-4 lg:grid-cols-2">
-              {/* 按模型 */}
+              {/* Per model */}
               <section className="rounded-xl border border-border/60 bg-card p-4">
                 <h3 className="mb-3 text-sm font-semibold">按模型</h3>
                 {stats.by_model.length === 0 ? (
@@ -406,7 +410,7 @@ export function StatsView() {
                 )}
               </section>
 
-              {/* 最近请求（默认收起，上限展示防止页面过长） */}
+              {/* Recent requests (collapsed by default, capped to keep the page short) */}
               <section className="rounded-xl border border-border/60 bg-card p-4">
                 <h3 className="mb-3 text-sm font-semibold">
                   最近请求

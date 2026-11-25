@@ -15,18 +15,18 @@ use crate::agent::models::{
     SharedMessage,
 };
 
-/// 不支持视觉的模型收到图片时看到的占位文本
-/// （让模型自行转告用户，避免直接触发 Provider 400）。
+/// Placeholder text shown to models without vision when they receive an
+/// image (the model relays it to the user, avoiding a direct Provider 400).
 fn unsupported_image_text() -> String {
     "ERROR: Cannot read the attached image (this model does not support vision input). Inform the user.".to_string()
 }
 
-/// 空的/损坏的图片附件占位文本。
+/// Placeholder text for empty/corrupted image attachments.
 fn corrupted_image_text() -> String {
     "ERROR: Image file is empty or corrupted. Inform the user.".to_string()
 }
 
-/// 构造图片 content part（data URL）。
+/// Builds an image content part (data URL).
 pub(super) fn image_content_part(att: &Attachment) -> ChatCompletionRequestUserMessageContentPart {
     ChatCompletionRequestUserMessageContentPart::ImageUrl(
         ChatCompletionRequestMessageContentPartImage {
@@ -38,21 +38,25 @@ pub(super) fn image_content_part(att: &Attachment) -> ChatCompletionRequestUserM
     )
 }
 
-/// 兜底文本：附件全部无来源标识时使用。
+/// Fallback text: used when no attachment carries a source identifier.
 ///
-/// 注意：合成 user 消息的提示文本仅供模型理解图片来源；展示层识别
-/// 一律走 runtime_meta 的 `{"format":"tool-attachment"}` 标记，不做文本匹配。
+/// Note: the synthetic user message's hint text only helps the model
+/// understand where images come from; the display layer identifies
+/// synthesized messages solely via the runtime_meta
+/// `{"format":"tool-attachment"}` marker, never by text matching.
 pub(super) const TOOL_ATTACHMENT_NOTE_FALLBACK: &str = "[Attached image(s) from tool result]";
 
-/// 生成合成 user 消息的提示文本，帮助模型把图片关联到来源工具：
-/// - 单工具：`[Image(s) attached from tool "read": a.png, b.png]`
-/// - 多工具：`[Image(s) attached from tool results: read -> a.png; web_fetch -> b.png]`
-/// - 无 name 的项以计数占位；全部无名退回兜底常量。
+/// Builds the hint text of the synthetic user message, helping the model
+/// associate images with their source tools:
+/// - Single tool: `[Image(s) attached from tool "read": a.png, b.png]`
+/// - Multiple tools: `[Image(s) attached from tool results: read -> a.png; web_fetch -> b.png]`
+/// - Unnamed items are counted as placeholders; when all are unnamed, falls
+///   back to the fallback constant.
 pub(super) fn tool_attachment_note(items: &[(String, Attachment)]) -> String {
     if items.iter().all(|(_, a)| a.name.is_none()) {
         return TOOL_ATTACHMENT_NOTE_FALLBACK.to_string();
     }
-    // 按工具分组（保持首次出现顺序）
+    // Group by tool (preserving first-occurrence order)
     let mut groups: Vec<(&str, Vec<&Attachment>)> = Vec::new();
     for (tool, att) in items {
         match groups.iter_mut().find(|(t, _)| *t == tool.as_str()) {
@@ -87,8 +91,9 @@ pub(super) fn tool_attachment_note(items: &[(String, Attachment)]) -> String {
     }
 }
 
-/// 构造用户消息：无附件 → 纯文本；有附件 → Text + ImageUrl content parts
-/// （文本为空时跳过 Text part——部分 OpenAI 兼容端点拒绝空 text part）。
+/// Builds a user message: no attachments → plain text; with attachments →
+/// Text + ImageUrl content parts (the Text part is skipped when the text
+/// is empty — some OpenAI-compatible endpoints reject empty text parts).
 pub fn build_user_message(
     text: &str,
     attachments: &[Attachment],
@@ -150,9 +155,12 @@ pub(super) fn append_text_to_last_user_message(messages: &mut [SharedMessage], t
     }
 }
 
-/// 按模型视觉能力清洗消息列表中用户消息的图片附件。
-/// - 支持视觉：仅校验空 base64，替换为损坏提示文本
-/// - 不支持视觉：所有图片替换为「不支持」提示文本（在克隆上操作，不污染存储历史）
+/// Sanitizes image attachments in user messages according to the model's
+/// vision capability.
+/// - Vision supported: only checks for empty base64, replaced with the
+///   corrupted-image text
+/// - Vision unsupported: all images replaced with the "unsupported" text
+///   (operates on a clone, never polluting the stored history)
 pub(super) fn sanitize_messages_for_request(
     messages: &[SharedMessage],
     supports_vision: bool,
@@ -169,8 +177,9 @@ pub(super) fn sanitize_messages_for_request(
             if !user_message_needs_vision_fix(msg, supports_vision) {
                 return Arc::clone(msg);
             }
-            // 按引用重建 parts：只克隆文本 part，避免深拷贝即将被丢弃的
-            // base64 载荷（单图可达 ~13MB）
+            // Rebuild parts by reference: clone only text parts, avoiding a
+            // deep copy of the soon-to-be-discarded base64 payload (a single
+            // image can reach ~13MB)
             let CompatibleChatCompletionRequestMessage::User(u) = msg.as_ref() else {
                 return Arc::clone(msg);
             };
@@ -204,7 +213,8 @@ pub(super) fn sanitize_messages_for_request(
         .collect()
 }
 
-/// 用户消息是否含有需要降级的图片 part（模型不支持视觉，或 base64 载荷为空）。
+/// Whether a user message contains an image part that needs downgrading
+/// (model without vision, or an empty base64 payload).
 fn user_message_needs_vision_fix(msg: &SharedMessage, supports_vision: bool) -> bool {
     matches!(
         msg.as_ref(),
@@ -218,13 +228,14 @@ fn user_message_needs_vision_fix(msg: &SharedMessage, supports_vision: bool) -> 
     )
 }
 
-/// 判断 data URL 的 base64 载荷是否为空。
+/// Whether the base64 payload of a data URL is empty.
 fn empty_image_payload(data_url: &str) -> bool {
     crate::agent::media::data_url_payload_is_empty(data_url)
 }
 
-/// 压缩场景的媒体降级：图片 part 替换为占位文本（摘要无需图片本体，
-/// 且压缩请求不应携带大体量 base64）。
+/// Media downgrade for compaction: image parts are replaced with placeholder
+/// text (the summary needs no image data, and the compaction request should
+/// not carry bulky base64 payloads).
 pub(super) fn strip_media_for_compaction(msg: &SharedMessage) -> SharedMessage {
     let CompatibleChatCompletionRequestMessage::User(u) = msg.as_ref() else {
         return Arc::clone(msg);
@@ -238,7 +249,8 @@ pub(super) fn strip_media_for_compaction(msg: &SharedMessage) -> SharedMessage {
     {
         return Arc::clone(msg);
     }
-    // 按引用重建 parts：只克隆文本 part，不搬运即将被丢弃的 base64 载荷
+    // Rebuild parts by reference: clone only text parts, without carrying
+    // over the soon-to-be-discarded base64 payload
     let new_parts: Vec<_> = parts
         .iter()
         .map(|p| match p {
@@ -261,7 +273,7 @@ pub(super) fn strip_media_for_compaction(msg: &SharedMessage) -> SharedMessage {
     )
 }
 
-/// 提取 tool call 的 id（Function / Custom 两种形态统一处理）。
+/// Extracts a tool call's id (handles Function and Custom forms alike).
 fn tool_call_id(tc: &ChatCompletionMessageToolCalls) -> &str {
     match tc {
         ChatCompletionMessageToolCalls::Function(f) => &f.id,
@@ -269,22 +281,31 @@ fn tool_call_id(tc: &ChatCompletionMessageToolCalls) -> &str {
     }
 }
 
-/// 请求前兜底：保证每个带 tool_calls 的 assistant 消息，其全部 tool_call_id
-/// 都有对应的 tool result。悬挂的 tool_calls（会话中断/断连/崩溃遗留的脏数据，
-/// 经 DB 重建进入上下文）会触发严格 Provider 400
-///（"tool_calls must be followed by tool messages"）。
+/// Pre-request fallback: guarantees that every tool_call_id of each
+/// assistant message carrying tool_calls has a matching tool result.
+/// Dangling tool_calls (dirty data left behind by interrupted sessions,
+/// disconnects, or crashes, re-entering the context via DB rebuild) trigger
+/// a strict Provider 400
+/// ("tool_calls must be followed by tool messages").
 ///
-/// 仅在克隆列表上修补，不污染存储：
-/// - 悬挂 id 在该 assistant 紧随的连续 tool results 之后补一条
-///   "Tool execution aborted"（维持 tool 消息紧跟 assistant 且不打乱真实结果的顺序）
-/// - 空 id 的残缺条目（流式中途取消的半成品，永远无法被应答）直接剔除
+/// Patched only on a cloned list, never polluting storage:
+/// - Dangling ids get a "Tool execution aborted" stub inserted after the
+///   consecutive tool results immediately following that assistant
+///   (tool messages stay adjacent to the assistant and real results keep
+///   their order)
+/// - Entries with empty ids (half-written artifacts cancelled mid-stream,
+///   which can never be answered) are dropped outright
 ///
-/// 干净上下文走快路径：一次反向判别扫描后原样返回（O(n) 枚举判别，零分配），
-/// 相对每轮请求固有的序列化 + 网络 + 推理耗时，开销在噪声以下。
+/// Clean contexts take the fast path: a single reverse scan returns the
+/// list as-is (O(n) discriminant checks, zero allocations); the overhead is
+/// noise compared to the serialization + network + inference time inherent
+/// to every request.
 pub(super) fn ensure_tool_call_parity(messages: &[SharedMessage]) -> Vec<SharedMessage> {
-    // ── 预检：反向扫描，位置 i 的 assistant 悬挂 id = 其后无任何 Tool 消息应答的 id ──
-    // （"已应答"按全局 id 集合判：id 由 Provider 生成、跨 assistant 视为唯一，
-    //   不做逐 assistant 区间配对——换取单次 O(n) 扫描的简单性）
+    // ── Pre-check: reverse scan; a dangling id at assistant position i =
+    // one never answered by any Tool message after it ──
+    // ("answered" is judged against the global id set: ids are generated by
+    // the Provider and unique across assistants, skipping per-assistant
+    // interval pairing in exchange for the simplicity of a single O(n) scan)
     let mut answered_later: HashSet<String> = HashSet::new();
     let mut dangling: Vec<Vec<String>> = vec![Vec::new(); messages.len()];
     let mut has_empty_id: Vec<bool> = vec![false; messages.len()];
@@ -315,9 +336,12 @@ pub(super) fn ensure_tool_call_parity(messages: &[SharedMessage]) -> Vec<SharedM
         return messages.to_vec();
     }
 
-    // ── 重建：剔除空 id 条目；在每个 assistant 的连续 tool results 之后插入 stub ──
-    // （stub 不能直接追加到列表末尾：悬挂 assistant 之后可能还有后续轮次的消息，
-    //   tool 消息必须紧跟带 tool_calls 的 assistant 才满足 OpenAI 交替约束）
+    // ── Rebuild: drop empty-id entries; insert stubs after each assistant's
+    // consecutive tool results ──
+    // (stubs cannot simply be appended to the end of the list: later turns
+    // may follow the dangling assistant, and tool messages must come right
+    // after the assistant carrying tool_calls to satisfy OpenAI's
+    // alternation constraint)
     let mut out: Vec<SharedMessage> = Vec::with_capacity(messages.len() + 4);
     let mut i = 0usize;
     while i < messages.len() {
@@ -342,7 +366,8 @@ pub(super) fn ensure_tool_call_parity(messages: &[SharedMessage]) -> Vec<SharedM
                 out.push(Arc::clone(&messages[i]));
             }
             i += 1;
-            // 紧随的连续 tool results 原样保留，stub 插在其后
+            // Consecutive tool results right after it stay as-is; stubs are
+            // inserted after them
             while i < messages.len()
                 && matches!(
                     messages[i].as_ref(),

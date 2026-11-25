@@ -1,7 +1,7 @@
-//! hailux 库入口：模块声明与启动编排。
+//! hailux library entry: module declarations and startup orchestration.
 //!
-//! `main.rs` 是薄 CLI 入口，所有可复用逻辑都在这里，
-//! 供二进制入口与 `tests/` 集成测试共同使用。
+//! `main.rs` is a thin CLI entry point; all reusable logic lives here,
+//! shared by the binary entry and the `tests/` integration tests.
 
 pub mod agent;
 pub mod config;
@@ -18,19 +18,19 @@ pub mod updater;
 pub mod web;
 
 use crate::agent::subagent;
-use crate::agent::{Agent, BashTool, EditTool};
-use crate::agent::{AskTool, GrepTool, ReadTool, TodoWriteTool};
+use crate::agent::{Agent, EditTool, ShellTool};
 use crate::agent::{CommandRegistry, SkillTool, skill};
 use crate::agent::{GlobTool, WebFetchTool, WriteTool};
+use crate::agent::{GrepTool, QuestionTool, ReadTool, TodoWriteTool};
 use color_eyre::Result;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tui::App;
 
-// ── 存储启动检查 ─────────────────────────────────────────────
+// ── Storage startup check ─────────────────────────────────────────────
 
-/// 数据库迁移失败时拒绝启动，并提示用户重建
+/// Refuses startup when DB migration fails and prompts the user to rebuild
 pub fn ensure_storage_ok(storage: &storage::ChatStorage) -> Result<()> {
     if let Some(err) = storage.migration_error() {
         color_eyre::eyre::bail!(
@@ -40,7 +40,7 @@ pub fn ensure_storage_ok(storage: &storage::ChatStorage) -> Result<()> {
     Ok(())
 }
 
-/// `hailux --rebuild-db`：备份旧数据库文件后重建数据库
+/// `hailux --rebuild-db`: backs up the old DB file, then rebuilds the database
 pub async fn rebuild_database() -> Result<()> {
     let mut storage = storage::ChatStorage::new().await?;
     let backup_path = storage.rebuild().await?;
@@ -51,12 +51,12 @@ pub async fn rebuild_database() -> Result<()> {
     Ok(())
 }
 
-// ── Agent 构建 ───────────────────────────────────────────────
+// ── Agent construction ───────────────────────────────────────────────
 
 fn build_permission_rules(cfg: &config::Config) -> Vec<crate::permission::PermissionRule> {
     use crate::permission::rules_from_config_table;
     let mut rules = Vec::new();
-    rules.extend(rules_from_config_table("bash", &cfg.permission.bash));
+    rules.extend(rules_from_config_table("shell", &cfg.permission.shell));
     rules.extend(rules_from_config_table("read", &cfg.permission.read));
     rules.extend(rules_from_config_table("edit", &cfg.permission.edit));
     rules.extend(rules_from_config_table("write", &cfg.permission.write));
@@ -65,8 +65,8 @@ fn build_permission_rules(cfg: &config::Config) -> Vec<crate::permission::Permis
         "external_directory",
         &cfg.permission.external_directory,
     ));
-    // 注意：不要在此追加「默认 Ask」规则。evaluate 无匹配时本就默认 Ask，
-    // 追加默认规则反而会因其在末尾优先匹配，遮蔽用户配置的具体 deny/allow 规则。
+    // Note: do not append a "default Ask" rule here: `evaluate` already defaults to Ask on no
+    // match; an appended rule would win by being last and shadow specific deny/allow rules.
     rules
 }
 
@@ -98,7 +98,7 @@ pub fn build_agent_base(
     );
     #[cfg(windows)]
     crate::agent::prewarm_shell_description();
-    agent.register_tool(Box::new(BashTool));
+    agent.register_tool(Box::new(ShellTool));
     agent.register_tool(Box::new(ReadTool));
     agent.register_tool(Box::new(EditTool));
     agent.register_tool(Box::new(WriteTool));
@@ -138,7 +138,7 @@ pub fn build_agent(
     let (mut agent, skills, command_registry, mut subagents) =
         build_agent_base(resolved, cfg, work_dir)?;
 
-    agent.register_tool(Box::new(AskTool::new(agent.event_hub().clone())));
+    agent.register_tool(Box::new(QuestionTool::new(agent.event_hub().clone())));
 
     if !subagents.iter().any(|s| s.name == "general") {
         subagents.insert(0, subagent::builtin_general_subagent(&cfg.main_model));
@@ -147,7 +147,7 @@ pub fn build_agent(
     Ok((agent, skills, command_registry, subagents))
 }
 
-// ── 非交互模式 ───────────────────────────────────────────────
+// ── Non-interactive mode ───────────────────────────────────────────────
 
 pub async fn run_non_interactive(
     message: Option<String>,
@@ -184,16 +184,18 @@ pub async fn run_non_interactive(
     let (event_tx, mut event_rx) = agent::event::create_core_event_channel();
 
     let (mut agent, skills, _, mut subagents) = build_agent_base(&resolved, &cfg, work_dir)?;
-    // TaskTool 转发事件流入本请求通道（此处无人消费，静默忽略）
+    // TaskTool forwards events into this request's channel (no consumer here; ignore silently)
     agent.event_hub().set(event_tx.clone());
     if yolo {
-        // --yolo：跳过所有权限确认
+        // --yolo: skip all permission confirmations
         agent
             .permission()
             .set_mode(crate::permission::PermissionMode::Yolo);
     } else {
-        // 非交互模式没有 TUI 弹窗应答权限请求：需要询问的操作直接拒绝。
-        // 工作目录内的读取本就不触发权限检查（默认放行），不受影响。
+        // Non-interactive mode has no TUI dialog to answer permission prompts:
+        // operations that need asking are denied outright. Reads inside the
+        // work dir never trigger permission checks (allowed by default) and
+        // are unaffected.
         agent.permission().set_auto_deny(true);
     }
     if !subagents.iter().any(|s| s.name == "general") {
@@ -201,7 +203,7 @@ pub async fn run_non_interactive(
     }
 
     if !no_tools {
-        // MCP 连接（并行，静默）
+        // MCP connections (parallel, silent)
         let mcp_cfg = mcp::config::load()?;
         let connections = if !mcp_cfg.mcp_servers.is_empty() {
             mcp::connect_mcp_servers(&mcp_cfg).await
@@ -231,7 +233,7 @@ pub async fn run_non_interactive(
             }
         }
 
-        // 注册 TaskTool
+        // Register TaskTool
         let storage = storage::ChatStorage::new().await?;
         ensure_storage_ok(&storage)?;
         let current_session_shared = Arc::new(Mutex::new(None::<String>));
@@ -275,7 +277,7 @@ pub async fn run_non_interactive(
                 delay_ms,
                 reason,
             } => {
-                // stdout 无法回退已打印的部分输出，仅在 stderr 提示重试
+                // stdout cannot retract already-printed output; note the retry on stderr only
                 eprintln!(
                     "\n[请求失败，{delay_ms}ms 后进行第 {attempt}/{max_retries} 次重试：{reason}]"
                 );
@@ -329,7 +331,7 @@ pub async fn run_non_interactive(
     Ok(())
 }
 
-// ── TUI 启动（共享逻辑） ─────────────────────────────────────
+// ── TUI launch (shared logic) ─────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn launch_tui(
@@ -348,7 +350,7 @@ async fn launch_tui(
     resume: bool,
 ) -> Result<()> {
     let (event_tx, _event_rx) = &events;
-    // 领域事件 → AppEvent::Core 转发，进入终端事件循环
+    // Forward domain events → AppEvent::Core into the terminal event loop
     tui::event::spawn_core_forwarder(core_rx, event_tx.clone());
 
     let mcp_cfg = mcp::config::load()?;
@@ -389,7 +391,7 @@ async fn launch_tui(
     Ok(())
 }
 
-// ── TUI 模式 ─────────────────────────────────────────────────
+// ── TUI mode ─────────────────────────────────────────────────
 
 pub async fn run_tui(
     cfg: config::Config,
@@ -401,10 +403,10 @@ pub async fn run_tui(
     let (event_tx, event_rx) = tui::event::create_event_channel();
     let (core_tx, core_rx) = agent::event::create_core_event_channel();
     let (mut agent, skills, command_registry, subagents) = build_agent(&resolved, &cfg, work_dir)?;
-    // TUI 通道与进程同生命周期，绑定一次即可
+    // The TUI channel lives as long as the process, so binding once is enough
     agent.event_hub().set(core_tx.clone());
     if yolo {
-        // --yolo：跳过所有权限确认
+        // --yolo: skip all permission confirmations
         agent
             .permission()
             .set_mode(crate::permission::PermissionMode::Yolo);
@@ -412,7 +414,7 @@ pub async fn run_tui(
 
     let storage = storage::ChatStorage::new().await?;
     ensure_storage_ok(&storage)?;
-    // 绑定存储到 PermissionManager，启用 session 级 DB 持久化
+    // Bind storage to the PermissionManager to enable session-level DB persistence
     agent.permission().with_storage_ref(storage.clone());
 
     let shared = tui::app::AppSharedState {
@@ -453,7 +455,7 @@ pub async fn run_tui(
     .await
 }
 
-/// 首次运行（未配置）的 TUI 启动
+/// TUI launch for a first run (unconfigured)
 pub async fn run_tui_setup(work_dir: &Path) -> Result<()> {
     let cfg = config::Config::default();
     let resolved = config::ResolvedModel {
@@ -469,11 +471,11 @@ pub async fn run_tui_setup(work_dir: &Path) -> Result<()> {
     let (event_tx, event_rx) = tui::event::create_event_channel();
     let (core_tx, core_rx) = agent::event::create_core_event_channel();
 
-    // NeedsSetup 时 build_agent 会因空 model_id 产生问题，
-    // 所以只用 build_agent_base + AskTool
+    // During NeedsSetup, build_agent would break on the empty model_id,
+    // so only build_agent_base + QuestionTool is used here.
     let (mut agent, skills, command_registry, mut subagents) =
         build_agent_base(&resolved, &cfg, work_dir)?;
-    agent.register_tool(Box::new(AskTool::new(agent.event_hub().clone())));
+    agent.register_tool(Box::new(QuestionTool::new(agent.event_hub().clone())));
     agent.event_hub().set(core_tx.clone());
 
     if !subagents.iter().any(|s| s.name == "general") {
@@ -488,7 +490,7 @@ pub async fn run_tui_setup(work_dir: &Path) -> Result<()> {
         config: Arc::new(Mutex::new(cfg.clone())),
     };
 
-    // 不注册 TaskTool（model 未配置）
+    // Do not register TaskTool (model not configured)
 
     launch_tui(
         agent,
@@ -508,7 +510,7 @@ pub async fn run_tui_setup(work_dir: &Path) -> Result<()> {
     .await
 }
 
-// ── 工作目录解析 ─────────────────────────────────────────────
+// ── Work dir resolution ─────────────────────────────────────────────
 
 pub fn resolve_work_dir(cli_work_dir: Option<&str>) -> Result<PathBuf> {
     if let Some(d) = cli_work_dir {

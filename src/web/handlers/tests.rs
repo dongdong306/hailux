@@ -36,13 +36,13 @@ fn rejects_location_outside_skills_roots() {
     let root_level = tmp.join(".hailux").join("skills").join("SKILL.md");
     std::fs::write(&root_level, "---\nname: root\n---\nbody").unwrap();
 
-    // skills 根下的 SKILL.md 合法
+    // SKILL.md under the skills root is valid
     assert!(validate_skill_location(&skill_file.display().to_string(), &tmp).is_some());
-    // 项目根下（非 skills 子目录）的同名文件非法
+    // A same-named file under the project root (not inside the skills subdirectory) is invalid
     assert!(validate_skill_location(&outside.display().to_string(), &tmp).is_none());
-    // skills 根直属的 SKILL.md 非法（parent == 根目录，删除会抹掉整个 skills 根）
+    // SKILL.md sitting directly in the skills root is invalid (parent == root; deletion would wipe the whole skills root)
     assert!(validate_skill_location(&root_level.display().to_string(), &tmp).is_none());
-    // 不存在的路径非法
+    // A nonexistent path is invalid
     assert!(
         validate_skill_location(
             &tmp.join("nope").join("SKILL.md").display().to_string(),

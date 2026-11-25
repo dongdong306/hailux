@@ -1,19 +1,21 @@
-//! 粘贴事件流诊断（Windows Ctrl+V 图片粘贴问题定位）。
+//! Paste event stream diagnostics (locating the Windows Ctrl+V image paste issue).
 //!
-//! 运行：`cargo run --example paste_probe`
+//! Run: `cargo run --example paste_probe`
 //!
-//! 步骤：
-//! 1. 复制一张截图（Win+Shift+S）
-//! 2. 在本程序中按 Ctrl+V，观察打印的事件流
-//! 3. 再粘贴一段纯文本对照
-//! 4. Ctrl+C 退出
+//! Steps:
+//! 1. Copy a screenshot (Win+Shift+S)
+//! 2. Press Ctrl+V in this program and watch the printed event stream
+//! 3. Then paste some plain text for comparison
+//! 4. Ctrl+C to exit
 //!
-//! 判读：
-//! - 出现 `Paste(len=0)` → crossterm 收到空 paste（正常协议路径）
-//! - 出现一串 `Esc` / `[` / `2` / `0` / `0` / `~` 按键 → WT 发了标记但被
-//!   conhost 拆成字符按键（hailux 的标记配对应能接住，若仍不行是时序问题）
-//! - 按下 Ctrl+V 后毫无输出 → WT/ConPTY 未投递任何事件
-//!   （ConPTY 可能吞掉了 ?2004h，WT 没有启用 bracketed paste 包装）
+//! Interpreting the output:
+//! - `Paste(len=0)` appears → crossterm received an empty paste (normal
+//!   protocol path)
+//! - A run of `Esc` / `[` / `2` / `0` / `0` / `~` key presses → WT sent the
+//!   marker but conhost split it into char key presses (hailux's marker
+//!   pairing should catch it; if it still fails, it is a timing issue)
+//! - Nothing printed at all after Ctrl+V → WT/ConPTY delivered no events
+//!   (ConPTY may have swallowed ?2004h; WT did not enable bracketed paste)
 
 use std::time::Instant;
 

@@ -1,6 +1,7 @@
-// 弹窗：权限确认 / 提问 / 工作目录选择
-// （技能与 MCP 管理为内联视图，见 skills-manager.tsx / mcp-manager.tsx；
-//   模型提供商管理见 settings-view.tsx；模型 + 推理等级切换见 model-effort-menu.tsx）
+// Dialogs: permission confirmation / ask user / workdir picker
+// (Skills and MCP management are inline views, see skills-manager.tsx /
+//   mcp-manager.tsx; model provider management is in settings-view.tsx;
+//   model + reasoning-effort switching is in model-effort-menu.tsx)
 import { useEffect, useState, type ReactNode } from "react";
 import { Check, Folder, ShieldAlert } from "lucide-react";
 import { useApp } from "../store/app-store";
@@ -14,10 +15,12 @@ export function Overlay({
   closeOnMask = true,
 }: {
   children: ReactNode;
-  /** 不传则 Esc/点击遮罩不可关闭（权限确认等必须作答的弹窗） */
+  /** If omitted, the dialog cannot be closed via Esc or mask click
+   *  (dialogs that require an answer, e.g. permission confirmation) */
   onClose?: () => void;
   wide?: boolean;
-  /** false 时 Esc 仍可关闭，但点击遮罩不关闭（防误触丢弃已填内容） */
+  /** When false, Esc still closes but clicking the mask does not
+   *  (prevents accidentally discarding entered content) */
   closeOnMask?: boolean;
 }) {
   useEffect(() => {
@@ -47,7 +50,7 @@ export function Overlay({
   );
 }
 
-/* 按钮样式（shadcn 风） */
+/* Button styles (shadcn style) */
 const btnPrimary =
   "cursor-pointer rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-30";
 const btnOutline =
@@ -55,7 +58,7 @@ const btnOutline =
 const btnDangerOutline =
   "cursor-pointer rounded-lg border border-destructive/50 px-3 py-1.5 text-sm text-destructive transition-colors hover:bg-destructive/10";
 
-/* ── 权限确认 ───────────────────────────────────────────────── */
+/* ── Permission confirmation ───────────────────────────────────────────────── */
 export function PermissionDialog() {
   const permission = useApp((s) => s.permission);
   const reply = useApp((s) => s.replyPermission);
@@ -104,10 +107,11 @@ export function PermissionDialog() {
   );
 }
 
-/* ── 用户提问 ───────────────────────────────────────────────── */
+/* ── Ask user ───────────────────────────────────────────────── */
 
-/** 提交格式对齐 TUI AskUserState::submit_and_finish：
- *  "question"="answer" 逗号连接，`\` 与 `"` 均转义（先 `\` 后 `"`），未答为 Unanswered */
+/** Submit format aligned with the TUI AskUserState::submit_and_finish:
+ *  "question"="answer" joined by commas; `\` and `"` are both escaped
+ *  (`\` first, then `"`); unanswered items become Unanswered */
 function formatAskReply(questions: QuestionInfo[], answers: (string | null)[]) {
   const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return questions
@@ -122,7 +126,8 @@ export function AskUserDialog() {
   const askUser = useApp((s) => s.askUser);
   const reply = useApp((s) => s.replyAsk);
   const count = askUser?.questions.length ?? 0;
-  // 父组件以 key={requestId} 挂载：新一轮提问整体重挂载，初始状态即本轮题目
+  // Parent mounts this with key={requestId}: each new round of questions remounts
+  // the whole component, so the initial state is this round's questions
   const [answers, setAnswers] = useState<(string | null)[]>(() =>
     Array.from({ length: count }, () => null),
   );
@@ -133,7 +138,7 @@ export function AskUserDialog() {
   if (!askUser) return null;
   const questions = askUser.questions;
 
-  /** 答案是自定义文字（非选项、非空） */
+  /** The answer is custom text (not an option, not empty) */
   const isCustomAnswer = (qi: number) => {
     const v = answers[qi]?.trim();
     return !!v && !questions[qi]!.options.some((o) => o.label === v);
@@ -142,7 +147,8 @@ export function AskUserDialog() {
   const submit = () => reply(formatAskReply(questions, answers));
 
   const pick = (qi: number, label: string) => {
-    // 选中选项与自定义回答互斥：设置答案并收起自定义输入
+    // Selecting an option is mutually exclusive with a custom answer:
+    // set the answer and collapse the custom input
     setAnswers((prev) => {
       const next = [...prev];
       next[qi] = label;
@@ -155,7 +161,7 @@ export function AskUserDialog() {
     });
   };
 
-  /** 展开/收起自定义输入；展开时撤销已选的选项（与选项互斥） */
+  /** Expands/collapses the custom input; expanding clears a selected option (mutual exclusion) */
   const toggleCustom = (qi: number) => {
     const opening = !customOpen[qi];
     setCustomOpen((prev) => {
@@ -172,7 +178,7 @@ export function AskUserDialog() {
     }
   };
 
-  /** 自定义输入变化：实时写入答案 */
+  /** Custom input change: write the answer in real time */
   const setCustomAnswer = (qi: number, value: string) => {
     setAnswers((prev) => {
       const next = [...prev];
@@ -181,7 +187,7 @@ export function AskUserDialog() {
     });
   };
 
-  /** 单选圈：选项/自定义共用 */
+  /** Radio circle: shared by options and custom answers */
   const Circle = ({ filled }: { filled: boolean }) => (
     <span
       className={cn(
@@ -230,7 +236,7 @@ export function AskUserDialog() {
                 </label>
               ))}
 
-              {/* 自定义输入（对齐 TUI 固定附加的 "Type your own answer"） */}
+              {/* Custom input (matches the TUI's always-appended "Type your own answer") */}
               <button
                 type="button"
                 className={cn(
@@ -295,7 +301,7 @@ export function AskUserDialog() {
   );
 }
 
-/* ── 工作目录选择 ───────────────────────────────────────────── */
+/* ── Workdir picker ───────────────────────────────────────────── */
 function DirButton({
   dir,
   active,
@@ -385,7 +391,7 @@ export function WorkdirPicker() {
         </>
       )}
 
-      {/* 手动输入 */}
+      {/* Manual input */}
       <p className="mb-1.5 text-xs font-medium text-muted-foreground">输入路径</p>
       <div className="flex gap-2">
         <input

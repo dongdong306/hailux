@@ -1,4 +1,5 @@
-// Markdown 渲染：assistant-ui 官方 base 样式（浅色代码块 + 语言头 + 复制）
+// Markdown rendering: assistant-ui official base styling (light code blocks +
+// language header + copy)
 import { useState } from "react";
 import {
   type CodeHeaderProps,

@@ -3,7 +3,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=web/dist");
-    // 仅 web feature 开启时要求前端产物；纯 TUI 构建零 Node 依赖
+    // Frontend artifacts are only required with the web feature; pure TUI builds need no Node
     if std::env::var("CARGO_FEATURE_WEB").is_err() {
         return;
     }
@@ -11,7 +11,7 @@ fn main() {
     let index = dist.join("index.html");
     if !index.exists() || is_placeholder(index.to_str().unwrap_or_default()) {
         println!("cargo:warning=Building frontend (web/dist)...");
-        // Windows 上 npm 是 npm.cmd，CreateProcess 不解析 .cmd 扩展名，需显式指定
+        // On Windows npm is npm.cmd; CreateProcess does not resolve .cmd, so name it explicitly
         let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
         let ok = Command::new(npm)
             .args(["run", "build"])
@@ -20,7 +20,7 @@ fn main() {
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
-            // 前端缺失时 rust-embed 会在编译期报错，此处直接 panic 给出可操作的提示
+            // Missing frontend → rust-embed fails at compile time; panic here with actionable help
             panic!(
                 "Failed to build frontend automatically. \
                  Run `cd web && npm install && npm run build` manually, \
@@ -30,7 +30,7 @@ fn main() {
     }
 }
 
-/// 占位 index.html 检测（首次 clone 后 rust-embed 需要至少一个文件才能编译）
+/// Placeholder index.html detection (rust-embed needs at least one file after a fresh clone)
 fn is_placeholder(path: &str) -> bool {
     std::fs::read_to_string(path)
         .map(|c| c.contains("前端尚未构建"))

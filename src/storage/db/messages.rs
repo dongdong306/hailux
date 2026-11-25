@@ -30,8 +30,9 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 执行给定 SQL 查询并将结果映射为 `StoredMessage` 列表。
-    /// `sql` 必须按顺序选择以下列且只接收一个 `session_id` 绑定参数：
+    /// Runs the given SQL query and maps the result rows into a
+    /// `StoredMessage` list. `sql` must select the following columns in
+    /// order and take exactly one bound parameter, `session_id`:
     /// `id, role, content, tool_calls, tool_call_id, reasoning_content,
     ///  prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, mentions`
     async fn query_messages(
@@ -112,7 +113,7 @@ impl ChatStorage {
         .await
     }
 
-    /// 加载活跃上下文消息（仅 compacted=0），按 id 升序。
+    /// Load active context messages (compacted=0 only), ordered by id ASC.
     pub async fn load_active_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.query_messages(
             "SELECT id, role, content, tool_calls, tool_call_id, reasoning_content, prompt_tokens, completion_tokens, cached_tokens, model, runtime_meta, think_ms, compacted, attachments, mentions FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
@@ -121,7 +122,7 @@ impl ChatStorage {
         .await
     }
 
-    /// 返回 session 中未压缩消息的数量。
+    /// Count the uncompacted messages in a session.
     pub async fn count_active_messages(&self, session_id: &str) -> Result<i64> {
         let row: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM messages WHERE session_id = ? AND compacted = 0")
@@ -131,7 +132,7 @@ impl ChatStorage {
         Ok(row.0)
     }
 
-    /// 标记 session 的所有未压缩消息为已压缩。
+    /// Mark all uncompacted messages in a session as compacted.
     pub async fn mark_messages_compacted(&self, session_id: &str) -> Result<()> {
         sqlx::query("UPDATE messages SET compacted = 1 WHERE session_id = ? AND compacted = 0")
             .bind(session_id)
@@ -140,7 +141,7 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 设置压缩摘要。
+    /// Set the compaction summary.
     pub async fn set_compact_summary(&self, session_id: &str, summary: &str) -> Result<()> {
         sqlx::query("UPDATE sessions SET compact_summary = ? WHERE id = ?")
             .bind(summary)
@@ -150,7 +151,7 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 获取压缩摘要。
+    /// Get the compaction summary.
     pub async fn get_compact_summary(&self, session_id: &str) -> Result<Option<String>> {
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT compact_summary FROM sessions WHERE id = ?")
@@ -234,13 +235,16 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 修复 orphaned tool calls：扫描最后一条活跃（compacted = 0）assistant 消息的
-    /// tool_calls，为缺少 tool result 的 tool_call_id 补一条 "Tool execution aborted" 消息。
+    /// Repair orphaned tool calls: scan the tool_calls of the last active
+    /// (compacted = 0) assistant message and append a "Tool execution
+    /// aborted" message for each tool_call_id missing its tool result.
     pub async fn repair_orphaned_tool_calls(&self, session_id: &str) -> Result<()> {
-        // 轻量查询：只取角色与 tool call 字段，避免把正文与附件 base64
-        // 大字段全量拉入内存（本修复只需扫描尾部 tool call 配对）。
-        // 只看活跃区间：compacted 区间的悬挂永远不会进入重建上下文，
-        // 若为其补 stub 反而会造出孤儿 tool 消息（无前置 assistant → 同样 400）
+        // Lightweight query: fetch only the role and tool call fields instead
+        // of pulling full content and base64 attachment blobs into memory
+        // (this repair only needs to scan trailing tool call pairing).
+        // Active range only: dangling calls in the compacted range never
+        // re-enter the rebuilt context, and stubbing them would create
+        // orphan tool messages (no preceding assistant → same 400)
         let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT role, tool_calls, tool_call_id FROM messages WHERE session_id = ? AND compacted = 0 ORDER BY id ASC",
         )
@@ -248,7 +252,7 @@ impl ChatStorage {
         .fetch_all(&self.pool)
         .await?;
 
-        // 反向找到最后一条带 tool_calls 的 assistant 消息
+        // Scan backwards for the last assistant message carrying tool_calls
         let Some(assistant_idx) = rows
             .iter()
             .enumerate()
@@ -263,7 +267,7 @@ impl ChatStorage {
         let tool_calls: Vec<serde_json::Value> =
             serde_json::from_str(tool_calls_json).unwrap_or_default();
 
-        // 提取所有 tool_call id
+        // Extract all tool_call ids
         let tool_call_ids: Vec<String> = tool_calls
             .iter()
             .filter_map(|tc| tc.get("id").and_then(|v| v.as_str()).map(String::from))
@@ -273,7 +277,7 @@ impl ChatStorage {
             return Ok(());
         }
 
-        // 收集该 assistant 消息之后已有的 tool result 的 tool_call_id
+        // Collect tool_call_ids of tool results already present after it
         let existing_ids: std::collections::HashSet<&str> = rows[assistant_idx..]
             .iter()
             .filter_map(|(role, _, tool_call_id)| {
@@ -285,7 +289,7 @@ impl ChatStorage {
             })
             .collect();
 
-        // 为缺失的 tool_call_id 补 tool result
+        // Append a tool result for each missing tool_call_id
         for id in &tool_call_ids {
             if !existing_ids.contains(id.as_str()) {
                 let stored = StoredMessage {

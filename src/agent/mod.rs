@@ -1,4 +1,4 @@
-/// 遍历目录时始终排除的目录名（不依赖 .gitignore 机制）
+/// Directory names always excluded when walking directories (not relying on the .gitignore mechanism)
 pub const IGNORED_DIRS: &[&str] = &[".git"];
 
 #[allow(clippy::module_inception)]
@@ -26,6 +26,6 @@ pub use subagent::{SubagentConfig, TaskTool};
 #[cfg(windows)]
 pub use tools::prewarm_shell_description;
 pub use tools::{
-    AskTool, BashTool, EditTool, GlobTool, GrepTool, ReadTool, TodoWriteTool, Tool,
+    EditTool, GlobTool, GrepTool, QuestionTool, ReadTool, ShellTool, TodoWriteTool, Tool,
     ToolExecuteError, WebFetchTool, WriteTool,
 };

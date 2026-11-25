@@ -1,9 +1,11 @@
-// 会话历史加载：StoredMessage[] → ChatItem[] 渲染模型 + token 统计
+// Session history loading: StoredMessage[] → ChatItem[] render model + token
+// stats
 import type { ChatAttachment, ChatMention, StoredMessage } from "../runtime/types";
 import { compactMarkerText, isToolAttachmentMessage } from "./shared-events";
 import type { ChatItem } from "./types";
 
-/** switchSession 的重建结果：消息渲染模型 + “本会话累计”token 口径 */
+/** Rebuild result of switchSession: message render model + "this session
+ *  cumulative" token accounting */
 export interface RebuiltSession {
   items: ChatItem[];
   promptTokens: number;
@@ -13,18 +15,23 @@ export interface RebuiltSession {
   contextCompletionTokens: number;
 }
 
-/** 由历史消息重建渲染模型（对齐 TUI load_session_messages）：
- *  压缩摘要不展示，仅在 compacted/未 compacted 边界插入完成分隔线。 */
+/** Rebuild the render model from history messages (aligned with TUI
+ *  load_session_messages):
+ *  the compaction summary is not shown; a done divider is inserted only at
+ *  the compacted/non-compacted boundary. */
 export function rebuildSessionItems(
   messages: StoredMessage[],
   hasSummary: boolean,
 ): RebuiltSession {
   const items: ChatItem[] = [];
   let compactMarkerInserted = false;
-  // Tool 消息的 runtime_meta 仅识别新格式 diff 展示数据（format: "diff"）；
-  // 旧格式 {old,new} 存量数据显示 result 文本，计时 JSON（无 format 字段）同样排除
+  // Tool messages' runtime_meta only recognizes new-format diff display data
+  // (format: "diff");
+  // legacy {old,new} data falls back to the result text; timing JSON (no
+  // format field) is excluded too
   const toolResults = new Map<string, { result: string; display?: string }>();
-  // 本轮最近一次请求的 usage 快照（随 done 行落进消息底部操作栏）
+  // Usage snapshot of the turn's latest request (lands with the done row in
+  // the message's bottom action bar)
   let turnCtx: { prompt: number; completion: number } | null = null;
   for (const msg of messages) {
     if (msg.role === "Tool" && msg.tool_call_id) {
@@ -36,7 +43,7 @@ export function rebuildSessionItems(
             display = msg.runtime_meta;
           }
         } catch {
-          // 非 JSON，不作为 diff 展示
+          // Not JSON, not used as diff display
         }
       }
       toolResults.set(msg.tool_call_id, { result: msg.content, display });
@@ -55,11 +62,13 @@ export function rebuildSessionItems(
       compactMarkerInserted = true;
     }
     if (msg.role === "User") {
-      // 工具图片合成消息（read 读取图片等）：runtime_meta 带
-      // {"format":"tool-attachment"} 标记，仅供模型上下文，跳过渲染。
-      // 无标记的旧数据保持原样展示（容忍）。
+      // Synthetic tool-image messages (read fetching images etc.): runtime_meta
+      // carries the {"format":"tool-attachment"} marker, context only for the
+      // model, skip rendering.
+      // Legacy data without the marker is displayed as-is (tolerated).
       if (isToolAttachmentMessage(msg)) {
-        // 合成消息位于 assistant 回合中间，不重置 turnCtx（usage 归属不受影响）
+        // The synthetic message sits mid-assistant-turn, do not reset turnCtx
+        // (usage attribution unaffected)
         continue;
       }
       let images: ChatAttachment[] = [];
@@ -67,7 +76,7 @@ export function rebuildSessionItems(
         try {
           images = JSON.parse(msg.attachments) as ChatAttachment[];
         } catch {
-          // 忽略解析失败
+          // Ignore parse failures
         }
       }
       let mentions: ChatMention[] | undefined;
@@ -76,7 +85,7 @@ export function rebuildSessionItems(
           const parsed = JSON.parse(msg.mentions) as ChatMention[];
           if (Array.isArray(parsed) && parsed.length > 0) mentions = parsed;
         } catch {
-          // 忽略解析失败
+          // Ignore parse failures
         }
       }
       items.push({ kind: "user", text: msg.content, images, mentions });
@@ -119,10 +128,10 @@ export function rebuildSessionItems(
             }
           }
         } catch {
-          // 忽略解析失败
+          // Ignore parse failures
         }
       }
-      // runtime_meta（含本轮耗时/模型/状态）→ 完成标记行
+      // runtime_meta (this turn's duration/model/status) → done marker row
       if (msg.runtime_meta) {
         try {
           const meta = JSON.parse(msg.runtime_meta) as {
@@ -141,12 +150,13 @@ export function rebuildSessionItems(
             });
           }
         } catch {
-          // 忽略解析失败
+          // Ignore parse failures
         }
       }
     }
   }
-  // 全部消息已压缩（压缩后未再对话）：对齐 TUI，末尾补插分隔线
+  // All messages compacted (no chat after compaction): aligned with the TUI,
+  // append the divider at the end
   if (
     !compactMarkerInserted &&
     hasSummary &&
@@ -158,8 +168,10 @@ export function rebuildSessionItems(
       text: compactMarkerText(messages.length),
     });
   }
-  // 恢复“本会话累计”口径：全部带 usage 的 assistant 行求和（顶栏展示）
-  // 同时记录最后一条带 usage 的行，作为上下文占用的近似（最后请求的输入+输出）
+  // Restore the "this session cumulative" accounting: sum all assistant rows
+  // carrying usage (top bar display);
+  // also record the last usage-carrying row as the context usage estimate
+  // (last request's input+output)
   let promptTokens = 0;
   let completionTokens = 0;
   let cachedTokens = 0;

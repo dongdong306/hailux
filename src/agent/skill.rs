@@ -13,19 +13,19 @@ const CONFIG_DIR_NAME: &str = ".hailux";
 const SKILL_DIR_NAME: &str = "skills";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
-/// 已发现的 skill 信息
+/// Information about a discovered skill
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
-    /// SKILL.md 的绝对路径
+    /// Absolute path to SKILL.md
     pub location: PathBuf,
-    /// SKILL.md 去除 frontmatter 后的正文
+    /// SKILL.md body content with the frontmatter removed
     pub content: String,
 }
 
 impl SkillInfo {
-    /// 该 skill 所在的目录（base directory），即 SKILL.md 的父目录
+    /// The directory containing this skill (base directory), i.e. the parent of SKILL.md
     pub fn base_dir(&self) -> PathBuf {
         self.location
             .parent()
@@ -34,20 +34,21 @@ impl SkillInfo {
     }
 }
 
-/// 解析 SKILL.md 的 YAML frontmatter，提取 name 与 description。
+/// Parses the YAML frontmatter of SKILL.md, extracting name and description.
 ///
-/// 期望格式：
+/// Expected format:
 /// ```text
 /// ---
 /// name: my-skill
-/// description: 描述何时使用此 skill
+/// description: when to use this skill
 /// ---
-/// [正文内容]
+/// [body content]
 /// ```
 ///
-/// 为避免引入 serde_yaml 依赖，这里采用轻量手写解析：
-/// 仅识别首尾 `---` 分隔块，逐行匹配 `name:` 与 `description:`。
-/// 返回 (name, description, content)；解析失败时返回 None。
+/// To avoid a serde_yaml dependency, a lightweight hand-written parser is used:
+/// only the leading/trailing `---` delimiter block is recognized, matching `name:`
+/// and `description:` line by line.
+/// Returns (name, description, content); returns None when parsing fails.
 fn parse_skill_md(raw: &str) -> Option<(String, String, String)> {
     let (frontmatter, content) = utils::split_frontmatter(raw)?;
 
@@ -73,7 +74,7 @@ fn parse_skill_md(raw: &str) -> Option<(String, String, String)> {
     Some((name, description, content.to_string()))
 }
 
-/// 加载单个 SKILL.md 文件为 SkillInfo
+/// Loads a single SKILL.md file into a SkillInfo
 fn load_skill(path: &Path) -> Result<Option<SkillInfo>> {
     let raw = std::fs::read_to_string(path)
         .wrap_err_with(|| format!("Failed to read skill file: {}", path.display()))?;
@@ -97,7 +98,7 @@ fn load_skill(path: &Path) -> Result<Option<SkillInfo>> {
     }))
 }
 
-/// 在指定根目录下递归扫描 `**/SKILL.md`
+/// Recursively scans for `**/SKILL.md` under the given root directory
 fn scan_root(root: &Path, out: &mut Vec<SkillInfo>) -> Result<()> {
     if !root.is_dir() {
         return Ok(());
@@ -134,8 +135,9 @@ fn scan_root(root: &Path, out: &mut Vec<SkillInfo>) -> Result<()> {
     Ok(())
 }
 
-/// 发现所有可用 skill：全局 `~/.hailux/skills/` 与项目级 `<work_dir>/.hailux/skills/`。
-/// 同名时项目级覆盖全局。
+/// Discovers all available skills: global `~/.hailux/skills/` and project-level
+/// `<work_dir>/.hailux/skills/`.
+/// Project-level entries override globals on name collisions.
 pub fn discover_skills(work_dir: &Path) -> Result<Vec<SkillInfo>> {
     let mut all: Vec<SkillInfo> = Vec::new();
 
@@ -159,8 +161,8 @@ pub fn discover_skills(work_dir: &Path) -> Result<Vec<SkillInfo>> {
     Ok(result)
 }
 
-/// 生成注入 system prompt 的 `<available_skills>` 块。
-/// 仅包含 name + description（渐进式加载：不暴露正文）。
+/// Generates the `<available_skills>` block for injection into the system prompt.
+/// Contains only name + description (progressive loading: the body is not exposed).
 pub fn format_available_skills(skills: &[SkillInfo]) -> String {
     let described: Vec<&SkillInfo> = skills
         .iter()
@@ -185,13 +187,15 @@ pub fn format_available_skills(skills: &[SkillInfo]) -> String {
     out
 }
 
-/// 内置 help skill 的内容，首次初始化时写入 `~/.hailux/skills/help/SKILL.md`。
+/// Content of the builtin help skill, written to `~/.hailux/skills/help/SKILL.md`
+/// on first initialization.
 const DEFAULT_HELP_SKILL_MD: &str = crate::prompts::DEFAULT_HELP_SKILL_MD;
 
-/// 首次初始化时将内置 help skill 写入 `~/.hailux/skills/help/SKILL.md`。
+/// Writes the builtin help skill to `~/.hailux/skills/help/SKILL.md` on first initialization.
 ///
-/// 仅在文件不存在时写入；已存在则跳过（不覆盖用户修改或删除）。
-/// 失败时静默忽略，不阻断启动。
+/// Writes only when the file does not exist; skips when it does
+/// (never overwrites user edits or deletions).
+/// Failures are silently ignored and do not block startup.
 pub fn ensure_default_skills() {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -211,10 +215,11 @@ pub fn ensure_default_skills() {
     let _ = std::fs::write(&skill_file, DEFAULT_HELP_SKILL_MD);
 }
 
-/// 文件树最多展示的文件数
+/// Maximum number of files shown in the file tree
 const MAX_SKILL_FILE_LIST: usize = 15;
 
-/// 递归收集 `dir` 下所有文件（相对 `root` 的路径），跳过根级 SKILL.md（其正文已注入）。
+/// Recursively collects all files under `dir` (paths relative to `root`), skipping the
+/// root-level SKILL.md (its body is already injected).
 fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -235,8 +240,9 @@ fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// 从有序文件列表中选出至多 `max` 个文件，优先保证每个子目录（任意深度）至少展示一个文件
-/// （目录按深度、路径排序，浅层优先），剩余名额按（深度, 路径）补齐。
+/// Selects at most `max` files from an ordered file list, first ensuring every subdirectory
+/// (at any depth) shows at least one file (directories sorted by depth then path, shallower first);
+/// remaining slots are filled in by (depth, path).
 fn select_skill_files(files: &[PathBuf], max: usize) -> Vec<PathBuf> {
     if files.len() <= max {
         return files.to_vec();
@@ -289,8 +295,8 @@ fn render_file_tree(node: &FileTreeNode, indent: usize, out: &mut String) {
     }
 }
 
-/// 构建 skill 目录下其他文件（不含 SKILL.md）的树状列表。
-/// 返回 (树状文本, 未展示的文件数)；目录为空时返回空文本。
+/// Builds a tree listing of the other files in the skill directory (SKILL.md excluded).
+/// Returns (tree text, number of hidden files); returns empty text when the directory is empty.
 fn format_skill_file_tree(base_dir: &Path) -> (String, usize) {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_relative_files(base_dir, base_dir, &mut files);
@@ -319,12 +325,13 @@ fn format_skill_file_tree(base_dir: &Path) -> (String, usize) {
     (tree, total - selected.len())
 }
 
-/// Skill 工具：渐进式加载命名的 skill 定义。
+/// Skill tool: progressively loads a named skill definition.
 ///
-/// LLM 在 system prompt 中看到 `<available_skills>` 摘要后，调用本工具传入 `name`，
-/// 即可获取该 skill 的完整指令正文、所在目录的绝对路径，以及目录内其他文件的
-/// 树状列表（最多 15 个文件，优先保证每个子目录至少展示一个）；
-/// skill 引用的同目录脚本/文件则由 LLM 随后用 `read`/`glob` 工具按需加载。
+/// After seeing the `<available_skills>` summary in the system prompt, the LLM calls this
+/// tool with a `name` to obtain the skill's full instruction body, the absolute path of its
+/// directory, and a tree listing of the other files in that directory (at most 15 files,
+/// with at least one shown per subdirectory); scripts/files referenced by the skill in the
+/// same directory are then loaded on demand by the LLM via the `read`/`glob` tools.
 pub struct SkillTool {
     skills: Vec<SkillInfo>,
 }
@@ -539,9 +546,9 @@ mod tests {
         assert!(out.contains("scripts/\n  deploy.ps1"));
         assert!(out.contains("reference/\n  api/\n    endpoints.md"));
         assert!(out.contains("README.md"));
-        // SKILL.md 本身不重复列出
+        // SKILL.md itself is not listed again
         assert!(!out.contains("SKILL.md\n"));
-        // 附属信息在 <skill_context> 内：正文先于 context 块结束
+        // Auxiliary info sits inside <skill_context>: the body ends before the context block
         let content_end = out.find("</skill_content>").unwrap();
         let ctx_start = out.find("<skill_context>").unwrap();
         assert!(content_end < ctx_start);
@@ -556,7 +563,8 @@ mod tests {
 
     #[test]
     fn select_skill_files_caps_and_covers_each_dir() {
-        // 13 个根级文件 + 3 个子目录文件 = 16 > 15：截断时每个子目录仍至少展示一个
+        // 13 root-level files + 3 subdirectory files = 16 > 15: when truncated, each
+        // subdirectory still shows at least one
         let files: Vec<PathBuf> = vec![
             pb(&["a.md"]),
             pb(&["b.md"]),
@@ -579,7 +587,7 @@ mod tests {
         assert_eq!(selected.len(), MAX_SKILL_FILE_LIST);
         assert!(selected.contains(&pb(&["docs", "x.md"])));
         assert!(selected.contains(&pb(&["scripts", "run.sh"])));
-        // 结果保持有序
+        // Result stays sorted
         let mut sorted = selected.clone();
         sorted.sort();
         assert_eq!(selected, sorted);
@@ -604,9 +612,9 @@ mod tests {
 
         let (tree, hidden) = format_skill_file_tree(&tmp);
         let lines: Vec<&str> = tree.lines().collect();
-        assert_eq!(lines.len(), MAX_SKILL_FILE_LIST + 1); // 15 个文件 + docs/ 目录行
+        assert_eq!(lines.len(), MAX_SKILL_FILE_LIST + 1); // 15 files + docs/ directory line
         assert!(lines.contains(&"docs/"));
-        assert_eq!(hidden, 3); // 18 个文件 - 15 个展示
+        assert_eq!(hidden, 3); // 18 files - 15 shown
 
         fs::remove_dir_all(&tmp).ok();
     }

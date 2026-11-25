@@ -4,25 +4,25 @@ use std::hash::Hash;
 
 use super::{HistoryCell, ToolCategory, extract_xml_tag, finish_hasher, truncate_str, wrap_text};
 
-/// Task 工具调用（tasks 数组；单/多 subagent 并发批次）
+/// Task tool call (tasks array; single/multi subagent concurrent batch)
 pub(crate) struct TaskToolCell {
     pub arguments: String,
     pub result: Option<String>,
-    /// 运行期间 subagent 的实时步骤（按事件顺序；含来源 agent）
+    /// Live steps emitted by subagents while running (event order; includes source agent)
     pub steps: Vec<TaskStep>,
 }
 
-/// 单条 subagent 步骤
+/// A single subagent step
 pub(crate) struct TaskStep {
     pub agent: Option<String>,
     pub summary: String,
     pub is_done: bool,
-    /// 来源任务在 tasks 数组中的下标（同名并发时区分实例）
+    /// Index of the source task in the tasks array (disambiguates instances with duplicate names)
     pub index: Option<usize>,
 }
 
-/// 从 task 参数中解析任务列表 → (subagent 名, 展示摘要)
-/// 摘要优先 description，缺省时截取 prompt
+/// Parse the task list from the task arguments into (subagent name, display summary)
+/// Summary prefers description, falling back to a truncated prompt
 pub(super) fn task_items_from_args(args: &serde_json::Value) -> Vec<(String, String)> {
     let Some(arr) = args["tasks"].as_array() else {
         return vec![("subagent".to_string(), String::new())];
@@ -42,7 +42,7 @@ pub(super) fn task_items_from_args(args: &serde_json::Value) -> Vec<(String, Str
         .collect()
 }
 
-/// task 工具结果中单个任务的产出
+/// Output of a single task within the task tool result
 pub(super) struct TaskOutcome {
     pub(super) ok: bool,
     pub(super) first_line: String,
@@ -56,8 +56,8 @@ fn extract_attr(tag: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// 逐行解析结果中的 `<task subagent=".." state="..">` 块，
-/// 兼容有无 `<tasks>` 包裹两种格式；返回顺序与 tasks 数组一致
+/// Parse the `<task subagent=".." state="..">` blocks in the result line by line,
+/// tolerating results with or without a `<tasks>` wrapper; order matches the tasks array
 pub(super) fn task_outcomes_from_result(result: &str) -> Vec<TaskOutcome> {
     let mut out: Vec<TaskOutcome> = Vec::new();
     let mut current: Option<TaskOutcome> = None;
@@ -145,7 +145,8 @@ impl HistoryCell for TaskToolCell {
         };
 
         if items.len() <= 1 {
-            // 单任务：动词 + agent 名；运行中实时显示最近步骤，完成显示结果预览
+            // Single task: verb + agent name; show recent steps live while running,
+            // result preview once done
             let (name, preview) = items
                 .into_iter()
                 .next()
@@ -161,7 +162,7 @@ impl HistoryCell for TaskToolCell {
                 Span::styled(name, Style::default().fg(accent)),
             ]));
             if !has_result {
-                // 运行中：最近 3 条步骤（✓ 完成 / ● 进行中）
+                // Running: last 3 steps (✓ done / ● in progress)
                 let recent_count = self.steps.len().min(3);
                 if recent_count == 0 {
                     if !preview.is_empty() {
@@ -194,7 +195,7 @@ impl HistoryCell for TaskToolCell {
                 }
             }
         } else {
-            // 多任务：标题计数 + 逐任务实时动作行
+            // Multiple tasks: title count + per-task live action lines
             lines.push(Line::from(vec![
                 bullet,
                 Span::raw(" "),
@@ -228,8 +229,9 @@ impl HistoryCell for TaskToolCell {
                         o.first_line.clone()
                     }
                     None => {
-                        // 运行中：该任务最近一条动作（优先按下标匹配，
-                        // 同名 subagent 并发时名称无法区分实例）
+                        // Running: latest action for this task (match by index first;
+                        // names cannot disambiguate instances when same-name
+                        // subagents run concurrently)
                         let action = self
                             .steps
                             .iter()
@@ -267,7 +269,7 @@ impl HistoryCell for TaskToolCell {
             return lines;
         }
 
-        // 单任务结果摘要（3 行预览 + 折叠计数）
+        // Single-task result summary (3-line preview + collapsed count)
         if let Some(ref result) = self.result {
             let inner =
                 extract_xml_tag(result, "task_result").unwrap_or_else(|| result.to_string());

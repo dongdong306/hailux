@@ -1,7 +1,10 @@
-//! 集成测试：通过库入口（而非二进制）验证公开 API。
+//! Integration tests: verify the public API through the library entry point
+//! (rather than the binary).
 //!
-//! 阶段 0 建立 lib.rs 后，端到端路径（权限评估、命令解析、目录解析）
-//! 才能在这里被外部测试覆盖。LLM 网络交互不在集成测试范围。
+//! Only after lib.rs was introduced in phase 0 could the end-to-end paths
+//! (permission evaluation, command parsing, directory resolution) be covered
+//! by external tests here. LLM network interaction is out of scope for
+//! integration tests.
 
 use hailux::permission::{PermissionAction, PermissionManager, PermissionMode, PermissionRule};
 use hailux::resolve_work_dir;
@@ -13,8 +16,9 @@ fn resolve_work_dir_returns_canonical_cwd() {
         dir.is_absolute(),
         "work dir should be canonicalized to absolute"
     );
-    // Windows 的 canonicalize 会带 \\?\ verbatim 前缀，current_dir 不带；
-    // 比较前统一剥离（与 session::manager 的键归一化规则一致）
+    // On Windows, canonicalize adds a \\?\ verbatim prefix; current_dir does not.
+    // Strip it on both sides before comparing (same normalization rule as the
+    // keys in session::manager)
     fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
         let s = p.to_string_lossy().to_string();
         if let Some(stripped) = s.strip_prefix(r"\\?\") {
@@ -31,7 +35,7 @@ fn resolve_work_dir_returns_canonical_cwd() {
 fn permission_manager_modes_and_rules() {
     let rules = vec![
         PermissionRule {
-            permission: "bash".to_string(),
+            permission: "shell".to_string(),
             pattern: "rm *".to_string(),
             action: PermissionAction::Deny,
         },
@@ -43,13 +47,13 @@ fn permission_manager_modes_and_rules() {
     ];
     let pm = PermissionManager::new(PermissionMode::Normal, rules);
 
-    // Yolo 模式切换
+    // Yolo mode switching
     pm.set_mode(PermissionMode::Yolo);
     assert_eq!(pm.mode(), PermissionMode::Yolo);
     pm.set_mode(PermissionMode::Normal);
     assert_eq!(pm.mode(), PermissionMode::Normal);
 
-    // auto_deny 策略开关（Web 断连兜底 / 非交互模式依赖同一机制）
+    // auto_deny policy switch (web disconnect fallback and non-interactive mode rely on it)
     pm.set_auto_deny(true);
     pm.set_auto_deny(false);
 }

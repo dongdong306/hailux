@@ -186,9 +186,9 @@ pub fn create_core_event_channel() -> (CoreEventTx, CoreEventRx) {
 }
 
 /// Swappable event-channel handle for tools that cannot know their consumer
-/// at construction time (ask_user, subagent forwarding). TUI binds once per
+/// at construction time (question, subagent forwarding). TUI binds once per
 /// process; the web binds per `/api/chat` request. `send` returns false when
-/// unbound/closed — callers handle the fallback (ask_user errors out,
+/// unbound/closed — callers handle the fallback (question errors out,
 /// forwarding drops silently).
 #[derive(Clone, Default)]
 pub struct EventHub {

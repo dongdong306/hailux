@@ -6,9 +6,9 @@ use super::models::{DailyUsage, ModelUsage, ProjectUsage, UsageRecord, UsageSumm
 use super::work_dir_variants;
 
 impl ChatStorage {
-    // ── 用量统计（基于 messages 表的 assistant usage 行）────────
+    // ── Usage stats (assistant usage rows in the messages table) ────────
 
-    /// 统计的时间下限（ISO 本地时间）；days = 0 表示不限。
+    /// Lower time bound for the stats (ISO local time); days = 0 means no limit.
     fn usage_cutoff_iso(days: u32) -> String {
         if days == 0 {
             String::new()
@@ -19,10 +19,13 @@ impl ChatStorage {
         }
     }
 
-    /// 用量统计的公共条件绑定参数（条件片段已内联在各查询的静态 SQL 中，
-    /// 共 5 个占位符：NULL 检查 1 + IN 2 + 空串检查 1 + 日期下限 1）。
-    /// work_dir = None 时首三参绑 NULL（`? IS NULL` 恒真，跳过目录过滤）；
-    /// days = 0 时日期下限绑空串（`? = ''` 恒真，跳过时间过滤）。
+    /// Common bind parameters for the usage-stat conditions (the condition
+    /// fragments are inlined in each query's static SQL; 5 placeholders in
+    /// total: 1 NULL check + 2 IN + 1 empty-string check + 1 date lower
+    /// bound). With work_dir = None the first three params bind NULL
+    /// (`? IS NULL` is always true, skipping the dir filter); with days = 0
+    /// the date lower bound binds an empty string (`? = ''` is always true,
+    /// skipping the time filter).
     fn usage_filter_binds(work_dir: Option<&str>, days: u32) -> [Option<String>; 5] {
         let variants = work_dir.map(work_dir_variants);
         let cutoff = Self::usage_cutoff_iso(days);
@@ -35,7 +38,7 @@ impl ChatStorage {
         ]
     }
 
-    /// 汇总：请求数 / 输入 / 缓存命中 / 输出 token 累计。
+    /// Totals: requests / prompt / cached / completion tokens.
     pub async fn usage_summary(&self, work_dir: Option<&str>, days: u32) -> Result<UsageSummary> {
         let binds = Self::usage_filter_binds(work_dir, days);
         let mut q = sqlx::query_as::<_, (i64, i64, i64, i64)>(
@@ -57,7 +60,7 @@ impl ChatStorage {
         })
     }
 
-    /// 按日聚合（本地时区日期），date 升序。
+    /// Aggregated by day (local timezone date), ordered by date ASC.
     pub async fn usage_daily(&self, work_dir: Option<&str>, days: u32) -> Result<Vec<DailyUsage>> {
         let binds = Self::usage_filter_binds(work_dir, days);
         let mut q = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
@@ -85,7 +88,8 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 按模型聚合（消息级 model，旧行回退 sessions.model），token 降序。
+    /// Aggregated by model (message-level model; old rows fall back to
+    /// sessions.model), ordered by tokens DESC.
     pub async fn usage_by_model(
         &self,
         work_dir: Option<&str>,
@@ -117,7 +121,7 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 按项目聚合（sessions.work_dir），token 降序，最多 limit 条。
+    /// Aggregated by project (sessions.work_dir), tokens DESC, at most limit rows.
     pub async fn usage_by_project(
         &self,
         work_dir: Option<&str>,
@@ -153,7 +157,7 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 最近请求明细（id 降序，limit 条）。
+    /// Recent request details (id DESC, limit rows).
     pub async fn list_recent_usage(
         &self,
         work_dir: Option<&str>,

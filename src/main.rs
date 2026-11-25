@@ -8,27 +8,27 @@ use hailux::{
     updater,
 };
 
-// ── CLI 定义 ─────────────────────────────────────────────────
+// ── CLI definition ─────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "hailux", version, about = "终端 AI 编程助手")]
 struct Cli {
-    /// 设置工作目录
+    /// Set the working directory
     #[arg(short = 'p', long = "path", global = true)]
     work_dir: Option<String>,
-    /// 重建数据库（清空全部历史记录），迁移故障时使用
+    /// Rebuild the database (wipes all history); for migration failures
     #[arg(long = "rebuild-db", global = true)]
     rebuild_db: bool,
-    /// 以 YOLO 模式运行（跳过所有权限确认），对 TUI 和非交互模式均生效
+    /// Run in YOLO mode (skip all permission confirmations), for TUI and non-interactive
     #[arg(long = "yolo", global = true)]
     yolo: bool,
-    /// 启动时自动恢复最近的 session
+    /// Auto-resume the most recent session at startup
     #[arg(short = 'r', long = "resume", global = true)]
     resume: bool,
-    /// 检查并更新到最新版本
+    /// Check for and install the latest version
     #[arg(long = "update", global = true)]
     update: bool,
-    /// 以 Web UI 模式启动（等价于 `hailux web` 子命令，使用默认地址端口）
+    /// Start in Web UI mode (same as the `hailux web` subcommand, default host/port)
     #[arg(long = "web", global = true)]
     web: bool,
     #[command(subcommand)]
@@ -37,27 +37,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 非交互模式：发送单条消息并打印回复
+    /// Non-interactive mode: send a single message and print the reply
     Run {
-        /// 消息内容（省略时从 stdin 读取）
+        /// Message content (read from stdin when omitted)
         message: Option<String>,
-        /// 覆盖配置中的模型，格式：provider/model
+        /// Override the configured model; format: provider/model
         #[arg(short = 'm', long = "model")]
         model: Option<String>,
-        /// 禁用所有工具调用（含 MCP），纯对话模式
+        /// Disable all tool calls (incl. MCP); pure chat mode
         #[arg(long = "no-tools")]
         no_tools: bool,
     },
-    /// 启动 Web UI 服务器（默认仅监听本机回环地址）
+    /// Start the Web UI server (listens on loopback only by default)
     #[cfg(feature = "web")]
     Web {
-        /// 监听地址
+        /// Listen address
         #[arg(long = "host", default_value = "127.0.0.1")]
         host: String,
-        /// 监听端口（默认 18080；显式指定后如被占用将直接报错，不做自动回退）
+        /// Listen port (default 18080; if set explicitly and occupied, error out with no fallback)
         #[arg(long = "port")]
         port: Option<u16>,
-        /// 自动打开浏览器
+        /// Open the browser automatically
         #[arg(long)]
         open: bool,
     },
@@ -67,7 +67,7 @@ enum Commands {
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // Windows: 清理上次更新可能残留的 .old 文件
+    // Windows: clean up .old files possibly left over from the last update
     #[cfg(windows)]
     updater::cleanup_old_binary();
 
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         return updater::run_update().await;
     }
 
-    // --web：默认参数启动 Web UI（详细参数用 `hailux web` 子命令）
+    // --web: start the Web UI with defaults (use the `hailux web` subcommand for options)
     #[cfg(feature = "web")]
     if cli.web && !matches!(cli.command, Some(Commands::Web { .. })) {
         let work_dir = resolve_work_dir(cli.work_dir.as_deref())?;

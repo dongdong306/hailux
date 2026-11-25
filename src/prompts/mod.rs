@@ -14,11 +14,11 @@ pub const COMPACT: &str = include_str!("compact.txt");
 pub const INIT: &str = include_str!("init.txt");
 
 pub mod tools {
-    pub const ASK_USER: &str = include_str!("tools/ask_user.txt");
+    pub const QUESTION: &str = include_str!("tools/question.txt");
     #[cfg(windows)]
-    pub const BASH: &str = include_str!("tools/bash_windows.txt");
+    pub const SHELL: &str = include_str!("tools/shell_windows.txt");
     #[cfg(not(windows))]
-    pub const BASH: &str = include_str!("tools/bash_unix.txt");
+    pub const SHELL: &str = include_str!("tools/shell_unix.txt");
     pub const READ: &str = include_str!("tools/read.txt");
     pub const EDIT: &str = include_str!("tools/edit.txt");
     pub const WRITE: &str = include_str!("tools/write.txt");

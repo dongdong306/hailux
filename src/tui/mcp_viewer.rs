@@ -5,9 +5,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::mcp::{McpServerStatus, SharedMcpBackends, config::config_path_display};
 use crate::tui::model_picker::wrap_input;
 
-/// 渲染 MCP 服务器面板（二级页面，只读列表）。
+/// Renders the MCP servers panel (secondary page, read-only list).
 ///
-/// 显示所有已配置的服务器及其连接状态、工具/资源/提示数量，失败的列出错误原因。
+/// Shows all configured servers with their connection status and tool/resource/prompt
+/// counts; failures list the error reason.
 pub fn render_mcp_viewer(
     area: Rect,
     buf: &mut Buffer,
@@ -101,7 +102,7 @@ pub fn render_mcp_viewer(
         return;
     }
 
-    // 每个服务器条目的高度：名称(1) + 状态行(1) + 工具/错误(1) + 空行(1) = 4
+    // Height of each server entry: name(1) + status line(1) + tools/error(1) + blank(1) = 4
     const ITEM_LINES: usize = 4;
     let visible_items = content_height / ITEM_LINES;
 
@@ -150,14 +151,14 @@ pub fn render_mcp_viewer(
             Color::Reset
         };
 
-        // 状态图标
+        // status icon
         let (icon, icon_color) = if server.connected {
             ("●", Color::Green)
         } else {
             ("✗", Color::Red)
         };
 
-        // 第 1 行：图标 + 名称 + 传输
+        // Line 1: icon + name + transport
         let mut line1 = vec![
             Span::styled(selector, dim_style),
             Span::styled(
@@ -176,7 +177,7 @@ pub fn render_mcp_viewer(
         ));
         lines.push(Line::from(line1));
 
-        // 第 2 行：服务器自报名称 / 版本
+        // Line 2: server-reported name / version
         let detail = if server.connected {
             if server.server_name.is_empty() {
                 "已连接".to_string()
@@ -195,7 +196,7 @@ pub fn render_mcp_viewer(
             ),
         ]));
 
-        // 第 3 行：工具/资源/提示统计 或 错误信息
+        // Line 3: tool/resource/prompt counts or error message
         if server.connected {
             let mut parts = vec![format!("工具: {}", server.tools.len())];
             if server.resource_count > 0 {
@@ -239,7 +240,7 @@ pub fn render_mcp_viewer(
             )]));
         }
 
-        // 第 4 行：空行间距
+        // Line 4: blank spacing line
         lines.push(Line::from(""));
     }
 
@@ -261,9 +262,9 @@ fn render_help(area: Rect, buf: &mut Buffer) {
     Paragraph::new(help_lines).render(area, buf);
 }
 
-/// 渲染单个 MCP 服务器的详情面板。
+/// Renders the detail panel of a single MCP server.
 ///
-/// 展示该服务器的工具、资源、提示词列表。
+/// Shows the server's tool, resource, and prompt lists.
 #[allow(clippy::too_many_arguments)]
 pub fn render_mcp_detail(
     area: Rect,
@@ -313,7 +314,7 @@ pub fn render_mcp_detail(
     let content_height = content_area.height as usize;
     let content_width = content_area.width as usize;
 
-    // 从 mcp_backends 获取工具描述
+    // Fetch tool descriptions from mcp_backends
     let tool_descs: std::collections::HashMap<String, String> = {
         let mut map = std::collections::HashMap::new();
         if let Ok(backends) = mcp_backends.lock()
@@ -327,8 +328,8 @@ pub fn render_mcp_detail(
         map
     };
 
-    // 统一构建条目列表：每个条目有 icon, name, 折行后的描述列表, 颜色
-    // 列表视图中每个条目最多显示 2 行描述（截断）
+    // Build the entry list uniformly: each entry has icon, name, wrapped description lines, color
+    // In the list view each entry shows at most 2 description lines (truncated)
     const MAX_DESC_LINES: usize = 2;
     struct DetailEntry {
         icon: char,
@@ -345,7 +346,7 @@ pub fn render_mcp_detail(
         let (wrapped, _, _) = wrap_input(desc, 0, desc_width);
         if wrapped.len() > MAX_DESC_LINES {
             let mut result: Vec<String> = wrapped.into_iter().take(MAX_DESC_LINES).collect();
-            // 在最后一行末尾加省略号
+            // append an ellipsis at the end of the last line
             let last = result.last_mut().unwrap();
             if !last.is_empty() {
                 last.pop();
@@ -397,22 +398,22 @@ pub fn render_mcp_detail(
         return;
     }
 
-    // 分段：tools / resources / prompts
+    // Sections: tools / resources / prompts
     let tools_end = server.tools.len();
     let resources_end = tools_end + server.resources.len();
 
-    // 每段信息
+    // Info per section
     let sections: &[(usize, usize, &str, Color)] = &[
         (0, tools_end, "工具", Color::Yellow),
         (tools_end, resources_end, "资源", Color::Blue),
         (resources_end, total, "提示词", Color::Magenta),
     ];
 
-    // 计算每个条目占用的行数（1 name + N desc lines）
+    // Compute the number of rows each entry occupies (1 name + N desc lines)
     let entry_height = |e: &DetailEntry| 1 + e.desc_lines.len();
-    let section_header_height = 2; // 标题行 + 空行
+    let section_header_height = 2; // title line + blank line
 
-    // 计算选中项的虚拟行偏移
+    // Compute the virtual row offset of the selected entry
     let selected_virtual_row = {
         let mut row = 0usize;
         for &(start, end, _, _) in sections {
@@ -439,7 +440,7 @@ pub fn render_mcp_detail(
         0
     };
 
-    // 统一渲染所有段
+    // Render all sections uniformly
     let mut current_row = 0usize;
 
     for &(start, end, label, accent) in sections {
@@ -447,7 +448,7 @@ pub fn render_mcp_detail(
             continue;
         }
 
-        // Section 标题行
+        // Section title line
         let title = format!(" {} ({})", label, end - start);
         if current_row >= scroll_offset && current_row < scroll_offset + content_height {
             let title_w = UnicodeWidthStr::width(title.as_str());
@@ -466,7 +467,7 @@ pub fn render_mcp_detail(
         }
         current_row += 1;
 
-        // 空行
+        // blank line
         lines.push(Line::from(""));
         current_row += 1;
 
@@ -492,7 +493,7 @@ pub fn render_mcp_detail(
 
             let selector = if is_selected { "▸ " } else { "  " };
 
-            // 名称行
+            // name line
             if current_row >= scroll_offset && current_row < scroll_offset + content_height {
                 lines.push(Line::from(vec![
                     Span::styled(selector, dim_style),
@@ -505,7 +506,7 @@ pub fn render_mcp_detail(
             }
             current_row += 1;
 
-            // 描述行（可能多行）
+            // description lines (possibly multiple)
             for desc_line in &entry.desc_lines {
                 if current_row >= scroll_offset && current_row < scroll_offset + content_height {
                     lines.push(Line::from(vec![
@@ -521,7 +522,7 @@ pub fn render_mcp_detail(
         }
     }
 
-    // 裁剪 lines 到 content_height
+    // Clip lines to content_height
     let visible_lines: Vec<Line> = lines
         .into_iter()
         .skip(scroll_offset)
@@ -546,7 +547,7 @@ fn render_detail_help(area: Rect, buf: &mut Buffer) {
     Paragraph::new(help_lines).render(area, buf);
 }
 
-/// 渲染单个 MCP 工具/资源/提示词的详情页面。
+/// Renders the detail page of a single MCP tool/resource/prompt.
 #[allow(clippy::too_many_arguments)]
 pub fn render_mcp_item_detail(
     area: Rect,
@@ -565,7 +566,7 @@ pub fn render_mcp_item_detail(
     let tools_end = server.tools.len();
     let resources_end = tools_end + server.resources.len();
 
-    // 确定条目类型和内容
+    // Determine the entry type and content
     let (icon, name, desc, accent, type_label) = if item_index < tools_end {
         let tool_name = &server.tools[item_index];
         let tool_desc = {
@@ -639,7 +640,7 @@ pub fn render_mcp_item_detail(
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // 类型标签行
+    // type label line
     lines.push(Line::from(vec![
         Span::styled(format!("{} ", icon), Style::default().fg(accent)),
         Span::styled(
@@ -648,7 +649,7 @@ pub fn render_mcp_item_detail(
         ),
     ]));
 
-    // 名称行
+    // name line
     lines.push(Line::from(vec![
         Span::styled("名称  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
@@ -661,13 +662,13 @@ pub fn render_mcp_item_detail(
 
     lines.push(Line::from(""));
 
-    // 描述标题
+    // description title
     lines.push(Line::from(Span::styled(
         "描述",
         Style::default().fg(Color::DarkGray),
     )));
 
-    // 描述内容（完整折行）
+    // description content (fully wrapped)
     for line in &wrapped_desc {
         lines.push(Line::from(Span::styled(
             format!(" {}", line),
@@ -675,7 +676,7 @@ pub fn render_mcp_item_detail(
         )));
     }
 
-    // 滚动裁剪
+    // scroll clipping
     let total_lines = lines.len();
     let content_height = content_area.height as usize;
     let max_scroll = total_lines.saturating_sub(content_height);
@@ -689,7 +690,7 @@ pub fn render_mcp_item_detail(
 
     Paragraph::new(visible_lines).render(content_area, buf);
 
-    // 滚动指示器
+    // scroll indicator
     if max_scroll > 0 {
         let indicator = if actual_scroll > 0 && actual_scroll < max_scroll {
             " ↑↓ "
@@ -708,7 +709,7 @@ pub fn render_mcp_item_detail(
         );
     }
 
-    // 帮助文本
+    // help text
     let help_text = if max_scroll > 0 {
         "↑↓ 切换  PgUp/PgDn 翻页  Esc 返回"
     } else {

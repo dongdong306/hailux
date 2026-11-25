@@ -7,24 +7,24 @@ use tokio::sync::oneshot;
 use super::{Tool, ToolExecuteError};
 use crate::agent::event::{CoreEvent, QuestionInfo, QuestionOption};
 
-/// 向用户提出问题并等待回答
-pub struct AskTool {
+/// Asks the user a question and waits for the answer
+pub struct QuestionTool {
     event_hub: crate::agent::event::EventHub,
 }
 
-impl AskTool {
+impl QuestionTool {
     pub fn new(event_hub: crate::agent::event::EventHub) -> Self {
         Self { event_hub }
     }
 }
 
-impl Tool for AskTool {
+impl Tool for QuestionTool {
     fn name(&self) -> &str {
-        "ask_user"
+        "question"
     }
 
     fn description(&self) -> &str {
-        crate::prompts::tools::ASK_USER
+        crate::prompts::tools::QUESTION
     }
 
     fn parameters(&self) -> Value {
@@ -130,10 +130,11 @@ impl Tool for AskTool {
                 response_tx: tx,
             });
             if !delivered {
-                // 通道未绑定或已关闭（如 Web 请求已断开）：
-                // 立即失败，避免 agent 永久挂起等待用户回复
+                // Channel not bound or already closed (e.g. the Web request has
+                // dropped): fail immediately so the agent does not hang forever
+                // waiting for a user reply
                 return Err(ToolExecuteError {
-                    message: "ask_user unavailable: no active event channel".to_string(),
+                    message: "question unavailable: no active event channel".to_string(),
                 });
             }
 

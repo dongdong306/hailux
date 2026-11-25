@@ -1,7 +1,9 @@
-// 聊天区右缘轮次导航（对齐 DeepSeek 网页版）：
-// 每轮用户提问一个刻度，刻度紧凑等距垂直居中；当前轮刻度最长最亮，
-// 相邻刻度逐级收窄；悬停弹出提问缩略列表，弹层垂直对齐悬停刻度并
-// 紧贴刻度左侧，点击跳转到对应提问。
+// Turn navigation on the chat area's right edge (aligned with the DeepSeek
+// web UI): one tick per user question; ticks are compact, evenly spaced, and
+// vertically centered; the active tick is the longest and brightest, with
+// adjacent ticks narrowing progressively; hovering pops up a thumbnail list
+// of questions, vertically aligned with the hovered tick and hugging its
+// left side; clicking jumps to the corresponding question.
 import {
   useCallback,
   useEffect,
@@ -14,16 +16,18 @@ import {
 import { useApp } from "../../store/app-store";
 import { cn } from "../../lib/utils";
 
-/** 用户提问消息的 DOM 标记契约：thread.tsx 设置属性，本组件查询定位。
- *  两处必须经此常量关联，改名失配时导航静默失效 */
+/** DOM marker contract for user question messages: thread.tsx sets the
+ *  attribute, this component queries it for positioning.
+ *  Both sides must go through this constant; a rename mismatch makes
+ *  navigation silently fail */
 export const USER_MSG_ATTR = "data-hlx-user-msg";
 const USER_MSG_SELECTOR = `[${USER_MSG_ATTR}]`;
 
-/** 刻度宽度梯度（距高亮中心的轮数 → 像素宽） */
+/** Tick width gradient (turn distance from the highlighted center → pixel width) */
 const tickWidth = (distance: number): string =>
   distance === 0 ? "w-7" : distance === 1 ? "w-5" : distance === 2 ? "w-4" : "w-3";
 
-/** 跳转时目标提问距视口顶部的余量（px） */
+/** Top-of-viewport margin (px) for the target question when jumping */
 const JUMP_MARGIN = 16;
 
 interface ThreadNavProps {
@@ -32,9 +36,11 @@ interface ThreadNavProps {
 }
 
 export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
-  // 全部提问文本（悬停列表数据源，与 DOM 中的 [data-hlx-user-msg] 一一对应）。
-  // 注意：选择器必须返回稳定引用（zustand v5 默认 Object.is 比较），
-  // 派生数组放进 useMemo，否则每次渲染新数组 → getSnapshot 不稳 → 无限循环
+  // All question texts (data source for the hover list, one-to-one with
+  // [data-hlx-user-msg] in the DOM).
+  // Note: the selector must return a stable reference (zustand v5 compares
+  // with Object.is by default); put the derived array in useMemo, otherwise
+  // every render makes a new array → unstable getSnapshot → infinite loop
   const items = useApp((s) => s.items);
   const questions = useMemo(
     () => items.filter((i) => i.kind === "user").map((i) => (i.text ?? "").trim()),
@@ -44,34 +50,42 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
 
   const [visible, setVisible] = useState(false);
   const [active, setActive] = useState(0);
-  /** 梯度高亮跟随的轮次（刻度或列表行悬停即时切换） */
+  /** Turn the gradient highlight follows (switched instantly on tick or list-row hover) */
   const [hover, setHover] = useState<number | null>(null);
-  /** 锚定刻度中心相对轨道盒的纵坐标（直接测量 DOM，不用公式推算） */
+  /** Y coordinate of the anchor tick's center relative to the rail box
+   *  (measured from the DOM directly, not derived by formula) */
   const [anchorY, setAnchorY] = useState(0);
   const [railH, setRailH] = useState(0);
   const [popupH, setPopupH] = useState(0);
   const popupRef = useRef<HTMLDivElement>(null);
   const railBoxRef = useRef<HTMLDivElement>(null);
   const tickRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  /** 锚定的刻度序号（弹层位置跟它走；仅 ref，渲染不依赖） */
+  /** Anchored tick index (popup position follows it; ref only, unused in render) */
   const anchorIdxRef = useRef(0);
-  /** 点击锁定：true 时高亮固定为所点刻度，不随滚动重算。
-   *  到达跳转目标前：scrollTop 只要朝目标靠近就保持锁定（smooth 动画起点
-   *  离目标很远，不能用“距目标 >8px”判断，否则动画第一帧就误解锁）；
-   *  反向远离目标（用户往回滚）→ 立即解锁。
-   *  到达目标后：再次离开目标（用户继续滚动）→ 解锁恢复自动计算 */
+  /** Click lock: when true, the highlight stays pinned to the clicked tick
+   *  and is not recomputed on scroll.
+   *  Before reaching the jump target: keep the lock as long as scrollTop
+   *  moves toward the target (a smooth scroll starts far from the target, so
+   *  a "distance to target > 8px" test would mis-unlock on the animation's
+   *  first frame);
+   *  moving away from the target (user scrolls back) → unlock immediately.
+   *  After reaching the target: leaving it again (user keeps scrolling) →
+   *  unlock and resume auto computation */
   const lockedRef = useRef(false);
   const jumpTargetRef = useRef(0);
   const arrivedRef = useRef(false);
   const lastScrollTopRef = useRef(0);
 
-  /** 元素顶部相对滚动文档顶部的偏移（含已滚出部分） */
+  /** Element top offset relative to the scrolling document's top (includes
+   *  the already-scrolled-out portion) */
   const docOffset = (vp: HTMLDivElement, el: HTMLElement) =>
     el.getBoundingClientRect().top - vp.getBoundingClientRect().top + vp.scrollTop;
 
-  /** 视口所在轮次：默认按“视口底沿”探针（视口内可见的最新一轮）；
-   *  滚动接近顶部（距顶 <40px）时高亮首轮（首问后的短回答撑不满
-   *  视口、第二问已进入视口的情况） */
+  /** Turn the viewport is in: by default uses a "viewport bottom edge" probe
+   *  (the latest turn visible inside the viewport);
+   *  when scrolled near the top (<40px from the top), highlights the first
+   *  turn (covers the case where the short answer after the first question
+   *  cannot fill the viewport while the second question is already in view) */
   const calcActive = useCallback((vp: HTMLDivElement): number => {
     const els = vp.querySelectorAll<HTMLElement>(USER_MSG_SELECTOR);
     if (els.length === 0) return 0;
@@ -84,7 +98,7 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     return idx;
   }, []);
 
-  /** 可滚动性检测（内容增长 / 新消息 / 卡片展开后调用） */
+  /** Scrollability check (called after content growth / new messages / card expansion) */
   const measure = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp) return;
@@ -101,9 +115,11 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     });
   }, [viewportRef, calcActive, count]);
 
-  // 消息流变化后测量（ResizeObserver 兜底流式增量之外的时机，如首帧）。
-  // count 收缩（切换会话）时清理悬停/锚定/跳转锁定与刻度 refs，
-  // 防止残留旧会话索引（脱离文档的刻度节点会测出垃圾 anchorY）
+  // Measure after the message stream changes (ResizeObserver is the fallback
+  // for moments outside streaming increments, e.g. the first frame).
+  // When count shrinks (session switch), clear hover/anchor/jump lock and the
+  // tick refs to prevent stale old-session indices (detached tick nodes would
+  // measure a garbage anchorY)
   useEffect(() => {
     setHover((h) => (h !== null && h >= count ? null : h));
     if (anchorIdxRef.current >= count) anchorIdxRef.current = Math.max(0, count - 1);
@@ -112,7 +128,8 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     measure();
   }, [count, measure]);
 
-  // 内容高度变化（流式输出 / 新消息 / 工具卡展开折叠）统一由 ResizeObserver 捕获
+  // Content height changes (streaming output / new messages / tool card
+  // expand-collapse) are all captured by the ResizeObserver
   useEffect(() => {
     const content = contentRef.current;
     if (!content) return;
@@ -131,7 +148,8 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     };
   }, [contentRef, measure]);
 
-  // 滚动仅更新活跃轮次（rAF 节流；值不变时 React 自动跳过重渲染）
+  // Scrolling only updates the active turn (rAF-throttled; React skips the
+  // re-render automatically when the value is unchanged)
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
@@ -140,16 +158,20 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
       if (raf) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
-        // 点击跳转锁定期间：smooth 滚动途中 scrollTop 逐步逼近目标，保持锁定；
-        // 一旦明显偏离目标（用户手动滚动，滚轮一格远超阈值）→ 解锁并恢复自动计算
+        // During the click-jump lock: while smooth scrolling, scrollTop
+        // approaches the target step by step, keep the lock;
+        // once clearly deviating from the target (user manual scroll, one
+        // wheel notch far exceeds the threshold) → unlock and resume auto
+        // computation
         if (lockedRef.current) {
           const d = Math.abs(vp.scrollTop - jumpTargetRef.current);
           const prevD = Math.abs(lastScrollTopRef.current - jumpTargetRef.current);
           if (d <= 8) {
-            // 到达目标：保持锁定，等待用户后续滚动
+            // Target reached: keep the lock, wait for the user's next scroll
             arrivedRef.current = true;
           } else if (arrivedRef.current || d > prevD + 0.5) {
-            // 到达后又离开（继续滚动），或未到达就反向远离目标（往回滚）
+            // Left again after arrival (kept scrolling), or moved away from
+            // the target before arrival (scrolled back)
             lockedRef.current = false;
           }
           lastScrollTopRef.current = vp.scrollTop;
@@ -168,8 +190,10 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     };
   }, [viewportRef, calcActive]);
 
-  // 轨道盒尺寸变化（首次渲染 / 窗口缩放）→ 更新轨道高度并重测锚定刻度。
-  // 依赖 visible：组件隐藏期间 ref 为空，必须等渲染出轨道后再观察
+  // Rail box size changes (first render / window resize) → update the rail
+  // height and remeasure the anchored tick.
+  // Depends on visible: refs are null while the component is hidden, so wait
+  // for the rail to render before observing
   useEffect(() => {
     if (!visible) return;
     const el = railBoxRef.current;
@@ -192,7 +216,8 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
       const el = vp.querySelectorAll<HTMLElement>(USER_MSG_SELECTOR)[idx];
       if (!el) return;
       const top = Math.max(0, docOffset(vp, el) - JUMP_MARGIN);
-      // 点击锁定：高亮立即切到所点刻度；smooth 滚动途中不重算
+      // Click lock: the highlight switches to the clicked tick immediately;
+      // no recomputation during smooth scrolling
       lockedRef.current = true;
       jumpTargetRef.current = top;
       arrivedRef.current = Math.abs(vp.scrollTop - top) <= 8;
@@ -203,8 +228,10 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     [viewportRef],
   );
 
-  // 弹层打开：记录高度（越界钳制用）并把高亮行滚入可见区
-  // （手动设置 scrollTop，避免 scrollIntoView 波动聊天主滚动区）
+  // Popup opened: record its height (used for out-of-bounds clamping) and
+  // scroll the highlighted row into view
+  // (set scrollTop manually to keep scrollIntoView from jarring the chat's
+  // main scroll area)
   useLayoutEffect(() => {
     if (hover === null || !popupRef.current) return;
     const popup = popupRef.current;
@@ -217,7 +244,7 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
       );
   }, [hover, count]);
 
-  /** 悬停刻度：锚点切到该刻度并实测其纵坐标 */
+  /** Hovering a tick: switch the anchor to it and measure its Y directly */
   const enterTick = (i: number) => {
     setHover(i);
     anchorIdxRef.current = i;
@@ -231,10 +258,12 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
 
   if (!visible || count < 2) return null;
 
-  // 梯度中心：悬停轮次优先，否则当前滚动位置所在轮
+  // Gradient center: the hovered turn wins, otherwise the turn at the current
+  // scroll position
   const center = hover ?? active;
 
-  // 弹层垂直位置 = 锚定刻度纵坐标；超出轨道上下界时按弹层半高钳制
+  // Popup vertical position = anchored tick's Y; clamped by half the popup
+  // height when it exceeds the rail's top/bottom bounds
   const half = popupH / 2;
   const lo = half + 4;
   const hi = railH - half - 4;
@@ -242,14 +271,17 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
     hi < lo ? railH / 2 : Math.min(Math.max(anchorY, lo), hi);
 
   return (
-    // 轨道容器：固定宽度的完整悬停区（刻度↔弹层连续，不断链），
-    // 容器本身穿透点击，仅刻度列与弹层可交互
+    // Rail container: fixed-width full hover area (tick↔popup stays
+    // continuous, no broken chain);
+    // the container itself passes clicks through, only the tick column and
+    // popup are interactive
     <div
       ref={railBoxRef}
       className="pointer-events-none absolute inset-y-4 right-3 z-10 hidden w-7 md:block"
       onMouseLeave={() => setHover(null)}
     >
-      {/* 刻度列：紧凑等距、整体垂直居中（仅定位入口，不映射文档高度） */}
+      {/* Tick column: compact, evenly spaced, vertically centered as a whole
+          (a positioning entry point only, does not map document height) */}
       <div className="pointer-events-auto flex h-full w-full flex-col items-end justify-center gap-2">
         {Array.from({ length: count }, (_, i) => (
           <button
@@ -278,7 +310,8 @@ export function ThreadNav({ viewportRef, contentRef }: ThreadNavProps) {
         ))}
       </div>
 
-      {/* 悬停弹层：紧贴刻度左侧（right-full 无间隙），垂直中心对齐锚定刻度 */}
+      {/* Hover popup: hugs the tick column's left side (right-full, no gap),
+          vertical center aligned with the anchored tick */}
       {hover !== null && (
         <div
           className="pointer-events-auto absolute right-full w-72 -translate-y-1/2"

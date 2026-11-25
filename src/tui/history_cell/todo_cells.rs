@@ -4,7 +4,7 @@ use std::hash::Hash;
 
 use super::{HistoryCell, finish_hasher, wrap_text};
 
-/// 待办列表项的状态
+/// Status of a todo list item
 #[derive(Debug, Clone, Copy, PartialEq, Hash)]
 pub(crate) enum TodoStatus {
     Completed,
@@ -13,7 +13,7 @@ pub(crate) enum TodoStatus {
     Cancelled,
 }
 
-/// 待办列表项
+/// Todo list item
 #[derive(Debug, Clone)]
 pub(crate) struct TodoItem {
     pub content: String,
@@ -21,21 +21,22 @@ pub(crate) struct TodoItem {
     pub priority: String,
 }
 
-/// 待办列表卡片：解析 todo_write 的结果，以 checkbox 风格渲染
-///   • Updated plan
-///     ✔ 完成任务 (strikethrough dim)
-///     → 进行中任务 (cyan bold)
-///     ○ 待处理任务 (dim)
-///     ✗ 已取消任务 (dim strikethrough)
+/// Todo list card: renders a todo_write result as a checkbox-style list.
+///   • Updated todo
+///     ✔ completed item (strikethrough dim)
+///     → in-progress item (cyan bold)
+///     ○ pending item (dim)
+///     ✗ cancelled item (dim strikethrough)
 pub(crate) struct TodoCell {
     pub items: Vec<TodoItem>,
     pub all_done: bool,
-    /// 写入是否仍在进行（尚无结果、仅从参数提取时为 true）
+    /// Whether the write is still in progress (true when there is no result yet
+    /// and items were extracted from the arguments only)
     pub writing: bool,
 }
 
 impl TodoCell {
-    /// 从 todo_write 工具的原始结果文本解析出结构化项
+    /// Parse structured items from the raw result text of the todo_write tool
     pub fn from_result(result: &str) -> Self {
         let mut items = Vec::new();
         for line in result.lines() {
@@ -43,8 +44,8 @@ impl TodoCell {
             if trimmed.is_empty() || trimmed.starts_with("任务列表已更新") {
                 continue;
             }
-            // 格式: "1. ✓ 任务内容 [中] completed"
-            // 去掉前导编号 "N. "
+            // Format: "1. ✓ task content [中] completed"
+            // Strip the leading numbering "N. "
             let rest = trimmed
                 .find(". ")
                 .map(|pos| &trimmed[pos + 2..])
@@ -63,7 +64,7 @@ impl TodoCell {
             };
 
             let after_icon = &rest[icon_len..].trim_start();
-            // 提取优先级标签 [高]/[中]/[低]
+            // Extract the priority tag [高]/[中]/[低]
             let priority = if let Some(start) = after_icon.find('[') {
                 if let Some(end) = after_icon[start..].find(']') {
                     after_icon[start + 1..start + end].to_string()
@@ -73,7 +74,7 @@ impl TodoCell {
             } else {
                 String::from("中")
             };
-            // 内容 = 去掉末尾的 " [X] status"
+            // Content = strip the trailing " [X] status"
             let content = if let Some(bracket_pos) = after_icon.rfind(" [") {
                 after_icon[..bracket_pos].to_string()
             } else {
@@ -133,7 +134,7 @@ impl HistoryCell for TodoCell {
                 verb.to_string(),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" plan", Style::default().fg(Color::Cyan)),
+            Span::styled(" todo", Style::default().fg(Color::Cyan)),
         ])];
 
         let detail_w = width.saturating_sub(6) as usize;

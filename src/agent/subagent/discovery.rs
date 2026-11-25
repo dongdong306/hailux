@@ -11,7 +11,7 @@ pub(super) const CONFIG_DIR_NAME: &str = ".hailux";
 pub(super) const AGENT_DIR_NAME: &str = "agents";
 pub(super) const AGENT_FILE_NAME: &str = "AGENTS.md";
 
-/// AGENTS.md 解析结果
+/// Parsed AGENTS.md info
 pub(super) struct AgentMdInfo {
     pub(super) name: String,
     pub(super) description: String,
@@ -22,7 +22,8 @@ pub(super) struct AgentMdInfo {
     pub(super) system_prompt: String,
 }
 
-/// 解析 AGENTS.md 的 YAML frontmatter，提取 name、description、tools、model、skills、mcp。
+/// Parses the YAML frontmatter of AGENTS.md, extracting name, description,
+/// tools, model, skills, and mcp.
 pub(super) fn parse_agent_md(raw: &str) -> Option<AgentMdInfo> {
     let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw);
 
@@ -99,7 +100,7 @@ fn parse_tools_list(raw: &str) -> Option<Vec<String>> {
     if v.is_empty() {
         return None;
     }
-    // 支持 [tool1, tool2] 格式
+    // Supports the [tool1, tool2] format
     let inner = v
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
@@ -175,8 +176,9 @@ fn scan_root(root: &Path, out: &mut Vec<SubagentConfig>) -> Result<()> {
     Ok(())
 }
 
-/// 发现所有可用 subagent：全局 `~/.hailux/agents/` 与项目级 `<work_dir>/.hailux/agents/`。
-/// 同名时项目级覆盖全局。
+/// Discovers all available subagents: global `~/.hailux/agents/` and
+/// project-level `<work_dir>/.hailux/agents/`. On name clash, project-level
+/// overrides global.
 pub fn discover_subagents(work_dir: &Path) -> Result<Vec<SubagentConfig>> {
     let mut all: Vec<SubagentConfig> = Vec::new();
 
@@ -200,7 +202,7 @@ pub fn discover_subagents(work_dir: &Path) -> Result<Vec<SubagentConfig>> {
     Ok(result)
 }
 
-/// 生成注入 system prompt 的 `<available_subagents>` 块。
+/// Builds the `<available_subagents>` block injected into the system prompt.
 pub fn format_available_subagents(subagents: &[SubagentConfig]) -> String {
     let described: Vec<&SubagentConfig> = subagents
         .iter()
@@ -225,10 +227,10 @@ pub fn format_available_subagents(subagents: &[SubagentConfig]) -> String {
     out
 }
 
-/// 内置 general subagent 的 system prompt
+/// System prompt of the built-in general subagent
 const GENERAL_SUBAGENT_PROMPT: &str = crate::prompts::GENERAL_SUBAGENT;
 
-/// 创建内置的 general subagent 配置
+/// Creates the built-in general subagent config
 pub fn builtin_general_subagent(main_model: &str) -> SubagentConfig {
     let model = if main_model.is_empty() {
         "deepseek/deepseek-chat"

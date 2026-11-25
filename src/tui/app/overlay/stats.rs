@@ -6,7 +6,7 @@ use super::super::AppState;
 use crate::tui::event::AppEvent;
 
 impl App {
-    /// 按范围 + 窗口查询统计快照。
+    /// Query statistics snapshots by scope + time window.
     pub(super) async fn load_stats_data(
         &self,
         work_dir: Option<&str>,
@@ -29,7 +29,7 @@ impl App {
         })
     }
 
-    /// 按当前 Stats 页面的项目/窗口重新查询（含项目列表）。
+    /// Re-query according to the current Stats page's project/time window (including project list).
     pub(in crate::tui::app) async fn refresh_stats(&mut self) -> Result<()> {
         let (work_dir, days) = {
             let AppState::Stats { data, work_dir, .. } = &self.state else {
@@ -53,7 +53,7 @@ impl App {
         Ok(())
     }
 
-    /// 应用新的项目筛选并重新查询（保持窗口不变）。
+    /// Apply a new project filter and re-query (time window unchanged).
     async fn apply_stats_scope(&mut self, work_dir: Option<String>) -> Result<()> {
         let days = {
             let AppState::Stats { data, .. } = &self.state else {
@@ -76,8 +76,9 @@ impl App {
         Ok(())
     }
 
-    /// Stats 页面事件：项目选择器打开时优先处理（↑↓/Enter/Esc）；
-    /// 否则 ↑↓/PgUp/PgDn 选择明细，←→ 切时间窗口，Tab 全部↔当前项目，p 选择项目，r 刷新。
+    /// Stats page events: when the project picker is open, handle it first (↑↓/Enter/Esc);
+    /// otherwise ↑↓/PgUp/PgDn select details, ←→ switches the time window,
+    /// Tab toggles all↔current project, p opens the project picker, r refreshes.
     pub(in crate::tui::app) async fn handle_stats_event(&mut self, event: AppEvent) -> Result<()> {
         let picker_open = matches!(
             &self.state,
@@ -87,7 +88,7 @@ impl App {
             }
         );
 
-        // 鼠标滚轮：步进移动（选择器打开时移动选择器）
+        // Mouse wheel: step movement (moves the picker when it is open)
         match event {
             AppEvent::ScrollUp => {
                 let delta: i64 = 3;
@@ -120,7 +121,7 @@ impl App {
             return Ok(());
         };
 
-        // ── 项目选择器 ─────────────────────────────────────
+        // ── Project picker ─────────────────────────────────────
         if picker_open {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('p') | KeyCode::Tab => {
@@ -147,7 +148,7 @@ impl App {
                     } = &mut self.state
                         && let Some(i) = picker_index.as_mut()
                     {
-                        *i = projects.len(); // 最后一项（非“全部项目”）
+                        *i = projects.len(); // Last item (not “全部项目”)
                     }
                 }
                 KeyCode::Enter => {
@@ -194,7 +195,7 @@ impl App {
             KeyCode::Down => step = Some(1),
             KeyCode::PageUp => step = Some(-10),
             KeyCode::PageDown => step = Some(10),
-            // ←→ 切换时间窗口（7 → 30 → 90 → 全部 → 7）
+            // ←→ switch time window (7 → 30 → 90 → all → 7)
             KeyCode::Left | KeyCode::Right => {
                 if let Some(pos) = crate::tui::stats_viewer::STATS_WINDOWS
                     .iter()
@@ -225,7 +226,7 @@ impl App {
                     }
                 }
             }
-            // Tab 快速切换 全部项目 ↔ 当前项目
+            // Tab quickly toggles between all projects ↔ current project
             KeyCode::Tab => {
                 let is_all = matches!(&self.state, AppState::Stats { work_dir: None, .. });
                 let work_dir = if is_all {
@@ -235,7 +236,7 @@ impl App {
                 };
                 self.apply_stats_scope(work_dir).await?;
             }
-            // p 打开项目选择器（定位到当前项目）
+            // p opens the project picker (positioned at the current project)
             KeyCode::Char('p') => {
                 if let AppState::Stats {
                     work_dir,
@@ -269,7 +270,7 @@ impl App {
         Ok(())
     }
 
-    /// 项目选择器选中项步进（clamp 到 [0, projects.len()]）。
+    /// Step the project picker selection (clamped to [0, projects.len()]).
     fn stats_picker_step(state: &mut AppState, delta: i64) {
         if let AppState::Stats {
             picker_index: Some(i),

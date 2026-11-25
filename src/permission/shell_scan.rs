@@ -1,21 +1,25 @@
-//! bash 命令静态安全扫描。
+//! Best-effort static scan of shell commands for permission gating.
 //!
-//! bash 本质是任意代码执行，本扫描是尽力而为的打扰控制而非安全边界：
-//! - 识别「执行原语」（sudo / sh / python / eval / ...）：无法静态判定其
-//!   文件访问范围，调用方应将 bash 权限请求标记为 force_ask；
-//! - 识别「文件操作命令」的路径参数与任意命令的重定向目标，解析出工作
-//!   目录之外的访问目标，供 external_directory 权限请求使用；
-//! - 无法展开的动态表达式（`$var` / `$(...)` / 反引号）被跳过——这是有意
-//!   的权衡：已知变量（`$HOME` / `$env:...`）会尝试展开，未知变量无法
-//!   判定，宁可漏报也不把界内常用写法误报成弹窗。
+//! A shell command is arbitrary code execution, so this scan is interruption
+//! control, not a security boundary:
+//! - Executor commands (sudo / sh / python / eval / ...) have unknowable file
+//!   access; callers must mark the shell permission request `force_ask`;
+//! - Path arguments of file-oriented commands and redirect targets of any
+//!   command are resolved to detect accesses outside the work directory,
+//!   feeding the `external_directory` permission request;
+//! - Dynamic expressions that cannot be expanded (`$var` / `$(...)` /
+//!   backticks) are skipped on purpose: known variables (`$HOME` /
+//!   `$env:...`) are expanded, unknown ones are unknowable — prefer false
+//!   negatives over nagging on common in-workdir usage.
 
 use std::path::{Path, PathBuf};
 
 use super::resolve_permission_path;
 
-/// bash 中带文件路径语义的命令：全部参数都按路径候选扫描
-/// （标志位 `-x` / `+x` 除外）。含 POSIX、PowerShell 全名与高频短别名。
-/// `cd` 不在此列：它由 scan 的基准跟踪机制单独处理。
+/// Shell commands with file-path semantics: all arguments are scanned as path
+/// candidates (except flags like `-x` / `+x`). Covers POSIX and PowerShell
+/// full names plus frequent short aliases. `cd` is not listed: it is handled
+/// separately by scan's base-directory tracking.
 const FILE_COMMANDS: &[&str] = &[
     "cat",
     "rm",
@@ -37,7 +41,7 @@ const FILE_COMMANDS: &[&str] = &[
     "scp",
     "patch",
     "type",
-    // PowerShell 全名
+    // PowerShell full names
     "get-content",
     "set-content",
     "add-content",
@@ -47,7 +51,7 @@ const FILE_COMMANDS: &[&str] = &[
     "new-item",
     "rename-item",
     "out-file",
-    // PowerShell 高频短别名
+    // Frequent PowerShell short aliases
     "gc",
     "gci",
     "sc",
@@ -61,10 +65,11 @@ const FILE_COMMANDS: &[&str] = &[
     "rni",
 ];
 
-/// 执行原语：第一个 token 命中即视为「无法静态分析」。
-/// 这些命令可以执行任意代码 / 访问任意路径，词法扫描无法给出可靠边界。
+/// Execution primitives: a first-token hit means "not statically analyzable".
+/// These commands can execute arbitrary code / access arbitrary paths; a
+/// lexical scan cannot provide a reliable boundary.
 const EXECUTOR_COMMANDS: &[&str] = &[
-    // 提权 / 派生 shell
+    // Privilege escalation / derived shells
     "sudo",
     "doas",
     "su",
@@ -82,7 +87,7 @@ const EXECUTOR_COMMANDS: &[&str] = &[
     "pwsh.exe",
     "cmd",
     "cmd.exe",
-    // 解释器
+    // Interpreters
     "python",
     "python3",
     "py",
@@ -99,7 +104,7 @@ const EXECUTOR_COMMANDS: &[&str] = &[
     "julia",
     "awk",
     "gawk",
-    // 加载 / 求值 / 包装执行
+    // Load / evaluate / wrapped execution
     "eval",
     "exec",
     "source",
@@ -113,7 +118,7 @@ const EXECUTOR_COMMANDS: &[&str] = &[
     "watch",
     "script",
     "expect",
-    // PowerShell 执行原语
+    // PowerShell execution primitives
     "start",
     "start-process",
     "invoke-expression",
@@ -121,31 +126,36 @@ const EXECUTOR_COMMANDS: &[&str] = &[
     "&",
 ];
 
-/// 单条命令的扫描结论。
+/// Scan result for a single command.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct BashScan {
-    /// 命中执行原语：bash 权限请求需标记 force_ask（内置默认放行不豁免）
+pub struct ShellScan {
+    /// Executor hit: the shell permission request must be marked `force_ask`
+    /// (builtin default allow does not waive it)
     pub executor_hit: bool,
-    /// 命中的越界目录（已去重排序），供 external_directory 请求构造 patterns
+    /// Hit out-of-workdir directories (deduped and sorted); used to build
+    /// patterns for the external_directory request
     pub external_dirs: Vec<PathBuf>,
 }
 
-impl BashScan {
+impl ShellScan {
     pub fn is_clean(&self) -> bool {
         !self.executor_hit && self.external_dirs.is_empty()
     }
 }
 
-/// 扫描完整命令字符串（可能含多个子命令），汇总所有子命令的结论。
+/// Scans a full command string (possibly containing multiple subcommands) and
+/// aggregates the results of all subcommands.
 ///
-/// `cd X` 会更新后续子命令的路径解析基准（`base_dir`）：拦截点落在
-/// 真正访问文件的段上——`cd .. && ls` 无文件访问语义，不打扰；而
-/// `cd /etc && cat shadow` 由 `cat shadow` 按 `/etc` 基准解析后命中越界，
-/// always 的授权面也缩小到实际访问的具体目录。
-pub fn scan(command: &str, work_dir: &str) -> BashScan {
+/// `cd X` updates the path resolution base (`base_dir`) for subsequent
+/// subcommands: the interception point lands on the segment that actually
+/// accesses files — `cd .. && ls` has no file-access semantics and does not
+/// interrupt, while `cd /etc && cat shadow` is resolved by `cat shadow`
+/// against the `/etc` base and hits as out-of-bounds; the "always" grant
+/// scope also shrinks to the specific directory actually accessed.
+pub fn scan(command: &str, work_dir: &str) -> ShellScan {
     let work_canonical = resolve_permission_path(work_dir, work_dir);
     let mut base_dir = work_dir.to_string();
-    let mut result = BashScan::default();
+    let mut result = ShellScan::default();
     for seg in split_top_level(command) {
         scan_segment(seg, &base_dir, &work_canonical, &mut result);
         if let Some(target) = cd_target(seg)
@@ -161,14 +171,15 @@ pub fn scan(command: &str, work_dir: &str) -> BashScan {
     result
 }
 
-/// 命令分类。
+/// Command classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CmdKind {
-    /// 文件操作命令：扫描全部参数（含重定向目标）
+    /// File-operation command: all arguments scanned (including redirect targets)
     FileOps,
-    /// 执行原语：无法静态分析，记 force_ask
+    /// Execution primitive: not statically analyzable, marks force_ask
     Executor,
-    /// 其余命令：仅扫描重定向目标（`> /etc/x` 对任何命令都是路径写）
+    /// Other commands: only redirect targets scanned (`> /etc/x` is a path
+    /// write for any command)
     Other,
 }
 
@@ -183,7 +194,7 @@ fn classify(cmd: &str) -> CmdKind {
     }
 }
 
-fn scan_segment(seg: &str, base_dir: &str, work_canonical: &Path, result: &mut BashScan) {
+fn scan_segment(seg: &str, base_dir: &str, work_canonical: &Path, result: &mut ShellScan) {
     let tokens: Vec<&str> = seg.split_whitespace().collect();
     let Some(first) = tokens.first() else {
         return;
@@ -196,17 +207,17 @@ fn scan_segment(seg: &str, base_dir: &str, work_canonical: &Path, result: &mut B
     }
 }
 
-/// 扫描一段命令的 token 序列。
+/// Scans the token sequence of one command segment.
 ///
-/// - `include_plain_args`：是否把普通参数当路径候选（FileOps 为 true）；
-///   重定向目标对任何命令类型都检查。
-/// - 重定向运算符可独立成 token（`echo x > /etc/y`）或与路径粘连
-///   （`echo x 2>/dev/null`），两种形态都处理。
+/// - `include_plain_args`: whether plain arguments count as path candidates
+///   (true for FileOps); redirect targets are checked for any command kind.
+/// - A redirect operator can be a standalone token (`echo x > /etc/y`) or
+///   glued to the path (`echo x 2>/dev/null`); both forms are handled.
 fn scan_tokens(
     tokens: &[&str],
     base_dir: &str,
     work_canonical: &Path,
-    result: &mut BashScan,
+    result: &mut ShellScan,
     include_plain_args: bool,
 ) {
     let mut redirect_next = false;
@@ -218,7 +229,7 @@ fn scan_tokens(
         }
         if let Some(rest) = strip_redirect_operator(token) {
             if rest.is_empty() {
-                // 独立运算符 token：目标在下一个 token
+                // Standalone operator token: target is the next token
                 redirect_next = true;
             } else {
                 check_candidate(rest, base_dir, work_canonical, result);
@@ -236,8 +247,10 @@ fn scan_tokens(
     }
 }
 
-/// 提取 `cd` 的目标参数（用于更新后续子命令的路径解析基准）。
-/// 无目标 / `-`（上一个目录，无法静态判定）/ 选项开头 → None。
+/// Extracts the target argument of `cd` (used to update the path resolution
+/// base for subsequent subcommands).
+/// No target / `-` (previous directory, not statically decidable) / option
+/// prefix → None.
 fn cd_target(seg: &str) -> Option<String> {
     let tokens: Vec<&str> = seg.split_whitespace().collect();
     let first = tokens.first()?.trim_matches(['"', '\'']);
@@ -251,8 +264,9 @@ fn cd_target(seg: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
-/// 展开路径候选中的 `~` 与已知变量引用；无法静态展开的动态表达式
-/// （未知 `$var` / `$(...)` / 反引号）返回 None。
+/// Expands `~` and known variable references in a path candidate; dynamic
+/// expressions that cannot be statically expanded (unknown `$var` / `$(...)`
+/// / backticks) return None.
 fn expand_candidate(arg: &str) -> Option<String> {
     if arg == "~" {
         return dirs::home_dir().map(|h| h.display().to_string());
@@ -266,9 +280,11 @@ fn expand_candidate(arg: &str) -> Option<String> {
     Some(arg.to_string())
 }
 
-/// 检查单个路径候选：展开 `~` 与已知变量后，按当前解析基准判断是否越界。
-/// 无法静态展开的动态表达式跳过（尽力而为）。
-fn check_candidate(raw: &str, base_dir: &str, work_canonical: &Path, result: &mut BashScan) {
+/// Checks a single path candidate: after expanding `~` and known variables,
+/// decides against the current resolution base whether it is out-of-bounds.
+/// Dynamic expressions that cannot be statically expanded are skipped
+/// (best effort).
+fn check_candidate(raw: &str, base_dir: &str, work_canonical: &Path, result: &mut ShellScan) {
     let arg = raw.trim_matches(['"', '\'']);
     if arg.is_empty() {
         return;
@@ -291,8 +307,10 @@ fn check_candidate(raw: &str, base_dir: &str, work_canonical: &Path, result: &mu
     result.external_dirs.push(dir);
 }
 
-/// 在引号与转义之外按命令分隔符（`;` `|` `&&` `||` `&` 换行）切分子命令。
-/// 引号内的分隔符不切分；连续分隔符产生的空段被丢弃。
+/// Splits into subcommands by command separators (`;` `|` `&&` `||` `&`
+/// newline) outside quotes and escapes.
+/// Separators inside quotes do not split; empty segments produced by
+/// consecutive separators are dropped.
 fn split_top_level(command: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0usize;
@@ -306,7 +324,8 @@ fn split_top_level(command: &str) -> Vec<&str> {
         }
         match c {
             '\\' if !in_single => escaped = true,
-            // PowerShell 反引号转义（双引号内亦有效，粗略同样处理）
+            // PowerShell backtick escape (also valid inside double quotes;
+            // handled the same way, roughly)
             '`' if !in_single => escaped = true,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
@@ -322,14 +341,15 @@ fn split_top_level(command: &str) -> Vec<&str> {
     segments
 }
 
-/// 若 token 以重定向运算符开头，返回运算符之后的剩余部分；
-/// 独立运算符 token 返回空串。非重定向 token 返回 None。
-/// 支持形态：`>f` `>>f` `>|f` `2>f` `2>>f` `&>f` `<f`；
-/// `<<EOF`（heredoc 定界符）与 `2>&1`（fd 复制）不视为路径。
+/// If the token starts with a redirect operator, returns the remainder after
+/// the operator; a standalone operator token returns an empty string.
+/// Non-redirect tokens return None.
+/// Supported forms: `>f` `>>f` `>|f` `2>f` `2>>f` `&>f` `<f`;
+/// `<<EOF` (heredoc delimiter) and `2>&1` (fd duplication) are not paths.
 fn strip_redirect_operator(token: &str) -> Option<&str> {
     let bytes = token.as_bytes();
     let mut idx = 0usize;
-    // 前导 fd 说明符：`2>` / `1>` / `&>`
+    // Leading fd specifier: `2>` / `1>` / `&>`
     if idx + 1 < bytes.len()
         && (bytes[idx] == b'1' || bytes[idx] == b'2' || bytes[idx] == b'&')
         && bytes[idx + 1] == b'>'
@@ -338,7 +358,7 @@ fn strip_redirect_operator(token: &str) -> Option<&str> {
     }
     match bytes.get(idx) {
         Some(b'<') => {
-            // `<<word` 是 heredoc 定界符，非路径
+            // `<<word` is a heredoc delimiter, not a path
             if bytes.get(idx + 1) == Some(&b'<') {
                 return None;
             }
@@ -346,7 +366,7 @@ fn strip_redirect_operator(token: &str) -> Option<&str> {
         }
         Some(b'>') => {
             idx += 1;
-            // `>>` 追加 / `>|` 强制覆盖
+            // `>>` append / `>|` forced overwrite
             if matches!(bytes.get(idx), Some(b'>') | Some(b'|')) {
                 idx += 1;
             }
@@ -354,27 +374,30 @@ fn strip_redirect_operator(token: &str) -> Option<&str> {
         _ => return None,
     }
     let rest = &token[idx..];
-    // `2>&1`：目标以 `&` 开头是 fd 复制，非路径
+    // `2>&1`: a target starting with `&` is fd duplication, not a path
     if rest.starts_with('&') {
         return None;
     }
     Some(rest)
 }
 
-/// 展开参数中的已知变量引用。支持 `$NAME` / `${NAME}` / `$env:NAME`
-/// （PowerShell 语法，`env:` 大小写不敏感）。仅当参数中恰好只有一个变量
-/// 引用、其余部分为字面量时展开成功；无法解析时返回 None（调用方跳过）。
+/// Expands known variable references in an argument. Supports `$NAME` /
+/// `${NAME}` / `$env:NAME` (PowerShell syntax, `env:` case-insensitive).
+/// Expansion succeeds only when the argument contains exactly one variable
+/// reference and the rest is literal; unresolvable cases return None
+/// (the caller skips them).
 fn expand_known_vars(arg: &str) -> Option<String> {
     let dollar = arg.find('$')?;
     let (value, after) = parse_var_ref(&arg[dollar..])?;
-    // 变量引用之后不允许再有动态表达式
+    // No further dynamic expressions allowed after the variable reference
     if after.contains(['$', '`', '(']) {
         return None;
     }
     Some(format!("{}{}{}", &arg[..dollar], value, after))
 }
 
-/// 解析以 `$` 开头的变量引用，返回（值, 引用之后的剩余部分）。
+/// Parses a variable reference starting with `$`; returns (value, remainder
+/// after the reference).
 fn parse_var_ref(s: &str) -> Option<(String, &str)> {
     if let Some(rest) = s.strip_prefix("${") {
         let end = rest.find('}')?;
@@ -382,7 +405,7 @@ fn parse_var_ref(s: &str) -> Option<(String, &str)> {
         return Some((value, &rest[end + 1..]));
     }
     let body = s.strip_prefix('$')?;
-    // `$env:NAME`（PowerShell）优先于普通标识符
+    // `$env:NAME` (PowerShell) takes precedence over plain identifiers
     let named = if body.len() >= 4 && body[..4].eq_ignore_ascii_case("env:") {
         take_ident(&body[4..])
     } else {
@@ -413,7 +436,7 @@ mod tests {
     use super::*;
 
     fn tmp_workdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hailux_bash_scan_{}", name));
+        let dir = std::env::temp_dir().join(format!("hailux_shell_scan_{}", name));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }
@@ -455,10 +478,11 @@ mod tests {
         let result = scan("cat /etc/hosts", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
 
-        // 多个子命令逐段扫描：cd 跟踪解析基准，拦截点在真正访问文件的段
+        // Multiple subcommands scanned segment by segment: cd tracks the
+        // resolution base; the interception point is the file-accessing segment
         let result = scan("cd /etc && cat shadow", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
-        // 界内 cd 与无文件访问的后续命令不打扰
+        // In-workdir cd and subsequent commands without file access do not interrupt
         assert!(scan("cd build && ls", &wd_str).is_clean());
         assert!(scan("cd .. && ls", &wd_str).is_clean());
         assert!(
@@ -466,17 +490,18 @@ mod tests {
             "bare cd is a no-op for the spawned shell"
         );
 
-        // 多个越界目标一次收齐（同目录去重）
+        // Multiple out-of-bounds targets collected in one pass (same dir deduped)
         let result = scan("cp /etc/hosts /etc/passwd .", &wd_str);
         assert_eq!(result.external_dirs.len(), 1, "same dir dedup: {result:?}");
 
-        // 管道右侧同样扫描
+        // The right side of a pipe is scanned too
         let result = scan("curl https://x | tee /etc/hosts", &wd_str);
         assert!(!result.external_dirs.is_empty());
 
-        // PowerShell 短别名与补齐的路径命令同样受检
-        // （Windows 盘符路径仅在 Windows 上是"外部路径"，Linux 下反斜杠
-        // 属于文件名字符，会被解析为界内相对路径）
+        // PowerShell short aliases and spelled-out path commands are checked
+        // as well. (Windows drive-letter paths are "external" only on Windows;
+        // on Linux the backslash is a valid filename character and the path
+        // resolves as an in-workdir relative path.)
         #[cfg(windows)]
         for cmd in [
             "gc C:\\Windows\\win.ini",
@@ -500,7 +525,7 @@ mod tests {
                 "expected external hit for {cmd:?}"
             );
         }
-        // 界内使用短别名不误报
+        // Short aliases used inside the workdir do not false-positive
         assert!(scan("gc notes.txt", &wd_str).is_clean());
         assert!(scan("ni -ItemType Directory sub", &wd_str).is_clean());
     }
@@ -522,7 +547,7 @@ mod tests {
             let result = scan(cmd, &wd_str);
             assert!(result.executor_hit, "expected executor hit for {cmd:?}");
         }
-        // 界内路径不产生越界命中
+        // In-workdir paths produce no out-of-bounds hit
         let result = scan("python script.py", &wd_str);
         assert!(result.external_dirs.is_empty());
     }
@@ -531,16 +556,16 @@ mod tests {
     fn redirect_targets_checked_for_any_command() {
         let wd = tmp_workdir("redirect");
         let wd_str = wd.display().to_string();
-        // echo 不属于文件命令，但重定向目标必须检查
+        // echo is not a file command, but its redirect target must be checked
         let result = scan("echo hi > /etc/hosts", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
-        // 运算符与路径粘连
+        // Operator glued to the path
         let result = scan("echo hi 2>/etc/error.log", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
-        // fd 复制与 heredoc 不是路径
+        // fd duplication and heredoc are not paths
         assert!(scan("echo hi 2>&1", &wd_str).is_clean());
         assert!(scan("cat <<EOF", &wd_str).is_clean());
-        // 界内重定向不误报
+        // In-workdir redirections do not false-positive
         assert!(scan("echo hi > out.txt", &wd_str).is_clean());
     }
 
@@ -548,7 +573,7 @@ mod tests {
     fn known_vars_are_expanded() {
         let wd = tmp_workdir("vars");
         let wd_str = wd.display().to_string();
-        // $HOME / $env: 指向家目录 → 必然越界
+        // $HOME / $env: points to the home directory → necessarily out-of-bounds
         let result = scan("cat $HOME/.ssh/id_rsa", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
         let result = scan("cat ~/.ssh/id_rsa", &wd_str);
@@ -558,9 +583,9 @@ mod tests {
             let result = scan("get-content $env:USERPROFILE\\.ssh\\id_rsa", &wd_str);
             assert_eq!(result.external_dirs.len(), 1);
         }
-        // 未知变量无法展开 → 跳过（尽力而为）
+        // Unknown variables cannot be expanded → skipped (best effort)
         assert!(scan("cat $UNKNOW_VAR/file", &wd_str).is_clean());
-        // 命令替换跳过
+        // Command substitution skipped
         assert!(scan("cat $(pwd)/file", &wd_str).is_clean());
     }
 
@@ -568,10 +593,10 @@ mod tests {
     fn glob_parent_dir_still_gated() {
         let wd = tmp_workdir("glob");
         let wd_str = wd.display().to_string();
-        // 界内 glob 放行
+        // In-workdir globs are allowed
         assert!(scan("rm build/*.o", &wd_str).is_clean());
         assert!(scan("cp src/*.rs backup/", &wd_str).is_clean());
-        // 越界 glob：`..` 前缀明确指向外部，仍被拦截
+        // Out-of-bounds glob: the `..` prefix explicitly points outside, still intercepted
         assert_eq!(scan("cat ../secrets/*.pem", &wd_str).external_dirs.len(), 1);
     }
 
@@ -579,9 +604,12 @@ mod tests {
     fn cd_updates_resolution_base() {
         let wd = tmp_workdir("cd_base");
         let wd_str = wd.display().to_string();
-        // cd 出界后的相对路径访问按新基准解析 → 命中，目录为实际访问位置。
-        // 期望值同样经 resolve_permission_path 规范化：CI 的 TEMP 环境变量
-        // 可能含 8.3 短名（RUNNER~1），canonicalize 后是长名，两边必须同构。
+        // Relative-path access after a cd out of bounds is resolved against
+        // the new base → hit, with the dir being the actually accessed
+        // location. The expected value is likewise normalized via
+        // resolve_permission_path: the CI TEMP environment variable may
+        // contain an 8.3 short name (RUNNER~1) while canonicalize yields the
+        // long name; both sides must be structurally identical.
         let result = scan("cd .. && cat secret.txt", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
         let expected_parent =
@@ -590,15 +618,15 @@ mod tests {
             result.external_dirs[0], expected_parent,
             "hit dir must be the cd target, not a blanket out-of-workdir mark"
         );
-        // 链式 cd：基准逐段更新
+        // Chained cd: the base is updated per segment
         let result = scan("cd ../.. && cat x", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
-        // cd 到家目录后读家目录下的敏感文件 → 命中
+        // cd to the home directory then reading a sensitive file under it → hit
         let result = scan("cd ~ && cat .ssh/id_rsa", &wd_str);
         assert_eq!(result.external_dirs.len(), 1);
-        // cd 界内子目录后访问仍安全
+        // Access after cd into an in-workdir subdirectory is still safe
         assert!(scan("cd build && cat out.txt", &wd_str).is_clean());
-        // cd - 与选项无法静态判定 → 基准保持，不误判
+        // `cd -` and options are not statically decidable → base unchanged, no false hit
         assert!(scan("cd - && ls", &wd_str).is_clean());
     }
 

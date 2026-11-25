@@ -7,7 +7,7 @@ use crate::mcp::{McpConnection, McpToolBackend};
 use crate::tui::event::AppEvent;
 
 impl App {
-    /// MCP 面板的事件处理：↑/↓ 移动选中，Enter 查看详情，Esc 返回聊天。
+    /// MCP panel event handling: ↑/↓ moves selection, Enter shows details, Esc returns to chat.
     pub(in crate::tui::app) fn handle_mcp_event(&mut self, event: AppEvent) -> Result<()> {
         let AppState::Mcp { selected_index } = &mut self.state else {
             return Ok(());
@@ -42,7 +42,7 @@ impl App {
         Ok(())
     }
 
-    /// MCP 详情面板的事件处理：↑/↓ 移动选中，Esc 返回列表。
+    /// MCP detail panel event handling: ↑/↓ moves selection, Esc returns to the list.
     pub(in crate::tui::app) fn handle_mcp_detail_event(&mut self, event: AppEvent) -> Result<()> {
         let AppState::McpDetail {
             server_index,
@@ -100,7 +100,7 @@ impl App {
         Ok(())
     }
 
-    /// MCP 单项详情面板的事件处理：Esc 返回列表。
+    /// MCP single-item detail panel event handling: Esc returns to the list.
     pub(in crate::tui::app) fn handle_mcp_item_detail_event(
         &mut self,
         event: AppEvent,
@@ -160,7 +160,8 @@ impl App {
         Ok(())
     }
 
-    /// 处理后台 MCP 连接完成事件：更新 UI 状态，注册工具给 agent。
+    /// Handle background MCP connection-ready events: update UI state and
+    /// register tools with the agent.
     pub(in crate::tui::app) async fn handle_mcp_ready(
         &mut self,
         connections: Vec<McpConnection>,

@@ -15,7 +15,7 @@ const fn asset_name() -> &'static str {
     }
 }
 
-// ── GitHub API 类型 ─────────────────────────────────────────
+// ── GitHub API types ─────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct Release {
@@ -29,7 +29,7 @@ struct Asset {
     browser_download_url: String,
 }
 
-// ── 版本比较 ───────────────────────────────────────────────
+// ── Version comparison ───────────────────────────────────────────────
 
 fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
     let v = v.trim_start_matches('v');
@@ -48,7 +48,7 @@ fn is_newer(remote: (u32, u32, u32), local: (u32, u32, u32)) -> bool {
     remote > local
 }
 
-// ── SHA256 校验 ────────────────────────────────────────────
+// ── SHA256 verification ────────────────────────────────────────────
 
 fn verify_sha256(data: &[u8], expected_hex: &str) -> bool {
     let mut hasher = Sha256::new();
@@ -67,7 +67,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-// ── 核心 ───────────────────────────────────────────────────
+// ── Core ───────────────────────────────────────────────────
 
 pub async fn run_update() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
@@ -106,7 +106,7 @@ pub async fn run_update() -> Result<()> {
 
     println!("发现新版本: {remote_version}");
 
-    // 查找目标 asset 和对应的 sha256
+    // Find the target asset and the matching sha256
     let wanted = asset_name();
     let sha256_name = format!("{wanted}.sha256");
 
@@ -123,7 +123,7 @@ pub async fn run_update() -> Result<()> {
         .find(|a| a.name == sha256_name)
         .map(|a| &a.browser_download_url);
 
-    // 下载二进制
+    // Download the binary
     print!("下载 {wanted} ... ");
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -139,7 +139,7 @@ pub async fn run_update() -> Result<()> {
 
     println!("完成 ({} bytes)", binary_data.len());
 
-    // SHA256 校验
+    // SHA256 verification
     if let Some(url) = sha256_url {
         print!("校验 SHA256 ... ");
         let _ = std::io::stdout().flush();
@@ -161,10 +161,10 @@ pub async fn run_update() -> Result<()> {
         eprintln!("[警告] 未找到 SHA256 校验文件，跳过校验");
     }
 
-    // 自替换
+    // Self-replacement
     let current_exe = std::env::current_exe().wrap_err("无法确定当前可执行文件路径")?;
 
-    // 如果 exe 在 target/ 目录下，可能是从源码编译的
+    // If the exe lives under a target/ dir, it was likely built from source
     if current_exe
         .to_string_lossy()
         .replace('\\', "/")
@@ -208,10 +208,10 @@ fn replace_binary(exe_path: &std::path::Path, new_data: &[u8]) -> Result<()> {
     {
         let old_path = exe_path.with_extension("exe.old");
 
-        // 清理可能残留的 .old 文件
+        // Remove a possibly stale .old file
         let _ = std::fs::remove_file(&old_path);
 
-        // 重命名当前 exe → .old（Windows 允许重命名运行中的 exe）
+        // Rename the current exe → .old (Windows allows renaming a running exe)
         std::fs::rename(exe_path, &old_path).wrap_err_with(|| {
             format!(
                 "无法重命名当前可执行文件: {}（请检查写入权限）",
@@ -219,21 +219,21 @@ fn replace_binary(exe_path: &std::path::Path, new_data: &[u8]) -> Result<()> {
             )
         })?;
 
-        // 移动新文件到原路径
+        // Move the new file to the original path
         if let Err(e) = std::fs::rename(&tmp_path, exe_path) {
-            // 回退：将 .old 恢复
+            // Rollback: restore the .old file
             let _ = std::fs::rename(&old_path, exe_path);
             return Err(color_eyre::eyre::eyre!("无法安装更新: {e}（已回退）"));
         }
 
-        // 尝试删除 .old（可能被锁，下次启动时清理）
+        // Try to delete .old (may be locked; cleaned up on next startup)
         let _ = std::fs::remove_file(&old_path);
     }
 
     Ok(())
 }
 
-/// 启动时清理残留的 .old 文件（仅 Windows）
+/// Cleans up stale .old files at startup (Windows only)
 #[cfg(windows)]
 pub fn cleanup_old_binary() {
     if let Ok(exe_path) = std::env::current_exe() {

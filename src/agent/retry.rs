@@ -1,30 +1,32 @@
-//! LLM 请求的瞬态错误重试策略。
+//! Transient-error retry policy for LLM requests.
 //!
-//! 网络抖动、限流（429）、服务端瞬时故障（5xx）等错误重发请求即可恢复；
-//! 认证/参数类 4xx 重试无意义。重试只作用于单次 LLM 请求（连接 + 流消费），
-//! 失败尝试的部分输出不进入消息上下文，也不落库。
+//! Errors such as network jitter, rate limiting (429), and transient server failures (5xx)
+//! recover by simply resending the request; retrying auth/parameter 4xx errors is pointless.
+//! Retries apply only to a single LLM request (connection + stream consumption);
+//! partial output from a failed attempt never enters the message context nor gets persisted.
 
 use async_openai::error::OpenAIError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// 取消标志轮询间隔（对齐 agent.rs 的 CANCEL_POLL_INTERVAL 语义：
-/// 该间隔即为取消响应的最大延迟上限）
+/// Cancel-flag polling interval (aligns with the CANCEL_POLL_INTERVAL semantics in agent.rs:
+/// this interval is the upper bound on cancellation response latency)
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// 退避抖动幅度 ±20%（避免多实例同步重试打满 provider）
+/// Backoff jitter magnitude ±20% (avoids multiple instances retrying in sync and
+/// saturating the provider)
 const JITTER_RATIO: f64 = 0.2;
 
-/// 重试策略配置（config.toml `[retry]` 段可覆盖默认值）
+/// Retry policy configuration (the config.toml `[retry]` section can override defaults)
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
-    /// 额外重试次数上限（总尝试次数 = 1 + max_retries）
+    /// Cap on extra retries (total attempts = 1 + max_retries)
     pub max_retries: u32,
-    /// 首次重试前的退避等待
+    /// Backoff wait before the first retry
     pub initial_delay: Duration,
-    /// 退避等待上限
+    /// Upper bound on the backoff wait
     pub max_delay: Duration,
-    /// 指数退避倍率
+    /// Exponential backoff multiplier
     pub multiplier: f64,
 }
 
@@ -39,17 +41,21 @@ impl Default for RetryConfig {
     }
 }
 
-/// 判断错误是否为瞬态错误（值得重试）。
+/// Determines whether an error is transient (worth retrying).
 ///
-/// - `Reqwest`：网络层错误（连接失败 / 超时 / TLS 等），但排除 builder
-///   （本地请求构造非法，重试必然同样失败）与 redirect（循环重定向）；
-///   429 的 `Retry-After` 响应头因上游 `ApiErrorResponse` 不保留 headers
-///   而无法获取，退避策略不感知
-/// - `StreamError`：SSE 流中途断开（含连接被重置；chunk JSON 反序列化
-///   失败会以 `JSONDeserialize` 变体出现，走快速失败）
-/// - `ApiError`：仅限流（408/429）与服务端故障（5xx）；
-///   其余 4xx（认证、参数、模型不存在等）重试必然同样失败
-/// - 其余（反序列化失败、参数非法等客户端问题）不重试
+/// - `Reqwest`: network-layer errors (connection failure / timeout / TLS, etc.),
+///   excluding builder (a locally invalid request construction would fail again
+///   on retry) and redirect (redirect loops); the 429 `Retry-After` response
+///   header cannot be obtained because the upstream `ApiErrorResponse` does not
+///   keep headers, so the backoff policy cannot take it into account
+/// - `StreamError`: the SSE stream breaks mid-flight (including connection
+///   resets; chunk JSON deserialization failures surface as the
+///   `JSONDeserialize` variant and fail fast instead)
+/// - `ApiError`: only rate limiting (408/429) and server failures (5xx);
+///   other 4xx errors (auth, parameters, nonexistent model, etc.) would fail
+///   again on retry
+/// - The rest (deserialization failures, invalid parameters, and other
+///   client-side problems) are not retried
 pub fn is_retryable(err: &OpenAIError) -> bool {
     match err {
         OpenAIError::Reqwest(e) => !e.is_builder() && !e.is_redirect(),
@@ -59,9 +65,9 @@ pub fn is_retryable(err: &OpenAIError) -> bool {
     }
 }
 
-/// 第 `retry_no` 次重试前的退避等待（1 起始）：initial × multiplier^(n-1)，
-/// 以 max_delay 封顶，再叠加 ±[`JITTER_RATIO`] 抖动（不引入 rand 依赖，
-/// 以 SystemTime 亚秒纳秒为随机源）。
+/// Backoff wait before the `retry_no`-th retry (1-based): initial × multiplier^(n-1),
+/// capped at max_delay, then ±[`JITTER_RATIO`] jitter is applied (no rand dependency;
+/// SystemTime sub-second nanoseconds serve as the random source).
 pub fn backoff_delay(cfg: &RetryConfig, retry_no: u32) -> Duration {
     let exp = cfg.multiplier.powi((retry_no.saturating_sub(1)) as i32);
     let base_ms =
@@ -69,7 +75,8 @@ pub fn backoff_delay(cfg: &RetryConfig, retry_no: u32) -> Duration {
     Duration::from_millis(jitter_ms(base_ms))
 }
 
-/// 基于 SystemTime 纳秒的对称抖动，返回 `[base×(1-ratio), base×(1+ratio)]`，至少 1ms。
+/// Symmetric jitter based on SystemTime nanoseconds, returning
+/// `[base×(1-ratio), base×(1+ratio)]`, at least 1ms.
 fn jitter_ms(base_ms: f64) -> u64 {
     let unit = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -79,12 +86,13 @@ fn jitter_ms(base_ms: f64) -> u64 {
     (base_ms * factor).round().max(1.0) as u64
 }
 
-/// 单次退避等待的硬上限：防止极端 `max_delay_ms` 配置使
-/// `Instant + Duration` 溢出 panic（24h 已远超任何合理的退避场景）
+/// Hard upper bound on a single backoff sleep: prevents `Instant + Duration` overflow
+/// panics from an extreme `max_delay_ms` config (24h far exceeds any sane backoff scenario)
 const MAX_SLEEP: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// 可取消的退避等待：以 [`CANCEL_POLL_INTERVAL`] 轮询 `cancel`。
-/// 返回 `false` = 等待期间用户取消（调用方走中断收尾，不再重试）。
+/// Cancellable backoff sleep: polls `cancel` at [`CANCEL_POLL_INTERVAL`].
+/// Returns `false` = the user cancelled while sleeping (the caller finalizes the abort
+/// and does not retry).
 pub async fn sleep_cancellable(delay: Duration, cancel: &AtomicBool) -> bool {
     let deadline = tokio::time::Instant::now() + delay.min(MAX_SLEEP);
     loop {
@@ -129,7 +137,7 @@ mod tests {
 
     #[test]
     fn non_api_errors_classification() {
-        // 反序列化失败：客户端侧问题，不重试
+        // Deserialization failure: client-side problem, do not retry
         let err = OpenAIError::JSONDeserialize(
             serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
             "body".to_string(),
@@ -140,7 +148,8 @@ mod tests {
 
     #[test]
     fn reqwest_builder_error_not_retryable() {
-        // URL 解析失败 → reqwest builder 错误：本地请求构造非法，重试必然同样失败
+        // URL parse failure → reqwest builder error: locally invalid request construction,
+        // retrying would fail the same way
         let err = reqwest::Client::new().get("://").build().unwrap_err();
         assert!(err.is_builder(), "应构造出 builder 错误");
         assert!(!is_retryable(&OpenAIError::Reqwest(err)));
@@ -154,12 +163,12 @@ mod tests {
             max_delay: Duration::from_millis(5000),
             multiplier: 2.0,
         };
-        // ±20% 抖动范围内校验
+        // Verify within the ±20% jitter range
         let d1 = backoff_delay(&cfg, 1).as_millis() as f64;
         assert!((800.0..=1200.0).contains(&d1), "d1={d1}");
         let d3 = backoff_delay(&cfg, 3).as_millis() as f64;
         assert!((3200.0..=4800.0).contains(&d3), "d3={d3}");
-        // 1000×2^7 远超 max_delay=5000 → 封顶后 4000..=6000
+        // 1000×2^7 far exceeds max_delay=5000 → after capping: 4000..=6000
         let d8 = backoff_delay(&cfg, 8).as_millis() as f64;
         assert!((4000.0..=6000.0).contains(&d8), "d8={d8}");
     }

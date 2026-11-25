@@ -1,7 +1,11 @@
-// 输入区组合控件：模型 + 推理等级切换 —— 发送按钮左侧的胶囊按钮（当前模型名 + 档位 + 开合箭头），
-// 点击弹出锚定菜单：根视图两行（模型 / 推理等级，行右展示当前值 + 箭头），
-// 点击行在弹窗内下钻到对应列表（← 返回），选择后关闭。
-// 开合状态走全局 store：Ctrl+M 可远程开合，anyDialogOpen 的 Esc 让位语义保持一致。
+// Input-area combo control: model + reasoning-effort switcher — a capsule
+// button left of the send button (current model name + effort level + chevron).
+// Clicking opens an anchored menu: the root view has two rows (Model /
+// Reasoning effort, each row showing its current value + arrow on the right);
+// clicking a row drills down into the matching list within the dialog
+// (← to go back); selecting an entry closes the dialog.
+// Open/close state lives in the global store: Ctrl+M can toggle it remotely,
+// keeping the Esc-yield semantics of anyDialogOpen consistent.
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
@@ -14,7 +18,7 @@ import { useApp } from "../store/app-store";
 import type { ReasoningEffort } from "../store/types";
 import { cn } from "../lib/utils";
 
-/** 弹窗视图：根（两行入口）/ 模型列表 / 推理等级列表 */
+/** Dialog views: root (two entry rows) / model list / reasoning-effort list */
 type MenuView = "root" | "model" | "effort";
 
 const EFFORT_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
@@ -25,11 +29,11 @@ const EFFORT_HINTS: Record<ReasoningEffort, string> = {
   max: "深度推理，更强但更慢",
 };
 
-/** 档位展示名（Low / High / Max） */
+/** Display name for the effort level (Low / High / Max) */
 const effortLabel = (e: ReasoningEffort) =>
   e[0]!.toUpperCase() + e.slice(1);
 
-/** 根视图行：左标签 + 右当前值 + 右箭头 */
+/** Root-view row: label on the left + current value and arrow on the right */
 function RootRow({
   label,
   value,
@@ -54,7 +58,7 @@ function RootRow({
   );
 }
 
-/** 下钻视图头：← 返回 + 标题 */
+/** Drill-down view header: ← back + title */
 function ViewHeader({
   title,
   onBack,
@@ -85,14 +89,14 @@ export function ModelEffortMenu() {
   const effort = useApp((s) => s.effort);
   const switchModel = useApp((s) => s.switchModel);
   const setEffort = useApp((s) => s.setEffort);
-  /** 下钻视图；关闭时重置回根视图 */
+  /** Drill-down view; resets to the root view when closed */
   const [view, setView] = useState<MenuView>("root");
 
   useEffect(() => {
     if (!open) setView("root");
   }, [open]);
 
-  // Esc 关闭（语义对齐 Overlay 弹窗）
+  // Close on Esc (semantics aligned with Overlay dialogs)
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -106,10 +110,10 @@ export function ModelEffortMenu() {
 
   return (
     <div className="relative">
-      {/* 点击胶囊外关闭（透明遮罩，位于弹窗之下） */}
+      {/* Close when clicking outside the capsule (transparent mask below the dialog) */}
       {open && <div className="fixed inset-0 z-20 cursor-default" onMouseDown={close} />}
 
-      {/* 锚定弹窗（右对齐胶囊）：根视图 / 模型列表 / 推理等级列表 */}
+      {/* Anchored dialog (right-aligned to the capsule): root / model / effort lists */}
       {open && (
         <div className="absolute bottom-full right-0 z-30 mb-2 w-72 overflow-hidden rounded-xl border border-border bg-background shadow-lg">
           {view === "root" && (
@@ -142,7 +146,7 @@ export function ModelEffortMenu() {
                     key={`${m.provider_id}:${m.model_id}`}
                     type="button"
                     onClick={() => {
-                      // 失败静默：接口报错时菜单不关，用户可直接重试
+                      // Fail silently: keep the menu open on API errors so the user can retry directly
                       switchModel(m.display).catch(() => {});
                     }}
                     className={cn(
@@ -197,7 +201,7 @@ export function ModelEffortMenu() {
         </div>
       )}
 
-      {/* 胶囊锚点：模型名 + 推理等级 + 开合箭头 */}
+      {/* Capsule anchor: model name + reasoning effort + chevron */}
       <button
         type="button"
         onClick={() => setModelMenu(!open)}

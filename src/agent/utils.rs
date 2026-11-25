@@ -12,9 +12,9 @@ pub fn compare_mtime(a: &Path, b: &Path) -> Ordering {
     }
 }
 
-// ── 共享 Frontmatter 解析 ────────────────────────────────────
+// ── Shared Frontmatter Parsing ────────────────────────────────
 
-/// 去除 frontmatter 值两端的空白与成对引号。
+/// Strips surrounding whitespace and paired quotes from a frontmatter value.
 pub fn strip_frontmatter_value(raw: &str) -> String {
     let v = raw.trim();
     if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
@@ -26,10 +26,10 @@ pub fn strip_frontmatter_value(raw: &str) -> String {
     }
 }
 
-/// 解析 frontmatter 结构，分离 frontmatter 原始文本与正文内容。
-/// 支持 BOM 剥离、CRLF/LF 换行兼容。
-/// 返回 `(frontmatter_raw, content)`；content 已 trim。
-/// 若无合法 frontmatter 分隔块则返回 `None`。
+/// Parses the frontmatter structure, separating raw frontmatter text from body content.
+/// Supports BOM stripping and CRLF/LF line-ending tolerance.
+/// Returns `(frontmatter_raw, content)`; content is trimmed.
+/// Returns `None` if there is no valid frontmatter delimiter block.
 pub fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
     let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let after = trimmed.strip_prefix("---")?;

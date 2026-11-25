@@ -3,22 +3,24 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR_NAME: &str = ".hailux";
 const AGENT_MD_FILE_NAME: &str = "AGENTS.md";
 
-/// 从全局及工作目录（含向上遍历的祖先目录）查找 AGENTS.md，
-/// 返回所有找到的 (绝对路径, 文件内容)，按优先级从低到高排列。
+/// Finds AGENTS.md in the global directory, the working directory, and ancestor
+/// directories (walking upward), returning all found (absolute path, content) pairs
+/// ordered from lowest to highest priority.
 ///
-/// 返回顺序：
-/// 1. `~/.hailux/AGENTS.md`（全局，优先级最低）
-/// 2. 最远祖先目录的 `AGENTS.md`
-/// 3. … 逐级向下
-/// 4. `<work_dir>/AGENTS.md`（最高优先级）
+/// Return order:
+/// 1. `~/.hailux/AGENTS.md` (global, lowest priority)
+/// 2. The `AGENTS.md` in the farthest ancestor directory
+/// 3. … down level by level
+/// 4. `<work_dir>/AGENTS.md` (highest priority)
 ///
-/// 注：调用方将返回结果按原顺序拼接注入 system prompt，
-/// 越靠后的内容在 prompt 中位置越后，对 LLM 的约束力越强，
-/// 因此工作目录的 AGENTS.md 具有最高实际优先级。
+/// Note: callers concatenate the returned results in their original order when
+/// injecting into the system prompt; the later an entry appears in the prompt,
+/// the stronger it constrains the LLM, so the working directory's AGENTS.md
+/// carries the highest effective priority.
 pub fn discover_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
     let mut found: Vec<(PathBuf, String)> = Vec::new();
 
-    // 1. 全局 ~/.hailux/AGENTS.md（忽略大小写）
+    // 1. Global ~/.hailux/AGENTS.md (case-insensitive)
     if let Some(home) = dirs::home_dir() {
         let global_dir = home.join(CONFIG_DIR_NAME);
         if let Some(path) = find_agent_md_in_dir(&global_dir)
@@ -28,14 +30,14 @@ pub fn discover_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
         }
     }
 
-    // 2. 工作目录及祖先目录的 AGENTS.md
+    // 2. AGENTS.md in the working directory and ancestor directories
     found.extend(discover_local_agent_md(work_dir));
 
     found
 }
 
-/// 从 work_dir 向上遍历（最多3级），收集祖先目录的 AGENTS.md。
-/// 返回结果按优先级从低到高排列（最远祖先在前，work_dir 在最后）。
+/// Walks upward from work_dir (at most 3 levels), collecting ancestor directories' AGENTS.md.
+/// Results are ordered from lowest to highest priority (farthest ancestor first, work_dir last).
 fn discover_local_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
     let mut ancestors: Vec<(PathBuf, String)> = Vec::new();
     let mut current = Some(work_dir);
@@ -52,13 +54,13 @@ fn discover_local_agent_md(work_dir: &Path) -> Vec<(PathBuf, String)> {
         current = dir.parent();
         depth += 1;
     }
-    // ancestors 的顺序是从近到远（work_dir 在前），需要反转
+    // ancestors is ordered nearest-to-farthest (work_dir first), so it needs reversing
     ancestors.reverse();
     ancestors
 }
 
-/// 将 AGENTS.md 列表格式化为注入 system prompt 的文本（包含路径与内容）。
-/// 返回 `None` 表示没有找到任何文件。
+/// Formats the AGENTS.md list into text for injection into the system prompt (paths and contents).
+/// Returns `None` when no files were found.
 pub fn format_agent_md_prompt(entries: &[(PathBuf, String)]) -> Option<String> {
     if entries.is_empty() {
         return None;
@@ -72,7 +74,8 @@ pub fn format_agent_md_prompt(entries: &[(PathBuf, String)]) -> Option<String> {
     Some(out)
 }
 
-/// 在指定目录下查找 AGENTS.md（忽略大小写），返回找到的第一个匹配路径。
+/// Finds AGENTS.md in the given directory (case-insensitive), returning the first
+/// matching path found.
 fn find_agent_md_in_dir(dir: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {

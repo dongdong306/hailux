@@ -23,18 +23,18 @@ hailux is a terminal AI coding assistant that supports streaming conversations, 
 
 By default, operations inside the working directory are allowed without confirmation:
 
-- bash commands, `read`/`edit`/`write`/`grep`/`glob` inside the working directory run freely
+- shell commands, `read`/`edit`/`write`/`grep`/`glob` inside the working directory run freely
 - reading sensitive files such as `.env` / `.env.local` asks for confirmation (`.env.example` is allowed)
-- any operation touching content outside the working directory (e.g. `cat ../secrets.txt`, `rm /tmp/x`, editing a file outside the project) asks for confirmation — including bash sub-commands chained with `&&`/`;`/`|`, redirection targets, and `cd` targets outside the working directory
-- bash commands that cannot be statically analyzed (sudo, sh/bash, python/node interpreters, eval, xargs, ...) ask for confirmation on first use per session — built-in defaults never silently authorize them
+- any operation touching content outside the working directory (e.g. `cat ../secrets.txt`, `rm /tmp/x`, editing a file outside the project) asks for confirmation — including shell sub-commands chained with `&&`/`;`/`|`, redirection targets, and `cd` targets outside the working directory
+- shell commands that cannot be statically analyzed (sudo, sh/bash, python/node interpreters, eval, xargs, ...) ask for confirmation on first use per session — built-in defaults never silently authorize them
 - MCP tools always ask for confirmation
 
-> **Note**: The permission layer is convenience gating, not a security sandbox. bash is arbitrary code execution by nature; the static analysis of shell commands is best-effort (e.g. unknown `$variables` cannot be resolved). Treat `--yolo` and permission rules as trust decisions.
+> **Note**: The permission layer is convenience gating, not a security sandbox. shell is arbitrary code execution by nature; the static analysis of shell commands is best-effort (e.g. unknown `$variables` cannot be resolved). Treat `--yolo` and permission rules as trust decisions.
 
 Override the defaults with rules in `~/.hailux/config.toml`:
 
 ```toml
-[permission.bash]
+[permission.shell]
 "rm *" = "deny"
 "git push *" = "ask"
 "sudo *" = "allow"   # stop asking for sudo commands
@@ -46,7 +46,7 @@ Override the defaults with rules in `~/.hailux/config.toml`:
 "C:\\Users\\me\\shared\\*" = "allow"
 ```
 
-Rule evaluation for a bash command is ordered: command rules (`[permission.bash]`) are evaluated first (a `deny` short-circuits), then the external-directory check. Choosing "always" in the permission dialog persists the rule for the current session; `hailux --yolo` skips all confirmations.
+Rule evaluation for a shell command is ordered: command rules (`[permission.shell]`) are evaluated first (a `deny` short-circuits), then the external-directory check. Choosing "always" in the permission dialog persists the rule for the current session; `hailux --yolo` skips all confirmations.
 
 ## Slash Commands
 
@@ -314,7 +314,7 @@ During normal conversation, the LLM automatically determines whether to call the
 
 | Name | Description |
 |------|-------------|
-| `general` | General-purpose subagent capable of multi-step research and coding tasks, with access to all tools (except `task` and `ask_user`) |
+| `general` | General-purpose subagent capable of multi-step research and coding tasks, with access to all tools (except `task` and `question`) |
 
 ### How to Create a Custom Subagent
 
@@ -329,7 +329,7 @@ Subagent configuration files are `AGENTS.md` files placed at:
 ---
 name: code-reviewer
 description: Review code for bugs, security issues, and code style
-tools: [bash, read, grep, glob]
+tools: [shell, read, grep, glob]
 skills: [code-review, help]
 mcp: [context7, zread]
 model: deepseek/deepseek-chat
@@ -348,7 +348,7 @@ You are a code review expert. Your responsibilities are:
 |-------|----------|-------------|
 | `name` | Yes | Unique subagent identifier |
 | `description` | No | Summary description for the LLM to decide when to delegate |
-| `tools` | No | Tool whitelist (JSON array format); if omitted, all built-in tools are available (except `task` and `ask_user`) |
+| `tools` | No | Tool whitelist (JSON array format); if omitted, all built-in tools are available (except `task` and `question`) |
 | `skills` | No | List of available skill names (e.g., `[code-review, help]`); if omitted, no skills are loaded |
 | `mcp` | No | List of available MCP server names (e.g., `[context7, zread]`); if omitted, no MCP tools are loaded |
 | `model` | No | Model selector, format is `provider/model` (e.g., `deepseek/deepseek-chat`); if omitted, the main agent's model is used |
@@ -367,7 +367,7 @@ Edit `~/.hailux/agents/searcher/AGENTS.md`:
 ---
 name: searcher
 description: Quickly search the codebase for specific patterns, definitions, and references
-tools: [grep, glob, read, bash]
+tools: [grep, glob, read, shell]
 ---
 
 You are a code search expert. Your task is to efficiently search the codebase and return precise results.
@@ -383,7 +383,7 @@ Save and restart hailux, then you can use `@subagent: searcher search all async 
 ### Notes
 
 - The subagent's execution process is invisible to the main interface; only the final result is returned
-- Subagents cannot use the `task` tool (to prevent recursion) or the `ask_user` tool (fully autonomous, no user interaction)
+- Subagents cannot use the `task` tool (to prevent recursion) or the `question` tool (fully autonomous, no user interaction)
 - Subagent sessions are linked to the main session via `parent_id`, and messages are independently persisted to the database
 - You can restore a previous subagent session context via the `task_id` parameter to continue the conversation
 

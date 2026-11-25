@@ -1,23 +1,25 @@
-//! 剪贴板图片探测。
+//! Clipboard image detection.
 //!
-//! 顺序约定：先探测图片，命中才拦截；纯文本剪贴板走终端默认
-//! bracketed paste 流程（由调用方保证 probe 失败时回退文本处理）。
+//! Ordering convention: probe for an image first and only intercept on a hit; a plain-text
+//! clipboard goes through the terminal's default bracketed paste flow (the caller guarantees
+//! a fallback to text handling when the probe fails).
 
 use base64::Engine as _;
 use std::time::Duration;
 
-/// 从剪贴板读出的一张图片
+/// An image read from the clipboard
 #[derive(Debug)]
 pub struct ClipboardImage {
     pub mime: String,
     pub bytes: Vec<u8>,
 }
 
-/// 剪贴板探测超时：PowerShell/外部工具偶发挂起时放弃本次探测，
-/// 避免 TUI 事件循环被卡死。
+/// Clipboard probe timeout: give up the probe when PowerShell/external tools occasionally
+/// hang, so the TUI event loop never gets stuck.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 探测剪贴板中的图片。剪贴板无图片或探测失败（含超时）时返回 None。
+/// Probe the clipboard for an image. Returns None when there is no image or the probe
+/// fails (incl. timeout).
 pub(crate) async fn read_clipboard_image() -> Option<ClipboardImage> {
     tokio::time::timeout(PROBE_TIMEOUT, read_clipboard_image_platform())
         .await
@@ -41,18 +43,19 @@ async fn read_clipboard_image_platform() -> Option<ClipboardImage> {
 
 #[cfg(windows)]
 async fn read_clipboard_image_windows() -> Option<ClipboardImage> {
-    // Windows：PowerShell 读剪贴板图片，依次尝试：
-    //   1. FileDrop 文件引用 —— QQ/微信等 IM「复制图片」把图片包装成临时文件
-    //      （如 Desktop\{GUID}.png）放入剪贴板；资源管理器复制文件同理。
-    //      优先读原文件字节：与粘贴路径文本通道（handle_paste 的路径识别）
-    //      拿到完全相同的数据，data_url 去重可拦截双通道重复挂图，且
-    //      原图质量优于位图重编码
-    //   2. [Clipboard]::GetImage() —— 截图工具写入的位图（无 FileDrop 时），
-    //      重编码为 PNG 返回
-    // 剪贴板无图片时脚本无输出。
+    // Windows: PowerShell reads a clipboard image, trying in order:
+    //   1. FileDrop file refs — IM apps (QQ/WeChat etc.) wrap "copy image" as a temp file
+    //      (e.g. Desktop\{GUID}.png) placed in the clipboard; Explorer file copies work the same.
+    //      Prefer reading the original file bytes: identical data to the paste-path text
+    //      channel (handle_paste's path detection), so data_url dedup can catch duplicate
+    //      attachments across both channels, and original quality beats bitmap re-encoding
+    //   2. [Clipboard]::GetImage() — bitmap written by screenshot tools (when no FileDrop),
+    //      re-encoded to PNG
+    // The script outputs nothing when the clipboard has no image.
     //
-    // FileDrop 临时文件只读不删：生命周期归 OS/IM 管理（仍被剪贴板引用，
-    // 可能还有其他消费者），删除会破坏其他程序的粘贴。
+    // FileDrop temp files are read-only, never deleted: their lifecycle is owned by the
+    // OS/IM (still referenced by the clipboard, possibly with other consumers); deleting
+    // them would break other programs' paste.
     const SCRIPT: &str = r#"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -83,15 +86,15 @@ if ($img) {
     let output = tokio::process::Command::new(exe)
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .kill_on_drop(true) // 探测超时被丢弃时终止子进程，避免孤儿进程累积
+        .kill_on_drop(true) // kill the child when the timed-out probe is dropped, avoiding orphans
         .output()
         .await
         .ok()?;
     decode_base64_image(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// pwsh 存在性探测结果缓存：进程级只跑一次子进程探测，
-/// 避免每次粘贴图片都先花几百毫秒起 pwsh --version。
+/// Cache for the pwsh existence probe: run the child-process probe only once per process,
+/// so each image paste doesn't first spend hundreds of ms spawning pwsh --version.
 #[cfg(windows)]
 static HAS_PWSH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -114,7 +117,7 @@ async fn which_pwsh() -> bool {
 
 #[cfg(target_os = "macos")]
 async fn read_clipboard_image_macos() -> Option<ClipboardImage> {
-    // macOS：osascript 把剪贴板 PNG 写入临时文件再读 base64
+    // macOS: osascript writes the clipboard PNG to a temp file, then read it back as base64
     let tmp = std::env::temp_dir().join(format!("hailux-clip-{}.png", uuid::Uuid::new_v4()));
     let script = format!(
         "set png to (the clipboard as «class PNGf»)\nset fp to open for access POSIX file \"{}\" with write permission\nset eof fp to 0\nwrite png to fp\nclose access fp",
@@ -147,7 +150,7 @@ async fn read_clipboard_image_macos() -> Option<ClipboardImage> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 async fn read_clipboard_image_linux() -> Option<ClipboardImage> {
-    // Linux：优先 wl-paste（Wayland），回退 xclip（X11）
+    // Linux: prefer wl-paste (Wayland), fall back to xclip (X11)
     if let Ok(output) = tokio::process::Command::new("wl-paste")
         .args(["-t", "image/png"])
         .kill_on_drop(true)
@@ -176,7 +179,8 @@ async fn read_clipboard_image_linux() -> Option<ClipboardImage> {
     })
 }
 
-/// 解码剪贴板工具输出的 base64（忽略空白行），并用魔数校验真实格式。
+/// Decode the base64 output of clipboard tools (ignoring whitespace) and verify the real
+/// format via magic bytes.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn decode_base64_image(stdout: &str) -> Option<ClipboardImage> {
     let b64: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();

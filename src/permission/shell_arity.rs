@@ -1,6 +1,6 @@
-/// Bash 命令 arity 表：前 N 个 token 作为 pattern 前缀
-/// 用于从完整命令中提取人类可理解的 "命令类别"（精简版）
-const BASH_ARITY: &[(&str, usize)] = &[
+/// Shell command arity table: the first N tokens form the pattern prefix,
+/// used to extract a human-readable "command category" from a full command.
+const SHELL_ARITY: &[(&str, usize)] = &[
     // arity 1
     ("cat", 1),
     ("cd", 1),
@@ -149,22 +149,22 @@ const BASH_ARITY: &[(&str, usize)] = &[
     ("docker builder", 3),
 ];
 
-/// 从完整命令字符串中提取权限匹配 pattern 和展示用描述。
-/// 返回 (pattern, description)：
-/// - pattern：命令前 N 个 token 拼接 `*`（由 arity 表决定 N），
-///   用于规则匹配与 always 持久化
-/// - description：完整命令原文，用于权限弹窗展示
-pub fn extract_bash_pattern(command: &str) -> (String, String) {
+/// Extracts the permission-matching pattern and display description from a
+/// full command string. Returns (pattern, description):
+/// - pattern: the first N tokens of the command joined with `*` (N determined
+///   by the arity table), used for rule matching and "always" persistence
+/// - description: the full original command, shown in the permission dialog
+pub fn extract_shell_pattern(command: &str) -> (String, String) {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return ("*".to_string(), command.to_string());
     }
 
-    // 查找最长匹配的 arity
+    // Find the longest matching arity
     let mut best_arity = 1usize;
     let mut best_prefix_len = 0usize;
 
-    for (prefix, arity) in BASH_ARITY {
+    for (prefix, arity) in SHELL_ARITY {
         let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
         if prefix_tokens.len() > tokens.len() {
             continue;
@@ -195,37 +195,37 @@ mod tests {
 
     #[test]
     fn test_simple_command() {
-        let (pattern, _) = extract_bash_pattern("ls -la");
+        let (pattern, _) = extract_shell_pattern("ls -la");
         assert_eq!(pattern, "ls *");
     }
 
     #[test]
     fn test_git_subcommand() {
-        let (pattern, _) = extract_bash_pattern("git commit -m \"hello\"");
+        let (pattern, _) = extract_shell_pattern("git commit -m \"hello\"");
         assert_eq!(pattern, "git commit *");
     }
 
     #[test]
     fn test_npm_run() {
-        let (pattern, _) = extract_bash_pattern("npm run dev");
+        let (pattern, _) = extract_shell_pattern("npm run dev");
         assert_eq!(pattern, "npm run dev *");
     }
 
     #[test]
     fn test_docker_compose() {
-        let (pattern, _) = extract_bash_pattern("docker compose up -d");
+        let (pattern, _) = extract_shell_pattern("docker compose up -d");
         assert_eq!(pattern, "docker compose up *");
     }
 
     #[test]
     fn test_unknown_command_arity1() {
-        let (pattern, _) = extract_bash_pattern("myweirdtool --flag value");
+        let (pattern, _) = extract_shell_pattern("myweirdtool --flag value");
         assert_eq!(pattern, "myweirdtool *");
     }
 
     #[test]
     fn test_empty() {
-        let (pattern, desc) = extract_bash_pattern("");
+        let (pattern, desc) = extract_shell_pattern("");
         assert_eq!(pattern, "*");
         assert_eq!(desc, "");
     }

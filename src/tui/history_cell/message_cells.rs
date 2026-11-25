@@ -8,7 +8,7 @@ use crate::tui::markdown;
 
 use super::{CHAT_FG, CHAT_FILE_MENTION, HistoryCell, PLAN_BADGE, finish_hasher, wrap_text};
 
-/// 会话头部卡片：圆角边框显示模型名、工作目录
+/// Session header card: rounded border showing model name and working directory
 pub(crate) struct SessionHeaderCell {
     pub model_name: String,
     pub version: String,
@@ -81,7 +81,7 @@ impl HistoryCell for SessionHeaderCell {
     }
 }
 
-/// 用户消息：> 前缀 + 白色文本，mentions 区间以提及高亮渲染
+/// User message: "> " prefix + white text; mention ranges rendered with mention highlight
 pub(crate) struct UserMessageCell {
     pub text: String,
     pub plan_mode: bool,
@@ -166,7 +166,7 @@ impl HistoryCell for UserMessageCell {
     }
 }
 
-/// 助手消息（Markdown 渲染）
+/// Assistant message (Markdown rendering)
 pub(crate) struct AgentMarkdownCell {
     pub text: String,
 }
@@ -200,7 +200,7 @@ impl HistoryCell for AgentMarkdownCell {
     }
 }
 
-/// 帮助提示
+/// Help tooltip
 pub(crate) struct TooltipCell {
     pub text: String,
 }
@@ -225,7 +225,7 @@ impl HistoryCell for TooltipCell {
     }
 }
 
-/// 完成耗时标记
+/// Completion timing marker
 pub(crate) struct DoneCell {
     pub total_ms: u64,
     pub model: String,
@@ -275,7 +275,7 @@ impl HistoryCell for DoneCell {
     }
 }
 
-/// 思维链消息：dim + italic 样式
+/// Reasoning (chain-of-thought) message: dim + italic style
 pub(crate) struct ReasoningCell {
     pub text: String,
     pub collapsed: bool,
@@ -301,7 +301,7 @@ impl HistoryCell for ReasoningCell {
         let content_w = width.saturating_sub(2);
         let style = Style::default().dim().italic();
 
-        // 标题行：◈ Thinking (实时计时) / ◈ Thought (最终耗时)
+        // Title line: ◈ Thinking (live timer) / ◈ Thought (final elapsed time)
         let title = if let Some(ms) = self.think_ms {
             format!("◈ Thought ({:.1}s)", ms as f64 / 1000.0)
         } else if let Some(t) = self.thinking_started_at {
@@ -318,7 +318,7 @@ impl HistoryCell for ReasoningCell {
             let total_text_lines = self.text.lines().count();
 
             if total_text_lines <= COLLAPSED_PREVIEW_LINES {
-                // 完整展示，无前缀（标题已占用 ◈）
+                // Show in full with no bullet prefix (◈ is already taken by the title)
                 let md_lines = markdown::render_markdown(&self.text, content_w);
                 for md_line in &md_lines {
                     let mut spans = vec![Span::styled("  ".to_string(), style)];
@@ -333,7 +333,7 @@ impl HistoryCell for ReasoningCell {
                 return lines;
             }
 
-            // 截断展示
+            // Truncated preview
             let preview_text: String = self.text.chars().take(1200).collect();
             let md_lines = markdown::render_markdown(&preview_text, content_w);
             for md_line in md_lines.iter().take(COLLAPSED_PREVIEW_LINES) {

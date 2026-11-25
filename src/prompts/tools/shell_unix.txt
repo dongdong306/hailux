@@ -1,4 +1,4 @@
-Execute Bash commands and return the output
+Execute shell commands and return the output
 
 The current OS is Unix, commands are executed using bash. All commands run in the current working directory by default. To run a command in another directory, use the workdir parameter instead of using cd <directory> && <command> pattern.
 
@@ -12,7 +12,7 @@ This tool is for terminal operations (such as git, cargo, npm, etc.), not for fi
 Usage notes:
 - Always use double quotes around file paths containing spaces (e.g. mkdir "/Users/name/My Documents")
 - When issuing multiple commands:
-  - If commands are independent and can run in parallel, call the Bash tool multiple times in a single message (e.g. git status and git diff).
+  - If commands are independent and can run in parallel, call the shell tool multiple times in a single message (e.g. git status and git diff).
   - Use && to chain dependent commands, only running the second if the first succeeds
   - Use ; only when you need to run commands sequentially and don't care if earlier commands fail
   - Do not use newlines to separate commands (newlines can be used within quoted strings)
@@ -34,10 +34,10 @@ Creating PRs: Use the gh command. Understand branch status, create a branch if n
 
 # Permission Model
 
-The permission layer is convenience gating, NOT a sandbox — bash can execute arbitrary code on this machine with the user's privileges. Behavior you can rely on:
+The permission layer is convenience gating, NOT a sandbox — shell can execute arbitrary code on this machine with the user's privileges. Behavior you can rely on:
 - Commands that cannot be statically analyzed (sudo, sh/bash, python/node interpreters, eval, xargs, ...) trigger a one-time user confirmation unless explicitly allowed.
 - File arguments and redirection targets pointing outside the working directory trigger a confirmation.
-- Prefer the dedicated tools (read/edit/write) over shell equivalents — they are individually permission-checked; a single bash command bypasses that granularity.
+- Prefer the dedicated tools (read/edit/write) over shell equivalents — they are individually permission-checked; a single shell command bypasses that granularity.
 
 # Plan Mode
 

@@ -141,7 +141,8 @@ fn compatible_message_tool_call_id(msg: &CompatibleChatCompletionRequestMessage)
 }
 
 pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> StoredMessage {
-    // 用户消息的图片附件从 Array content 中抽出，以 JSON 存入 attachments 列
+    // Image attachments of user messages are extracted from Array content
+    // and stored as JSON in the attachments column
     let attachments = match msg {
         CompatibleChatCompletionRequestMessage::User(m) => match &m.content {
             ChatCompletionRequestUserMessageContent::Array(parts) => {
@@ -159,7 +160,7 @@ pub fn to_stored_message(msg: &CompatibleChatCompletionRequestMessage) -> Stored
                             Some(crate::agent::media::Attachment {
                                 mime,
                                 data_url: img.image_url.url.clone(),
-                                // name 仅在 agent 内存态用于生成提示文本，不落库
+                                // name only feeds prompt text in agent memory; not persisted
                                 name: None,
                             })
                         }
@@ -246,7 +247,8 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
             .into(),
         ),
         MessageRole::User => {
-            // 有附件 → 重建 Array content（Text + ImageUrl parts），历史重放时图片仍可用
+            // With attachments → rebuild Array content (Text + ImageUrl
+            // parts) so images remain usable on history replay
             let attachments = msg
                 .attachments
                 .as_deref()
@@ -272,8 +274,9 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
                     .into(),
                 )
             } else {
-                // 文本为空时跳过 Text part（与 build_user_message 对称，部分
-                // 兼容端点拒绝空 text part）
+                // Skip the Text part when text is empty (symmetric with
+                // build_user_message; some compatible endpoints reject
+                // empty text parts)
                 let mut parts = Vec::new();
                 if !msg.content.is_empty() {
                     parts.push(ChatCompletionRequestUserMessageContentPart::Text(

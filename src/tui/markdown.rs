@@ -11,7 +11,7 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_
 
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
-/// Markdown 元素样式（对齐 Codex 风格）
+/// Markdown element styles (aligned with the Codex style)
 struct MarkdownStyles {
     h1: Style,
     h2: Style,
@@ -61,7 +61,7 @@ impl Default for MarkdownStyles {
 
 static STYLES: LazyLock<MarkdownStyles> = LazyLock::new(MarkdownStyles::default);
 
-/// 将 Markdown 文本渲染为 ratatui 的 Line 列表
+/// Render Markdown text into a list of ratatui `Line`s
 pub fn render_markdown(text: &str, max_width: u16) -> Vec<Line<'static>> {
     let max_w = max_width as usize;
     let mut renderer = MarkdownRenderer::new(max_w);

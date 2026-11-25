@@ -38,14 +38,15 @@ pub fn init() -> Result<Tui> {
     Ok(terminal)
 }
 
-/// 启用鼠标输入（滚轮事件），保留文本选择能力。
+/// Enable mouse input (wheel events) while preserving text selection.
 ///
-/// Windows: 通过 Win32 API 设置 `ENABLE_MOUSE_INPUT`，
-/// 但**不清除** `ENABLE_QUICK_EDIT_MODE`，以便用户仍可选择和复制文本。
-/// （QuickEdit 在传统 conhost 中会拦截滚轮事件，但在 Windows Terminal 中无影响。）
+/// Windows: sets `ENABLE_MOUSE_INPUT` via the Win32 API but does NOT clear
+/// `ENABLE_QUICK_EDIT_MODE`, so users can still select and copy text.
+/// (QuickEdit intercepts wheel events in legacy conhost but has no effect in Windows Terminal.)
 ///
-/// 所有平台: 写入 ANSI 转义序列启用鼠标报告（仅按钮+滚轮，不含鼠标移动）。
-/// 在支持 Shift+拖拽的终端中，用户可通过 Shift 临时绕过鼠标追踪进行文本选择。
+/// All platforms: writes ANSI escape sequences to enable mouse reporting (buttons + wheel
+/// only, no mouse motion). On terminals supporting Shift+drag, users can hold Shift to
+/// temporarily bypass mouse tracking for text selection.
 fn enable_mouse_input() -> Result<()> {
     #[cfg(windows)]
     {
@@ -53,7 +54,7 @@ fn enable_mouse_input() -> Result<()> {
         let mode = ConsoleMode::from(Handle::current_in_handle()?);
         let current = mode.mode()?;
         // ENABLE_MOUSE_INPUT=0x10, ENABLE_EXTENDED_FLAGS=0x80, ENABLE_WINDOW_INPUT=0x08
-        // 不清除 ENABLE_QUICK_EDIT_MODE，让用户可以选择和复制文本
+        // don't clear ENABLE_QUICK_EDIT_MODE so users can select and copy text
         let new_mode = current | 0x0010 | 0x0080 | 0x0008;
         mode.set_mode(new_mode)?;
     }

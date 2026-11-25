@@ -4,11 +4,11 @@ use super::wrap_text;
 
 pub(super) const MAX_DISPLAY_DIFF_LINES: usize = 40;
 
-/// 背景色常量（暗色终端调色板）
+/// Background color constants (dark terminal palette)
 const ADD_LINE_BG: Color = Color::Rgb(33, 58, 43); // #213A2B
 const DEL_LINE_BG: Color = Color::Rgb(74, 34, 29); // #4A221D
 
-/// 预计算格式的单个 hunk（见 tools 模块 `serialize_diff_data`）
+/// A single hunk in the precomputed format (see `serialize_diff_data` in the tools module)
 struct DiffHunk {
     old_start: Option<usize>,
     new_start: Option<usize>,
@@ -16,7 +16,7 @@ struct DiffHunk {
 }
 
 enum DiffPayload {
-    /// 新格式：工具执行时预计算的 hunk 数据（`format: "diff"`）
+    /// New format: hunk data precomputed at tool execution time (`format: "diff"`)
     Hunks {
         additions: usize,
         deletions: usize,
@@ -25,9 +25,10 @@ enum DiffPayload {
         is_new_file: bool,
         hunks: Vec<DiffHunk>,
     },
-    /// 旧格式：完整 old/new 全文，渲染时现场计算 diff。
-    /// TODO(过渡期兼容): 仅用于渲染本次升级前落库的存量数据，
-    /// 过渡期结束后（如 0.10.0）删除此分支，届时旧数据不再渲染 diff。
+    /// Legacy format: full old/new text; diff computed on the fly at render time.
+    /// TODO(transition compat): only used to render legacy data persisted before
+    /// this upgrade. Remove this branch after the transition period (e.g. 0.10.0);
+    /// legacy data will no longer render a diff.
     Legacy { old: Option<String>, new: String },
 }
 
@@ -84,7 +85,7 @@ fn parse_diff_data(json: &str) -> Option<DiffData> {
     })
 }
 
-/// 渲染用的中间行
+/// Intermediate line used for rendering
 struct DiffLine {
     sign: char,
     ln: Option<usize>,
@@ -105,7 +106,7 @@ pub(super) fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>
         None => return Vec::new(),
     };
 
-    // 展开为中间行 + hunk 边界 + 统计行
+    // Expand into intermediate lines + hunk boundaries + stats line
     let (mut diff_lines, hunk_starts, stats_text, ln_width) = match &data.payload {
         DiffPayload::Hunks {
             additions,
@@ -210,13 +211,13 @@ pub(super) fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>
         }
     };
 
-    // 渲染上限：无论数据来自预计算 hunk 还是旧格式全文，最多显示 40 行
+    // Render cap: at most 40 lines whether data comes from precomputed hunks or legacy full text
     let truncated = diff_lines.len() > MAX_DISPLAY_DIFF_LINES;
     if truncated {
         diff_lines.truncate(MAX_DISPLAY_DIFF_LINES);
     }
 
-    // 统计行：path (+N -M) 或 path (new file, +N lines)
+    // Stats line: path (+N -M) or path (new file, +N lines)
     let short_path = data.path.rsplit(['/', '\\']).next().unwrap_or(&data.path);
 
     let mut lines = Vec::new();
@@ -237,15 +238,15 @@ pub(super) fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>
         ),
     ]));
 
-    // diff body — 带行号 gutter 和背景色
+    // diff body — with line-number gutter and background colors
     let indent = "    ";
 
-    // 前缀宽度: 4(indent) + ln_width + 1(gutter空格) + 1(sign)
+    // Prefix width: 4(indent) + ln_width + 1(gutter space) + 1(sign)
     let prefix_w = 4 + ln_width + 2;
     let content_w = width.saturating_sub(prefix_w as u16) as usize;
 
     for (idx, dl) in diff_lines.iter().enumerate() {
-        // hunk 分隔符 ⋮（首组除外）
+        // Hunk separator ⋮ (except for the first group)
         if idx > 0 && hunk_starts.contains(&idx) {
             let spacer = format!("{:width$} ", "", width = ln_width.max(1));
             lines.push(Line::from(vec![
@@ -264,7 +265,7 @@ pub(super) fn render_diff_from_json(json: &str, width: u16) -> Vec<Line<'static>
             _ => (Color::DarkGray, Color::DarkGray, None),
         };
 
-        // 行号（insert/new 用新行号，delete 用旧行号，context 用新行号）
+        // Line numbers (insert/new use new line numbers, delete uses old, context uses new)
         let gutter_text = match dl.ln {
             Some(n) => format!("{:>width$} ", n, width = ln_width),
             None => format!("{:width$} ", "", width = ln_width),

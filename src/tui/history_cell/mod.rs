@@ -62,9 +62,9 @@ impl ToolCategory {
             "grep" => Self::Search,
             "glob" => Self::Glob,
             "web_fetch" => Self::WebFetch,
-            "bash" => Self::Command,
+            "shell" => Self::Command,
             "todo_write" => Self::Todo,
-            "ask_user" => Self::AskUser,
+            "question" => Self::AskUser,
             "skill" => Self::Skill,
             "task" => Self::Task,
             n if n.starts_with("mcp_") => Self::Mcp,
@@ -505,7 +505,7 @@ pub(crate) fn tool_call_summary(name: &str, arguments: &str) -> String {
             }
         }
         "write" => args["file_path"].as_str().unwrap_or("").to_string(),
-        "bash" => {
+        "shell" => {
             let cmd = args["command_string"].as_str().unwrap_or("");
             truncate_str(cmd, 60)
         }
@@ -536,7 +536,7 @@ pub(crate) fn tool_call_summary(name: &str, arguments: &str) -> String {
             let count = args["todos"].as_array().map(|a| a.len()).unwrap_or(0);
             format!("{} items", count)
         }
-        "ask_user" => {
+        "question" => {
             let count = args["questions"].as_array().map(|a| a.len()).unwrap_or(0);
             if count == 0 {
                 String::new()
@@ -618,7 +618,7 @@ pub(crate) fn tool_result_summary(name: &str, result: &str) -> String {
                 truncate_str(result.trim(), 40)
             }
         }
-        "bash" => {
+        "shell" => {
             let trimmed = result.trim();
             if trimmed.is_empty() {
                 "no output".to_string()
@@ -669,7 +669,7 @@ pub(crate) fn tool_result_summary(name: &str, result: &str) -> String {
                 result.matches('○').count() + completed + in_progress + result.matches("✗").count();
             format!("{}/{} done", completed, total)
         }
-        "ask_user" => {
+        "question" => {
             if result.contains("[User Cancelled]") {
                 "cancelled".to_string()
             } else {

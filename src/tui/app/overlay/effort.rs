@@ -46,9 +46,10 @@ impl App {
         };
 
         match action {
-            // 未选择，关闭菜单
+            // No selection made; close the menu
             Some(None) => self.state = AppState::Chat,
-            // 确认选择：回 Chat 后应用（agent + config 持久化 + 共享配置 + 回显）
+            // Confirm the selection: applied after returning to Chat
+            // (agent + config persistence + shared config + echo display)
             Some(Some(effort)) => {
                 self.state = AppState::Chat;
                 self.apply_effort(effort);

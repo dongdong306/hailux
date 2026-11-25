@@ -1,5 +1,7 @@
-// PasteBurst 粘贴判定状态机：区分「手打字符」与「粘贴注入」的时序启发式。
-// Windows 与 Unix 的空闲超时常量不同（见 input.rs 的 paste 探测说明）。
+// PasteBurst paste-detection state machine: timing heuristics that distinguish
+// hand-typed characters from paste-injected input.
+// The idle timeout constants differ between Windows and Unix (see the paste
+// detection notes in input.rs).
 use std::time::{Duration, Instant};
 
 const PASTE_BURST_MIN_CHARS: u16 = 3;

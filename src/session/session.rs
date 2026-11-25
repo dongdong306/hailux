@@ -10,7 +10,7 @@ use color_eyre::Result;
 
 use crate::agent::event::{CoreEventTx, EventHub};
 use crate::agent::subagent::{self, SubagentConfig, TaskTool};
-use crate::agent::{Agent, AskTool, CommandRegistry, skill};
+use crate::agent::{Agent, CommandRegistry, QuestionTool, skill};
 use crate::config;
 use crate::mcp::SharedMcpBackends;
 use crate::storage::{ChatStorage, StoredMessage};
@@ -53,7 +53,7 @@ impl ChatSession {
         if let Some(tx) = initial_tx {
             hub.set(tx);
         }
-        agent.register_tool(Box::new(AskTool::new(hub.clone())));
+        agent.register_tool(Box::new(QuestionTool::new(hub.clone())));
 
         if !subagents.iter().any(|s| s.name == "general") {
             subagents.insert(0, subagent::builtin_general_subagent(&cfg.main_model));

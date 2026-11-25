@@ -6,17 +6,17 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR_NAME: &str = ".hailux";
 const COMMAND_DIR_NAME: &str = "commands";
 
-/// 内建 `/init` 命令名（app.rs 中 plan 模式守卫会引用）。
+/// Builtin `/init` command name (referenced by the plan-mode guard in app.rs).
 pub const INIT_COMMAND_NAME: &str = "init";
 
-/// 公共 trait：所有提示词命令（内建与自定义）的统一抽象。
+/// Common trait: a unified abstraction over all prompt commands (builtin and custom).
 pub trait PromptCommand: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn render(&self, args: &str) -> String;
 }
 
-/// 内建提示词命令：模板存储在代码中。
+/// Builtin prompt command: the template is stored in code.
 pub struct BuiltinPromptCommand {
     pub name: &'static str,
     pub description: &'static str,
@@ -35,7 +35,7 @@ impl PromptCommand for BuiltinPromptCommand {
     }
 }
 
-/// 自定义命令：从 `.md` 文件加载。
+/// Custom command: loaded from a `.md` file.
 pub struct CustomCommand {
     pub name: String,
     pub description: String,
@@ -56,9 +56,9 @@ impl PromptCommand for CustomCommand {
     }
 }
 
-/// 解析 `/name args` 格式的输入，返回 (命令名, 参数文本)。
-/// 输入必须以 `/` 开头。命令名和参数之间以首个空格分隔。
-/// （TUI 与 Web 后端共用）
+/// Parses input of the `/name args` form, returning (command name, argument text).
+/// The input must start with `/`. The command name and arguments are split at the first space.
+/// (Shared by the TUI and the Web backend)
 pub fn parse_slash_input(input: &str) -> Option<(String, String)> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -77,16 +77,16 @@ pub fn parse_slash_input(input: &str) -> Option<(String, String)> {
     }
 }
 
-/// 解析命令 `.md` 文件的 YAML frontmatter，提取 description。
-/// 复用 `utils::split_frontmatter` / `utils::strip_frontmatter_value`，
-/// 避免与 skill.rs、subagent.rs 中的解析逻辑重复。
+/// Parses the YAML frontmatter of a command `.md` file, extracting the description.
+/// Reuses `utils::split_frontmatter` / `utils::strip_frontmatter_value`
+/// to avoid duplicating the parsing logic in skill.rs and subagent.rs.
 ///
-/// 期望格式：
+/// Expected format:
 /// ```text
 /// ---
-/// description: 描述此命令的作用
+/// description: describe what this command does
 /// ---
-/// [模板正文，可包含 $ARGUMENTS]
+/// [template body, may contain $ARGUMENTS]
 /// ```
 fn parse_command_md(raw: &str) -> Option<(String, String)> {
     let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw);
@@ -114,7 +114,7 @@ fn parse_command_md(raw: &str) -> Option<(String, String)> {
     Some((description.unwrap_or_default(), content.to_string()))
 }
 
-/// 从指定目录扫描 `*.md` 文件，返回 CustomCommand 列表。
+/// Scans `*.md` files in the given directory and returns a list of CustomCommands.
 fn scan_dir(root: &Path) -> Result<Vec<CustomCommand>> {
     let mut out = Vec::new();
     if !root.is_dir() {
@@ -157,21 +157,21 @@ fn scan_dir(root: &Path) -> Result<Vec<CustomCommand>> {
     Ok(out)
 }
 
-/// 统一命令注册表：管理所有提示词命令（内建 + 自定义）。
+/// Unified command registry: manages all prompt commands (builtin + custom).
 #[derive(Default)]
 pub struct CommandRegistry {
     commands: Vec<Box<dyn PromptCommand>>,
 }
 
 impl CommandRegistry {
-    /// 从内建 prompt 命令和文件系统（全局 + 项目级）发现所有命令。
-    /// 优先级：项目级 > 全局 > 内建。
+    /// Discovers all commands from builtin prompt commands and the filesystem (global + project level).
+    /// Priority: project level > global > builtin.
     pub fn discover(work_dir: &Path) -> Result<Self> {
         let home = dirs::home_dir();
         Self::discover_from(work_dir, home.as_deref())
     }
 
-    /// `discover_from` 接受显式的 home 路径，便于测试注入。
+    /// `discover_from` takes an explicit home path for easy test injection.
     fn discover_from(work_dir: &Path, home: Option<&Path>) -> Result<Self> {
         let builtins: Vec<BuiltinPromptCommand> = builtin_prompt_commands(work_dir);
         let mut by_name: HashMap<String, Box<dyn PromptCommand>> = HashMap::new();
@@ -205,8 +205,9 @@ impl CommandRegistry {
             .map(|c| c.as_ref())
     }
 
-    /// 将 prompt 型斜杠命令（`/name args`）展开为完整提示词。
-    /// 非命令输入或命令名未注册时返回 `None`（调用方按普通消息处理）。
+    /// Expands a prompt-style slash command (`/name args`) into the full prompt.
+    /// Returns `None` for non-command input or unregistered command names
+    /// (the caller treats it as a plain message).
     pub fn render_prompt_command(&self, input: &str) -> Option<String> {
         let (name, args) = parse_slash_input(input)?;
         self.find(&name).map(|cmd| cmd.render(&args))
@@ -220,8 +221,8 @@ impl CommandRegistry {
     }
 }
 
-/// 内建 prompt 命令列表。`init` 模板中会注入工作目录路径，
-/// 让 LLM 知道 AGENTS.md 应写入/更新的位置。
+/// List of builtin prompt commands. The `init` template has the working directory path
+/// injected so the LLM knows where AGENTS.md should be written/updated.
 fn builtin_prompt_commands(work_dir: &Path) -> Vec<BuiltinPromptCommand> {
     let init_template = crate::prompts::INIT.replace("{path}", &work_dir.display().to_string());
     vec![BuiltinPromptCommand {

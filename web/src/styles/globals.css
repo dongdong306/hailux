@@ -2,7 +2,8 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* ── shadcn/ui 语义令牌（与 wendao-web 保持一致：亮色默认，.dark 切换）── */
+/* ── shadcn/ui semantic tokens (kept in sync with wendao-web: light by
+   default, .dark switches) ── */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -35,10 +36,11 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  /* hailux 语义补充：警示（Plan 模式徽标等） */
+  /* hailux semantic additions: warning (Plan-mode badge etc.) */
   --color-warning: var(--warning);
-  /* token 计量三色（输入 / 缓存命中 / 输出）——统计页与顶栏共用，
-     冷绿进 · 电青省 · 琥珀出，其余界面保持灰阶 */
+  /* token meter trio (input / cache hit / output) — shared by the stats page
+     and top bar: cool green in · electric cyan cache · amber out; the rest of
+     the UI stays greyscale */
   --color-meter-in: var(--meter-in);
   --color-meter-cache: var(--meter-cache);
   --color-meter-out: var(--meter-out);
@@ -151,7 +153,7 @@ body,
   background: transparent;
 }
 
-/* ── 输入框滚动条（细、低对比，弱化存在感）────────────────── */
+/* ── Input-box scrollbar (thin, low contrast, understated) ────────────── */
 .hlx-input-scroll {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklab, var(--foreground) 14%, transparent)
@@ -168,7 +170,7 @@ body,
   background: color-mix(in oklab, var(--foreground) 26%, transparent);
 }
 
-/* ── 工具输出块（权限 patterns 等）──────────────────────────── */
+/* ── Tool output block (permission patterns etc.) ──────────────────── */
 .hlx-code {
   overflow-x: auto;
   border-radius: 0.5rem;
@@ -181,7 +183,8 @@ body,
   word-break: break-word;
 }
 
-/* ── token 计量色配套：软 tint 底与“未命中”斜纹纹理 ────────── */
+/* ── token meter color companions: soft tint fills and the "miss" hatch
+   texture ── */
 .hlx-tint-in {
   background-color: color-mix(in oklab, var(--meter-in) 10%, transparent);
 }
@@ -191,7 +194,8 @@ body,
 .hlx-tint-out {
   background-color: color-mix(in oklab, var(--meter-out) 10%, transparent);
 }
-/* 未命中 = 付了全价的输入：输入绿的斜纹，压低存在感但不失归属 */
+/* Miss = input paid at full price: input-green hatching, understated but
+   still attributed */
 .hlx-meter-miss {
   background-color: color-mix(in oklab, var(--meter-in) 14%, transparent);
   background-image: repeating-linear-gradient(
@@ -201,7 +205,7 @@ body,
   );
 }
 
-/* diff 行染色（edit 工具 display） */
+/* diff line coloring (edit tool display) */
 .hlx-diff-add {
   color: oklch(0.55 0.14 150);
   background: oklch(0.55 0.14 150 / 0.1);
@@ -226,8 +230,10 @@ body,
   color: oklch(0.75 0.12 250);
 }
 
-/* ── 运行指示（对齐 TUI 状态横幅：braille spinner + shimmer 扫光）── */
-/* 扫光文字：高亮带从左向右周期扫过（background-clip: text） */
+/* ── Running indicator (aligned with the TUI status banner: braille spinner
+   + shimmer sweep) ── */
+/* Shimmer text: a highlight band periodically sweeps left to right
+   (background-clip: text) */
 .hlx-shimmer {
   background: linear-gradient(
     100deg,
@@ -250,7 +256,8 @@ body,
   }
 }
 
-/* braille spinner 帧（与 TUI SPINNER_FRAMES 一致，80ms/帧）——content 动画作用于伪元素 */
+/* braille spinner frames (same as the TUI's SPINNER_FRAMES, 80ms/frame) —
+   the content animation runs on the pseudo-element */
 .hlx-spinner::after {
   content: "⠋";
   animation: hlx-spinner-frames 0.8s steps(1) infinite;

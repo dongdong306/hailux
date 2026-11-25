@@ -11,8 +11,9 @@ use super::model_picker::wrap_input;
 
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
 
-/// ask_user 应答文本转义：`\` 与 `"` 均转义（先 `\` 后 `"`，避免 `\"` 歧义），
-/// 与 history_cell::parse_ask_user_pairs 的还原规则配对
+/// Escapes question-tool reply text: both `\` and `"` are escaped (`\` first,
+/// then `"`, avoiding `\"` ambiguity), paired with history_cell's
+/// parse_ask_user_pairs for lossless restoration.
 pub(crate) fn ask_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -77,7 +78,8 @@ impl AskUserState {
         let opts = &q.options;
         if self.selected < opts.len() {
             self.answers[self.current_tab] = Some(opts[self.selected].label.clone());
-            // 对齐 Web：选中后不自动提交，统一进入 Confirm 页确认
+            // Align with Web: selecting an option does not auto-submit; it always
+            // moves to the Confirm tab for confirmation
             self.current_tab += 1;
             if self.current_tab > confirm_tab {
                 self.current_tab = confirm_tab;
@@ -235,7 +237,8 @@ impl AskUserState {
                 }
                 *ci = text.clone();
                 st.answers[st.current_tab] = Some(text.clone());
-                // 对齐 Web：自定义输入回车后进入 Confirm 页，不自动提交
+                // Align with Web: pressing Enter on a custom input moves to the
+                // Confirm tab; it does not auto-submit
                 let confirm_tab = st.questions.len();
                 st.current_tab += 1;
                 if st.current_tab > confirm_tab {
@@ -340,7 +343,8 @@ pub(crate) fn render_ask_user(
     let dialog_width = (area.width as usize).clamp(50, 80);
     let inner_w = dialog_width.saturating_sub(4);
 
-    // 标签栏恒占 1 行（单问题也含 Confirm 页），+3 为边框、+1 为帮助行
+    // The tab bar always takes 1 row (the Confirm tab exists even for a single
+    // question); +3 for borders, +1 for the help row
     let question_lines = if is_confirm {
         let mut total = 0;
         for (i, q) in questions.iter().enumerate() {

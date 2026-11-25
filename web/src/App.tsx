@@ -1,4 +1,5 @@
-// 根组件：wendao ChatPage 同构布局 —— 可折叠侧边栏 + 顶部工具栏 + 对话区
+// Root component: wendao ChatPage isomorphic layout — collapsible sidebar +
+// top toolbar + conversation area
 import { useEffect, useState } from "react";
 import {
   ArrowDownToLine,
@@ -23,7 +24,8 @@ import { McpManager } from "./components/mcp-manager";
 import { StatsView } from "./components/stats-view";
 import { cn, fmtTokens } from "./lib/utils";
 
-/** 占用环与百分比的共用配色：≥90% 红 / ≥80% 黄 / 正常计量绿 */
+/** Shared color scheme for usage rings and percentages: ≥90% red / ≥80%
+ *  yellow / normal meter green */
 function ringColor(pct: number | null): string {
   const ratio = pct === null ? 0 : Math.min(pct, 1);
   return pct === null
@@ -35,7 +37,8 @@ function ringColor(pct: number | null): string {
         : "text-meter-cache";
 }
 
-/** 上下文占用环形指示（16px）：底环 muted + 进度环 accent，中心不留字（数值在旁边） */
+/** Context usage ring indicator (16px): muted base ring + accent progress
+ *  ring, no text in the center (the number sits beside it) */
 function ContextRing({ pct }: { pct: number | null }) {
   const r = 6;
   const c = 2 * Math.PI * r;
@@ -79,25 +82,28 @@ export default function App() {
   const promptTokens = useApp((s) => s.promptTokens);
   const completionTokens = useApp((s) => s.completionTokens);
   const cachedTokens = useApp((s) => s.cachedTokens);
-  // 上下文占用（最后请求的输入+输出 ≈ 当前上下文大小；右上角环形指示用）
+  // Context usage (last request input+output ≈ current context size; feeds
+  // the top-right ring indicator)
   const contextPromptTokens = useApp((s) => s.contextPromptTokens);
   const contextCompletionTokens = useApp((s) => s.contextCompletionTokens);
   const contextWindow = useApp((s) => s.contextWindow);
   const contextUsed = contextPromptTokens + contextCompletionTokens;
   const contextPct =
     contextWindow > 0 ? Math.min(contextUsed / contextWindow, 1) : null;
-  // 提问 requestId 变化时通过 key 强制重挂载 AskUserDialog，内部状态零残留
+  // The question requestId change remounts AskUserDialog via key, leaving no
+  // residual internal state
   const askRequestId = useApp((s) => s.askUser?.requestId);
-  // 本次对话累计的缓存命中率
+  // Cache hit rate accumulated in this conversation
   const hitRate =
     promptTokens > 0 ? (cachedTokens / promptTokens) * 100 : 0;
 
   useEffect(() => {
-    // 启动：初始化项目目录（上次访问 > 服务器默认目录）并拉取该项目会话
+    // Startup: initialize the project dir (last visited > server default dir)
+    // and fetch that project's sessions
     initWorkDir().catch(() => {});
     loadModels().catch(() => {});
 
-    // 全局快捷键
+    // Global shortcuts
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key === "n") {
         e.preventDefault();
@@ -105,7 +111,8 @@ export default function App() {
       }
       if (e.ctrlKey && e.key === "m") {
         e.preventDefault();
-        // 弹窗打开时忽略：菜单层级低于弹窗遮罩，避免开出被遮住的隐形菜单
+        // Ignore while a dialog is open: the menu layer sits below the dialog
+        // overlay, avoiding a hidden covered menu
         if (anyDialogOpen()) return;
         const s = useApp.getState();
         s.setModelMenu(!s.showModelMenu);
@@ -116,8 +123,10 @@ export default function App() {
   }, [initWorkDir, loadModels]);
 
   useEffect(() => {
-    // 页面重新可见时对账全局模式（防止标签页挂起期间其他入口改过 YOLO/Plan）。
-    // 只处理「隐藏 → 可见」转换：初始可见事件与 initWorkDir 的对账重叠，跳过
+    // Reconcile the global mode when the page becomes visible again (other
+    // entry points may have changed YOLO/Plan while the tab was suspended).
+    // Only handle the "hidden → visible" transition: the initial visible
+    // event overlaps with initWorkDir's reconciliation, skip it
     let wasHidden = document.visibilityState === "hidden";
     const onVisible = () => {
       const visible = document.visibilityState === "visible";
@@ -134,7 +143,7 @@ export default function App() {
   return (
     <HailuxRuntimeProvider>
       <div className="flex h-dvh overflow-hidden bg-background">
-        {/* 侧边栏 */}
+        {/* Sidebar */}
         <aside
           className={cn(
             "shrink-0 border-r border-border/60 bg-muted/20 transition-all duration-300 ease-out",
@@ -151,9 +160,9 @@ export default function App() {
           </div>
         </aside>
 
-        {/* 主对话区 */}
+        {/* Main conversation area */}
         <main className="flex min-w-0 flex-1 flex-col">
-          {/* 顶部工具栏 */}
+          {/* Top toolbar */}
           <div className="flex h-12 shrink-0 items-center border-b border-border/40 px-3">
             <button
               type="button"
@@ -171,7 +180,8 @@ export default function App() {
               hailux
             </span>
 
-            {/* 右上角：token 用量 + 上下文占用环——本会话累计；图标用计量三色，数值保持灰阶 */}
+            {/* Top right: token usage + context usage ring — accumulated this
+                session; icons use the three meter colors, numbers stay grey */}
             <span className="ml-auto flex items-center gap-2.5 pr-1 text-xs tabular-nums text-muted-foreground/60">
               <span
                 className="flex items-center gap-0.5"
@@ -211,7 +221,8 @@ export default function App() {
             </span>
           </div>
 
-          {/* 主区域：聊天 / 技能管理 / MCP 管理 / 用量统计 / 设置（内联切换） */}
+          {/* Main area: chat / skills manager / MCP manager / usage stats /
+              settings (inline switching) */}
           {activeView === "skills" ? (
             <SkillsManager />
           ) : activeView === "mcp" ? (

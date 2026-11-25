@@ -17,23 +17,24 @@ pub(super) struct SkillsQuery {
     work_dir: Option<String>,
 }
 
-/// 全局 skills 根：~/.hailux/skills
+/// Global skills root: ~/.hailux/skills
 fn global_skills_root() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".hailux").join("skills"))
 }
 
-/// 项目级 skills 根：<work_dir>/.hailux/skills
+/// Project-level skills root: <work_dir>/.hailux/skills
 fn project_skills_root(work_dir: &std::path::Path) -> std::path::PathBuf {
     work_dir.join(".hailux").join("skills")
 }
 
-/// 路径比较键：统一分隔符，Windows 下大小写不敏感
+/// Path comparison key: unified separators, case-insensitive on Windows
 fn norm_cmp_key(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     if cfg!(windows) { s.to_lowercase() } else { s }
 }
 
-/// path 是否位于 root 之下（含相等；内部各自 canonicalize，消除 verbatim 前缀差异）
+/// Whether `path` sits under `root` (inclusive; each side is canonicalized internally
+/// to remove verbatim prefix differences)
 fn path_is_under(path: &std::path::Path, root: &std::path::Path) -> bool {
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let p = norm_cmp_key(&canon(path));
@@ -41,7 +42,7 @@ fn path_is_under(path: &std::path::Path, root: &std::path::Path) -> bool {
     p.starts_with(&format!("{r}/")) || p == r
 }
 
-/// 判定 skill 来源作用域（依据 SKILL.md 路径前缀）
+/// Determine a skill's source scope (based on the SKILL.md path prefix)
 pub(super) fn skill_scope(location: &std::path::Path, work_dir: &std::path::Path) -> &'static str {
     if global_skills_root().is_some_and(|root| path_is_under(location, &root)) {
         return "global";
@@ -52,7 +53,8 @@ pub(super) fn skill_scope(location: &std::path::Path, work_dir: &std::path::Path
     "global"
 }
 
-/// 技能名约束：字母数字开头，仅含字母数字 / `-` / `_`，≤ 64 字符（防路径穿越）
+/// Skill name constraint: starts with an alphanumeric, contains only alphanumerics /
+/// `-` / `_`, at most 64 chars (guards against path traversal)
 pub(super) fn valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -65,7 +67,8 @@ pub(super) fn valid_skill_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// 渲染 SKILL.md 内容（frontmatter + 正文）。description 压成单行以适配行级 frontmatter 解析。
+/// Render SKILL.md content (frontmatter + body). description is collapsed to a single
+/// line to fit line-based frontmatter parsing.
 pub(super) fn render_skill_md(name: &str, description: &str, content: &str) -> String {
     let desc = description.replace(['\r', '\n'], " ");
     format!(
@@ -74,10 +77,11 @@ pub(super) fn render_skill_md(name: &str, description: &str, content: &str) -> S
     )
 }
 
-/// 安全校验 location：canonicalize 后必须位于某个 skills 根之下至少两层
-/// （`<skills 根>/<技能目录>/SKILL.md`）且文件名为 SKILL.md，
-/// 返回 canonicalize 结果（防任意文件读写删除）。
-/// 至少两层是硬性要求：否则 `<根>/SKILL.md` 的 parent 即根目录，删除时会抹掉整个 skills 根。
+/// Safety-validate location: after canonicalization it must sit at least two levels
+/// under a skills root (`<skills root>/<skill dir>/SKILL.md`) with the file name
+/// SKILL.md; returns the canonicalized path (guards arbitrary file read/write/delete).
+/// The two-level minimum is a hard requirement: otherwise the parent of
+/// `<root>/SKILL.md` is the root itself and deletion would wipe the whole skills root.
 pub(super) fn validate_skill_location(
     location: &str,
     work_dir: &std::path::Path,
@@ -87,7 +91,7 @@ pub(super) fn validate_skill_location(
         return None;
     }
     let nested_under = |root: &std::path::Path| {
-        // 两边都 canonicalize 消除 verbatim（`\\?\`）前缀差异后才能做相等比较
+        // Canonicalize both sides to remove verbatim (`\\?\`) prefix differences before comparing
         let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         path_is_under(&canonical, root)
             && canonical
@@ -99,13 +103,13 @@ pub(super) fn validate_skill_location(
     (global_ok || project_ok).then_some(canonical)
 }
 
-/// 技能目录内文件列表上限（防止巨型目录拖垮响应）
+/// Max number of files listed per skill directory (keeps huge directories from stalling responses)
 const SKILL_FILES_MAX: usize = 500;
-/// 单文件内容读取上限（1 MiB，防误读大二进制）
+/// Per-file content read cap (1 MiB, guards against accidentally reading large binaries)
 const SKILL_FILE_CONTENT_MAX: u64 = 1024 * 1024;
 
-/// 递归列出技能目录内全部文件（相对路径 + 字节大小）。
-/// 跳过隐藏文件/目录；超上限即截断。
+/// Recursively list all files in a skill directory (relative path + byte size).
+/// Skips hidden files/dirs; truncates once past the cap.
 fn list_skill_files(base_dir: &std::path::Path) -> Vec<super::super::protocol::SkillFileDto> {
     let mut out = Vec::new();
     let mut stack = vec![(base_dir.to_path_buf(), String::new())];
@@ -146,7 +150,8 @@ pub(super) async fn list_skills(
     Query(q): Query<SkillsQuery>,
 ) -> Response {
     let dir = resolve_dir(&state, q.work_dir.as_deref());
-    // 直接磁盘发现（不构建 ChatSession）：目录失效时仅跳过项目级，全局技能仍可列出
+    // Direct on-disk discovery (no ChatSession built): if a directory is invalid only
+    // the project level is skipped; global skills still list
     let skills = crate::agent::skill::discover_skills(&dir).unwrap_or_default();
     Json(
         skills
@@ -164,13 +169,13 @@ pub(super) async fn list_skills(
     .into_response()
 }
 
-/// 读取技能目录内单个文件内容（UI 查看附属脚本/参考文件用）。
+/// Read a single file inside a skill directory (used by the UI to view companion scripts/reference files).
 #[derive(Deserialize)]
 pub(super) struct SkillFileQuery {
     work_dir: Option<String>,
-    /// 技能 SKILL.md 绝对路径（定位技能目录）
+    /// Absolute path of the skill's SKILL.md (locates the skill directory)
     location: String,
-    /// 技能目录内的相对路径（禁止绝对路径与 `..`）
+    /// Relative path inside the skill directory (absolute paths and `..` are rejected)
     file: String,
 }
 
@@ -190,7 +195,7 @@ pub(super) async fn read_skill_file(
         return (StatusCode::BAD_REQUEST, "无法定位技能目录").into_response();
     };
 
-    // 相对路径安全校验：拒绝绝对路径与父目录引用
+    // Relative path safety check: reject absolute paths and parent-directory references
     let rel = std::path::Path::new(&q.file);
     if rel.is_absolute()
         || rel
@@ -247,7 +252,7 @@ pub(super) async fn create_skill(
         }
     };
 
-    // 发现层面的名称冲突（同名会互相覆盖）
+    // Name conflict at the discovery level (same names overwrite each other)
     let existing = crate::agent::skill::discover_skills(&dir).unwrap_or_default();
     if existing.iter().any(|s| s.name == req.name) {
         return (
@@ -325,7 +330,7 @@ pub(super) async fn update_skill(
         }
     };
 
-    // 改名冲突：新名称已被其他技能占用
+    // Rename conflict: the new name is already taken by another skill
     let existing = crate::agent::skill::discover_skills(&dir).unwrap_or_default();
     let self_key = norm_cmp_key(&canonical);
     if existing
@@ -367,7 +372,7 @@ pub(super) async fn delete_skill(
                 .into_response();
         }
     };
-    // 删除整个技能目录（含 scripts/ 等附属文件）
+    // Delete the entire skill directory (including companion files like scripts/)
     let base_dir = match canonical.parent() {
         Some(p) => p.to_path_buf(),
         None => return (StatusCode::BAD_REQUEST, "无法定位技能目录").into_response(),
