@@ -583,8 +583,7 @@ pub(crate) fn render_ask_user(
             let (wrapped, cur_row, cur_col) = wrap_input(custom_input, custom_cursor, tw);
 
             for (li, wline) in wrapped.iter().enumerate() {
-                let is_cur_line = li == cur_row;
-                if is_cur_line {
+                if li == cur_row {
                     editing_line_idx = Some(lines.len());
                 }
 
@@ -600,9 +599,6 @@ pub(crate) fn render_ask_user(
                     wline.clone(),
                     Style::default().fg(Color::White),
                 ));
-                if is_cur_line {
-                    spans.push(Span::styled("|", Style::default().fg(Color::Gray)));
-                }
                 lines.push(Line::from(spans));
             }
 
