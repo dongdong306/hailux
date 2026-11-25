@@ -29,8 +29,6 @@ use crate::permission::PermissionManager;
 
 use super::CANCEL_POLL_INTERVAL;
 
-const PLAN_MODE_PROMPT: &str = crate::prompts::PLAN_MODE;
-
 #[derive(Default)]
 pub(super) struct PartialToolCall {
     pub(super) id: String,
@@ -42,6 +40,8 @@ pub(super) struct AgentStreamState {
     pub(super) client: Client<OpenAIConfig>,
     pub(super) tool_registry: ToolRegistry,
     pub(super) messages: Vec<SharedMessage>,
+    /// Anchors PersistUserReminder events (interjection plan reminders)
+    pub(super) session_id: String,
     pub(super) model: String,
     pub(super) model_display: String,
     pub(super) max_tokens: u32,
@@ -64,11 +64,10 @@ impl AgentStreamState {
         &self,
     ) -> Result<CompatibleCreateChatCompletionRequestArgs, Box<dyn Error + Send + Sync>> {
         let tools = self.tool_registry.to_chat_tools_filtered(self.plan_mode);
-        let mut messages = self.messages.clone();
-        if self.plan_mode {
-            super::messages::append_text_to_last_user_message(&mut messages, PLAN_MODE_PROMPT);
-        }
-        let messages = sanitize_messages_for_request(&messages, self.supports_vision);
+        // Plan reminders live in the message context itself (appended at
+        // entry, see chat_stream / drain_interjections) — no request-level
+        // injection here
+        let messages = sanitize_messages_for_request(&self.messages, self.supports_vision);
         // Fill in tool results for dangling tool_calls left by interrupts /
         // disconnects / crashes so no provider ever sees the sequence
         let messages = ensure_tool_call_parity(&messages);
@@ -142,6 +141,24 @@ pub(super) async fn drain_interjections(
         ));
         state.messages.push(Arc::clone(&msg));
         let _ = event_tx.send(CoreEvent::UserMessage { interjection }).await;
+        // Plan runs carry the reminder on every user entry (persistent
+        // context, persisted via PersistUserReminder — arrives after the
+        // UserMessage echo so the consumer anchors the freshly persisted
+        // row). The exit-reminder transition is always consumed at
+        // chat_stream entry before a run spawns, so only the plan branch
+        // can fire here.
+        if state.plan_mode {
+            super::messages::append_text_to_last_user_message(
+                &mut state.messages,
+                crate::prompts::PLAN_MODE,
+            );
+            let _ = event_tx
+                .send(CoreEvent::PersistUserReminder {
+                    session_id: state.session_id.clone(),
+                    reminder: crate::prompts::PLAN_MODE.to_string(),
+                })
+                .await;
+        }
         injected += 1;
     }
     injected

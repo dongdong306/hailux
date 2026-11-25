@@ -154,9 +154,10 @@ export function createRunSink(
     };
     let items = get().items;
     // A retry notice is transient: the next attempt's first streamed output
-    // (content / reasoning / tool call) removes it — a successful retry
-    // leaves no trace; a fully failed retry keeps its last notice as the
-    // error trail (aligns with the TUI drop_trailing_retry_notice)
+    // (content / reasoning / tool call) removes it. Exhausted retries emit
+    // their final failure as an AgentChunk("\n[Error: ...]"), which drops the
+    // trailing notice the same way — the error line replaces the notice as
+    // the error trail (aligns with the TUI drop_trailing_retry_notice)
     if (
       event.type === "AgentChunk" ||
       event.type === "AgentReasoningChunk" ||

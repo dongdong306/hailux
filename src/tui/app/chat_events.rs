@@ -6,7 +6,7 @@ use crate::agent::Tool;
 use crate::agent::command_def::INIT_COMMAND_NAME;
 use crate::agent::event::CoreEvent;
 use crate::agent::subagent::{self, TaskTool};
-use crate::storage::{MessageRole, StoredMessage};
+use crate::storage::{MessageRole, StoredMessage, plan_mode_runtime_meta};
 use crate::tui::command;
 use crate::tui::event::{AppEvent, CompactUsage, TaskStatus};
 use crate::tui::tasks_viewer::{TaskRecord, TaskRunStatus};
@@ -795,11 +795,7 @@ impl App {
             completion_tokens: None,
             cached_tokens: None,
             model: None,
-            runtime_meta: if self.plan_mode {
-                Some(r#"{"plan_mode":true}"#.to_string())
-            } else {
-                None
-            },
+            runtime_meta: plan_mode_runtime_meta(self.plan_mode),
             think_ms: None,
             compacted: false,
             attachments: attachments_json,
@@ -985,9 +981,10 @@ impl App {
     }
 
     /// A retry notice is transient: the next attempt's first streamed output
-    /// (content / reasoning / tool call) removes it — a successful retry
-    /// leaves no trace in the timeline; a fully failed retry keeps its last
-    /// notice as the error trail.
+    /// (content / reasoning / tool call) removes it. Exhausted retries emit
+    /// their final failure as an `AgentChunk("\n[Error: ...]")`, which drops
+    /// the trailing notice the same way — the error line replaces the notice
+    /// as the error trail.
     pub(super) fn drop_trailing_retry_notice(&mut self) {
         drop_trailing_retry_notice(&mut self.messages);
     }
@@ -1216,11 +1213,7 @@ impl App {
                 completion_tokens: None,
                 cached_tokens: None,
                 model: None,
-                runtime_meta: if self.plan_mode {
-                    Some(r#"{"plan_mode":true}"#.to_string())
-                } else {
-                    None
-                },
+                runtime_meta: plan_mode_runtime_meta(self.plan_mode),
                 think_ms: None,
                 compacted: false,
                 attachments: attachments_json,

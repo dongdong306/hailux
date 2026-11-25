@@ -353,6 +353,7 @@ fn test_stream_state_with(supports_vision: bool, native_reasoning: bool) -> Agen
         client: Client::with_config(OpenAIConfig::new().with_api_base("http://localhost:0")),
         tool_registry: registry,
         messages: Vec::new(),
+        session_id: "test-session".to_string(),
         model: "test-model".to_string(),
         model_display: "test/test-model".to_string(),
         max_tokens: 4096,
@@ -774,6 +775,245 @@ async fn drop_residual_interjections_emits_dropped_events_without_injecting() {
             }
             other => panic!("expected InterjectDropped event, got {other:?}"),
         }
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_plan_mode_appends_and_persists_plan_reminder() {
+    let mut agent = make_test_agent();
+    agent.set_plan_mode(true);
+    let (event_tx, mut event_rx) = crate::agent::event::create_core_event_channel();
+
+    agent
+        .chat_stream("s1", "规划一下重构", vec![], event_tx)
+        .unwrap();
+
+    // The reminder is part of the real context now, not a request clone
+    match agent.messages.last().unwrap().as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => {
+                assert!(t.starts_with("规划一下重构"));
+                assert!(t.contains(crate::prompts::PLAN_MODE));
+            }
+            _ => panic!("expected text content"),
+        },
+        other => panic!("expected user message, got {other:?}"),
+    }
+    assert!(agent.plan_context);
+
+    // First event (synchronous, before the run task spawns) is the
+    // persistence request anchored to the session
+    match event_rx.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder {
+            session_id,
+            reminder,
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(reminder, crate::prompts::PLAN_MODE);
+        }
+        other => panic!("expected PersistUserReminder, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_exit_reminder_on_first_chat_message_after_plan() {
+    let mut agent = make_test_agent();
+    agent.set_plan_mode(true);
+    let (tx1, _rx1) = crate::agent::event::create_core_event_channel();
+    agent.chat_stream("s1", "plan turn", vec![], tx1).unwrap();
+
+    agent.set_plan_mode(false);
+    let (tx2, mut rx2) = crate::agent::event::create_core_event_channel();
+    agent.chat_stream("s1", "chat turn", vec![], tx2).unwrap();
+
+    match agent.messages.last().unwrap().as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => {
+                assert!(t.starts_with("chat turn"));
+                assert!(
+                    t.contains(crate::prompts::PLAN_MODE_EXIT),
+                    "the transition message must carry the exit reminder"
+                );
+            }
+            _ => panic!("expected text content"),
+        },
+        other => panic!("expected user message, got {other:?}"),
+    }
+    assert!(!agent.plan_context);
+
+    match rx2.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder { reminder, .. } => {
+            assert_eq!(reminder, crate::prompts::PLAN_MODE_EXIT);
+        }
+        other => panic!("expected PersistUserReminder, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_chat_mode_without_plan_context_skips_reminders() {
+    let mut agent = make_test_agent();
+    let (event_tx, _event_rx) = crate::agent::event::create_core_event_channel();
+
+    agent
+        .chat_stream("s1", "plain message", vec![], event_tx)
+        .unwrap();
+
+    match agent.messages.last().unwrap().as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => {
+                assert_eq!(t, "plain message");
+                assert!(!t.contains(crate::prompts::PLAN_MODE));
+            }
+            _ => panic!("expected text content"),
+        },
+        other => panic!("expected user message, got {other:?}"),
+    }
+    assert!(!agent.plan_context);
+}
+
+#[tokio::test]
+async fn chat_stream_plan_mode_with_pending_error_persists_both_reminders() {
+    let mut agent = make_test_agent();
+    agent.set_plan_mode(true);
+    let (tx1, _rx1) = crate::agent::event::create_core_event_channel();
+    agent.chat_stream("s1", "plan turn", vec![], tx1).unwrap();
+
+    // Simulate the previous run stashing a failure (the spawned task would
+    // do this against the unreachable test API base)
+    if let Ok(mut slot) = agent.last_error.lock() {
+        *slot = Some("boom".to_string());
+    }
+
+    let (tx2, mut rx2) = crate::agent::event::create_core_event_channel();
+    agent.chat_stream("s1", "retry turn", vec![], tx2).unwrap();
+
+    // Both reminders on the same message: plan first, then the failure
+    match agent.messages.last().unwrap().as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => {
+                let plan_idx = t.find(crate::prompts::PLAN_MODE).unwrap();
+                let err_idx = t.find("The previous request failed").unwrap();
+                assert!(
+                    plan_idx < err_idx,
+                    "plan reminder precedes failure reminder"
+                );
+            }
+            _ => panic!("expected text content"),
+        },
+        other => panic!("expected user message, got {other:?}"),
+    }
+
+    // Persisted in the same order so rebuild splices byte-identically
+    match rx2.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder { reminder, .. } => {
+            assert_eq!(reminder, crate::prompts::PLAN_MODE);
+        }
+        other => panic!("expected plan PersistUserReminder, got {other:?}"),
+    }
+    match rx2.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder { reminder, .. } => {
+            assert!(reminder.contains("boom"));
+        }
+        other => panic!("expected failure PersistUserReminder, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_exit_reminder_with_pending_error_persists_both() {
+    let mut agent = make_test_agent();
+    agent.set_plan_mode(true);
+    let (tx1, _rx1) = crate::agent::event::create_core_event_channel();
+    agent.chat_stream("s1", "plan turn", vec![], tx1).unwrap();
+
+    // Leave plan mode while the previous run's failure is stashed: the exit
+    // reminder precedes the failure reminder, both persisted in order
+    agent.set_plan_mode(false);
+    if let Ok(mut slot) = agent.last_error.lock() {
+        *slot = Some("boom".to_string());
+    }
+
+    let (tx2, mut rx2) = crate::agent::event::create_core_event_channel();
+    agent.chat_stream("s1", "exit turn", vec![], tx2).unwrap();
+
+    match agent.messages.last().unwrap().as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => {
+                let exit_idx = t.find(crate::prompts::PLAN_MODE_EXIT).unwrap();
+                let err_idx = t.find("The previous request failed").unwrap();
+                assert!(
+                    exit_idx < err_idx,
+                    "exit reminder precedes failure reminder"
+                );
+            }
+            _ => panic!("expected text content"),
+        },
+        other => panic!("expected user message, got {other:?}"),
+    }
+    assert!(!agent.plan_context());
+
+    match rx2.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder { reminder, .. } => {
+            assert_eq!(reminder, crate::prompts::PLAN_MODE_EXIT);
+        }
+        other => panic!("expected exit PersistUserReminder, got {other:?}"),
+    }
+    match rx2.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder { reminder, .. } => {
+            assert!(reminder.contains("boom"));
+        }
+        other => panic!("expected failure PersistUserReminder, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn drain_interjections_plan_mode_persists_reminder() {
+    let mut state = test_stream_state(false);
+    state.plan_mode = true;
+    let (interject_tx, interject_rx) = tokio::sync::mpsc::channel(8);
+    state.interject_rx = interject_rx;
+    let (event_tx, mut event_rx) = crate::agent::event::create_core_event_channel();
+
+    interject_tx
+        .send(crate::agent::event::Interjection {
+            client_id: "c1".to_string(),
+            content: "补充一点".to_string(),
+            attachments: vec![],
+            mentions: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let injected = super::stream::drain_interjections(&mut state, &event_tx).await;
+    assert_eq!(injected, 1);
+
+    // Echo first, then the persistence event (consumer anchors the row the
+    // echo's persistence just wrote)
+    match event_rx.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::UserMessage { interjection } => {
+            assert_eq!(interjection.client_id, "c1");
+        }
+        other => panic!("expected UserMessage, got {other:?}"),
+    }
+    match event_rx.recv().await.unwrap() {
+        crate::agent::event::CoreEvent::PersistUserReminder {
+            session_id,
+            reminder,
+        } => {
+            assert_eq!(session_id, "test-session");
+            assert_eq!(reminder, crate::prompts::PLAN_MODE);
+        }
+        other => panic!("expected PersistUserReminder, got {other:?}"),
+    }
+
+    match state.messages.last().unwrap().as_ref() {
+        CompatibleChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => {
+                assert!(t.starts_with("补充一点"));
+                assert!(t.contains(crate::prompts::PLAN_MODE));
+            }
+            _ => panic!("expected text content"),
+        },
+        other => panic!("expected user message, got {other:?}"),
     }
 }
 

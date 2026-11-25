@@ -6,7 +6,10 @@ use color_eyre::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use super::models::{MessageRole, StoredMessage};
-use super::{ChatStorage, ensure_verbatim, from_stored_message, to_stored_message};
+use super::{
+    ChatStorage, ensure_verbatim, from_stored_message, plan_mode_runtime_meta, stored_plan_mode,
+    to_stored_message,
+};
 use crate::agent::models::CompatibleChatCompletionRequestMessage;
 
 impl ChatStorage {
@@ -796,4 +799,26 @@ async fn user_reminder_noop_without_user_row() {
         .unwrap();
     let loaded = storage.load_messages(&sid).await.unwrap();
     assert!(loaded[0].runtime_meta.is_none());
+}
+
+#[test]
+fn stored_plan_mode_reads_meta_and_plan_mode_runtime_meta_roundtrips() {
+    let mut m = make_message(MessageRole::User, "hi");
+
+    // No meta → false
+    assert!(!stored_plan_mode(&m));
+
+    // plan_mode_runtime_meta round-trips through stored_plan_mode
+    m.runtime_meta = plan_mode_runtime_meta(true);
+    assert_eq!(m.runtime_meta.as_deref(), Some(r#"{"plan_mode":true}"#));
+    assert!(stored_plan_mode(&m));
+    assert_eq!(plan_mode_runtime_meta(false), None);
+
+    // Meta carrying only other keys (e.g. failure reminders) → false
+    m.runtime_meta = Some(r#"{"system_reminder":["<system-reminder>x</system-reminder>"]}"#.into());
+    assert!(!stored_plan_mode(&m));
+
+    // Corrupt meta parses as false instead of panicking
+    m.runtime_meta = Some("not json".to_string());
+    assert!(!stored_plan_mode(&m));
 }

@@ -232,6 +232,17 @@ impl ChatSession {
         let stored = self.storage.load_messages(session_id).await?;
         let active: Vec<&crate::storage::StoredMessage> =
             stored.iter().filter(|m| !m.compacted).collect();
+        // Restore the plan-context flag from the last active user row: if
+        // that turn ran in plan mode, the first message sent after resuming
+        // in chat mode must carry the exit reminder. Active rows only —
+        // compacted rows left the context, so their reminders need no
+        // countermand (see stored_plan_mode).
+        let plan_context = active
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::storage::MessageRole::User)
+            .map(|m| crate::storage::stored_plan_mode(m))
+            .unwrap_or(false);
         let compact_summary = self.storage.get_compact_summary(session_id).await?;
 
         let mut chat_messages = Vec::new();
@@ -274,6 +285,7 @@ impl ChatSession {
         }
         final_messages.extend(chat_messages);
         self.agent.sync_messages(final_messages);
+        self.agent.set_plan_context(plan_context);
 
         Ok(stored)
     }
@@ -287,6 +299,7 @@ impl ChatSession {
         self.agent.permission().clear_session();
         let system_prompt = self.agent.take_system_prompt();
         self.agent.clear_messages();
+        self.agent.set_plan_context(false);
         if let Some(prompt) = system_prompt {
             self.agent.set_system_prompt(&prompt);
         }
@@ -373,7 +386,7 @@ pub(crate) fn normalize_key(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::agent::models::SharedMessage;
-    use crate::storage::MessageRole;
+    use crate::storage::{MessageRole, plan_mode_runtime_meta};
 
     async fn make_session() -> (ChatSession, PathBuf) {
         let storage = ChatStorage::new_in_memory().await.unwrap();
@@ -476,6 +489,37 @@ mod tests {
         session.switch_session(&b).await.unwrap();
         assert_eq!(session.messages_excluding_system_count(), 0);
         assert!(session.agent().take_system_prompt().is_some());
+
+        std::fs::remove_dir_all(&work_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn switch_session_restores_plan_context_from_last_active_user_row() {
+        let (mut session, work_dir) = make_session().await;
+        let dir = work_dir.display().to_string();
+        let a = session.storage().create_session("m", &dir).await.unwrap();
+
+        // Chat-mode turn only: no plan context
+        session
+            .storage()
+            .append_message(&a, &stored_user_message("chat turn"))
+            .await
+            .unwrap();
+        session.switch_session(&a).await.unwrap();
+        assert!(!session.agent().plan_context());
+
+        // Plan-mode turn (runtime_meta.plan_mode) sets the flag
+        let mut row = stored_user_message("plan turn");
+        row.runtime_meta = plan_mode_runtime_meta(true);
+        session.storage().append_message(&a, &row).await.unwrap();
+        session.switch_session(&a).await.unwrap();
+        assert!(session.agent().plan_context());
+
+        // Compaction wipes every row carrying reminders from the rebuilt
+        // context — nothing left to countermand, so the flag must clear
+        session.storage().mark_messages_compacted(&a).await.unwrap();
+        session.switch_session(&a).await.unwrap();
+        assert!(!session.agent().plan_context());
 
         std::fs::remove_dir_all(&work_dir).ok();
     }

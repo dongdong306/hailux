@@ -198,10 +198,21 @@ impl ChatStorage {
         let Some((row_id, runtime_meta)) = row else {
             return Ok(());
         };
-        let mut obj: serde_json::Map<String, serde_json::Value> = runtime_meta
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let mut obj: serde_json::Map<String, serde_json::Value> = match runtime_meta.as_deref() {
+            Some(s) => match serde_json::from_str(s) {
+                Ok(obj) => obj,
+                Err(e) => {
+                    // Self-written field; corruption means manual editing or a
+                    // bug — proceed with a fresh object but say so loudly
+                    // instead of silently dropping the existing keys.
+                    eprintln!(
+                        "[warn] corrupt runtime_meta on last user row of session {session_id}: {e}; existing keys are reset"
+                    );
+                    Default::default()
+                }
+            },
+            None => Default::default(),
+        };
         match obj.get_mut("system_reminder") {
             Some(serde_json::Value::Array(blocks)) => {
                 blocks.push(serde_json::Value::String(reminder.to_string()));
