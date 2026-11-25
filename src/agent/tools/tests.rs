@@ -1,6 +1,6 @@
 use super::diff::serialize_diff_data;
 use super::shell::{DRAIN_HARD_CAP, drain_channel_with_window};
-use super::shell::{decode_output, run_shell_command};
+use super::shell::{decode_output, run_shell_command, strip_ansi};
 #[cfg(windows)]
 use super::shell::{windows_shell_command_args, windows_shell_program, wrap_windows_command};
 use super::*;
@@ -320,6 +320,57 @@ fn decode_output_prefers_utf8_on_error_tie() {
     assert!(decoded.contains('\u{FFFD}'));
 }
 
+#[test]
+fn strip_ansi_removes_csi_sequences() {
+    // Color / cursor / erase sequences are removed, text preserved
+    assert_eq!(strip_ansi("\u{1b}[32mok\u{1b}[39m"), "ok");
+    assert_eq!(strip_ansi("\u{1b}[1;31merror\u{1b}[0m"), "error");
+    assert_eq!(strip_ansi("\u{1b}[2K\u{1b}[1Gdone"), "done");
+    assert_eq!(strip_ansi("a\u{1b}[?25lb"), "ab");
+}
+
+#[test]
+fn strip_ansi_removes_osc_and_string_sequences() {
+    // OSC (window titles) and DCS payloads are removed together with the
+    // sequence, for both BEL and ESC \ terminators
+    assert_eq!(strip_ansi("\u{1b}]0;title\u{7}text"), "text");
+    assert_eq!(strip_ansi("\u{1b}]0;title\u{1b}\\text"), "text");
+    assert_eq!(strip_ansi("\u{1b}P+q544e\u{1b}\\done"), "done");
+}
+
+#[test]
+fn strip_ansi_keeps_plain_text_identical() {
+    // Regression guard: text without ESC bytes must pass through unchanged
+    // (CJK, symbols, newlines — including sequences that merely look like text)
+    let text = "中文输出 cargo build ✓ 100%\n\t[a] (b) {c}";
+    assert_eq!(strip_ansi(text), text);
+    assert_eq!(strip_ansi("hello world"), "hello world");
+}
+
+#[test]
+fn strip_ansi_drops_incomplete_tail() {
+    // A sequence truncated at buffer end must not leak its bytes
+    assert_eq!(strip_ansi("ok\u{1b}[32"), "ok");
+    assert_eq!(strip_ansi("ok\u{1b}]0;ti"), "ok");
+    assert_eq!(strip_ansi("ok\u{1b}"), "ok");
+}
+
+#[test]
+fn strip_ansi_removes_escapes_with_intermediates() {
+    // ESC + intermediate bytes + final byte (charset selection etc.) is a
+    // single sequence: the final byte must not leak into the text
+    assert_eq!(strip_ansi("\u{1b}(Bplain"), "plain");
+    assert_eq!(strip_ansi("\u{1b}%Gutf8"), "utf8");
+    assert_eq!(strip_ansi("a\u{1b}/Fb"), "ab");
+}
+
+#[test]
+fn strip_ansi_treats_esc_esc_as_st_terminator() {
+    // ESC ESC inside a string sequence: the second ESC belongs to the ST
+    // terminator (`ESC ESC \`), it must not start a new sequence
+    assert_eq!(strip_ansi("\u{1b}]0;t\u{1b}\u{1b}\\x"), "x");
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_shell_program_resolves() {
@@ -360,6 +411,25 @@ async fn shell_utf8_prologue_preserves_unicode_output() {
     .expect("shell run");
     assert!(out.contains("中文"), "missing CJK text: {out}");
     assert!(out.contains('✓'), "mojibake regression: {out}");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn shell_strips_ansi_color_output() {
+    // Regression: colored tool output (npm build etc.) must not leak escape
+    // sequences into the result; the visible text itself must survive
+    let script = "Write-Output ([char]27 + '[32mgreen中文' + [char]27 + '[0m plain')";
+    let out = run_shell_command(
+        windows_shell_program(),
+        windows_shell_command_args(script),
+        None,
+        Some(30),
+    )
+    .await
+    .expect("shell run");
+    assert!(!out.contains('\u{1b}'), "escape sequence leaked: {out:?}");
+    assert!(out.contains("green中文"), "text lost: {out:?}");
+    assert!(out.contains("plain"), "text lost: {out:?}");
 }
 
 #[cfg(windows)]
