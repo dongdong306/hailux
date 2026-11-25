@@ -109,15 +109,28 @@ export function PermissionDialog() {
 
 /* ── Ask user ───────────────────────────────────────────────── */
 
-/** Submit format aligned with the TUI AskUserState::submit_and_finish:
+/** Magic prefix marking a free-text answer typed by the user (not an offered
+ *  option); mirrors TUI `ask_user.rs` via `agent/event.rs::CUSTOM_ANSWER_PREFIX` */
+const CUSTOM_INPUT_PREFIX = "[Custom input] ";
+
+/** The answer is custom free text: not an option label, not empty, not
+ *  Unanswered (mirrors `agent/event.rs::is_custom_answer`) */
+function isCustomAnswer(q: QuestionInfo, ans: string | null | undefined): boolean {
+  const v = ans?.trim();
+  return !!v && v !== "Unanswered" && !q.options.some((o) => o.label === v);
+}
+
+/** Submit format aligned with the TUI ask_user.rs format_ask_reply:
  *  "question"="answer" joined by commas; `\` and `"` are both escaped
- *  (`\` first, then `"`); unanswered items become Unanswered */
+ *  (`\` first, then `"`); unanswered items become Unanswered; answers
+ *  matching no option label get the CUSTOM_INPUT_PREFIX */
 function formatAskReply(questions: QuestionInfo[], answers: (string | null)[]) {
   const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return questions
     .map((q, i) => {
       const ans = answers[i]?.trim() || "Unanswered";
-      return `"${esc(q.question)}"="${esc(ans)}"`;
+      const marked = isCustomAnswer(q, ans) ? `${CUSTOM_INPUT_PREFIX}${ans}` : ans;
+      return `"${esc(q.question)}"="${esc(marked)}"`;
     })
     .join(", ");
 }
@@ -138,11 +151,8 @@ export function AskUserDialog() {
   if (!askUser) return null;
   const questions = askUser.questions;
 
-  /** The answer is custom text (not an option, not empty) */
-  const isCustomAnswer = (qi: number) => {
-    const v = answers[qi]?.trim();
-    return !!v && !questions[qi]!.options.some((o) => o.label === v);
-  };
+  /** Whether this question slot holds a custom free-text answer */
+  const isCustom = (qi: number) => isCustomAnswer(questions[qi]!, answers[qi]);
 
   const submit = () => reply(formatAskReply(questions, answers));
 
@@ -169,7 +179,7 @@ export function AskUserDialog() {
       c[qi] = opening;
       return c;
     });
-    if (opening && !isCustomAnswer(qi)) {
+    if (opening && !isCustom(qi)) {
       setAnswers((prev) => {
         const next = [...prev];
         next[qi] = null;
@@ -241,20 +251,20 @@ export function AskUserDialog() {
                 type="button"
                 className={cn(
                   "flex w-full cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-                  customOpen[qi] || isCustomAnswer(qi)
+                  customOpen[qi] || isCustom(qi)
                     ? "border-primary/30 bg-primary/[0.06] text-foreground"
                     : "border-border/50 text-muted-foreground hover:bg-muted/60 hover:text-foreground",
                 )}
                 onClick={() => toggleCustom(qi)}
               >
-                <Circle filled={customOpen[qi] || isCustomAnswer(qi)} />
+                <Circle filled={customOpen[qi] || isCustom(qi)} />
                 输入自定义回答
               </button>
               {customOpen[qi] && (
                 <input
                   type="text"
                   autoFocus
-                  value={isCustomAnswer(qi) ? answers[qi]! : ""}
+                  value={isCustom(qi) ? answers[qi]! : ""}
                   className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
                   placeholder="输入自定义回答"
                   onChange={(e) => setCustomAnswer(qi, e.target.value)}

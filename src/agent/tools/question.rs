@@ -147,7 +147,10 @@ impl Tool for QuestionTool {
             }
 
             Ok(format!(
-                "User has answered your questions: {response}. You can now continue with the user's answers in mind."
+                "User has answered your questions: {response}. Answers prefixed with \
+                 \"{}\" are free text typed by the user instead of one of the offered \
+                 options. You can now continue with the user's answers in mind.",
+                crate::agent::event::CUSTOM_ANSWER_PREFIX.trim_end()
             ))
         })
     }

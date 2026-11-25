@@ -18,6 +18,37 @@ pub(crate) fn ask_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Formats the question tool reply: `"question"="answer"` pairs comma-joined;
+/// answers matching no option label are marked as user-typed free text
+/// (mirrored by web `dialogs.tsx::formatAskReply`, parsed back by
+/// `history_cell::parse_ask_user_pairs`).
+pub(crate) fn format_ask_reply(
+    questions: &[event::QuestionInfo],
+    answers: &[Option<String>],
+) -> String {
+    questions
+        .iter()
+        .enumerate()
+        .map(|(i, q)| {
+            let ans = answers
+                .get(i)
+                .and_then(|a| a.as_deref())
+                .unwrap_or("Unanswered");
+            let marked = if crate::agent::event::is_custom_answer(q, ans) {
+                format!("{}{ans}", crate::agent::event::CUSTOM_ANSWER_PREFIX)
+            } else {
+                ans.to_string()
+            };
+            format!(
+                "\"{}\"=\"{}\"",
+                ask_escape(&q.question),
+                ask_escape(&marked)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(crate) struct AskUserState {
     pub questions: Vec<event::QuestionInfo>,
     pub response_tx: Option<tokio::sync::oneshot::Sender<String>>,
@@ -54,18 +85,7 @@ impl AskUserState {
 
     pub fn submit_and_finish(&mut self) -> bool {
         if let Some(tx) = self.response_tx.take() {
-            let formatted = self
-                .questions
-                .iter()
-                .enumerate()
-                .map(|(i, q)| {
-                    let ans = self.answers[i].as_deref().unwrap_or("Unanswered");
-                    let esc_q = ask_escape(&q.question);
-                    let esc_a = ask_escape(ans);
-                    format!("\"{esc_q}\"=\"{esc_a}\"")
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let formatted = format_ask_reply(&self.questions, &self.answers);
             let _ = tx.send(formatted);
             true
         } else {
@@ -613,4 +633,70 @@ pub(crate) fn render_ask_user(
     Paragraph::new(help_lines).render(help_area, buf);
 
     cursor_pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::event::{QuestionInfo, QuestionOption};
+
+    fn question_with_options(labels: &[&str]) -> QuestionInfo {
+        QuestionInfo {
+            question: "Which framework?".to_string(),
+            header: "Framework".to_string(),
+            options: labels
+                .iter()
+                .map(|l| QuestionOption {
+                    label: (*l).to_string(),
+                    description: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn format_ask_reply_marks_custom_answers() {
+        let q = question_with_options(&["React", "Vue"]);
+
+        // Picked option: unmarked
+        assert_eq!(
+            format_ask_reply(&[q.clone()], &[Some("React".to_string())]),
+            "\"Which framework?\"=\"React\""
+        );
+
+        // Free text typed by the user: marked
+        assert_eq!(
+            format_ask_reply(&[q.clone()], &[Some("Svelte with Vite".to_string())]),
+            "\"Which framework?\"=\"[Custom input] Svelte with Vite\""
+        );
+
+        // Unanswered: unmarked
+        assert_eq!(
+            format_ask_reply(&[q.clone()], &[None]),
+            "\"Which framework?\"=\"Unanswered\""
+        );
+
+        // Free text that happens to equal an option label: unmarked
+        assert_eq!(
+            format_ask_reply(&[q], &[Some("Vue".to_string())]),
+            "\"Which framework?\"=\"Vue\""
+        );
+    }
+
+    #[test]
+    fn format_ask_reply_multiple_questions_mixed_answers() {
+        let qs = [
+            question_with_options(&["Fast", "Safe"]),
+            QuestionInfo {
+                question: "Any notes?".to_string(),
+                header: "Notes".to_string(),
+                options: Vec::new(),
+            },
+        ];
+        let ans = [Some("Fast".to_string()), Some("keep it small".to_string())];
+        assert_eq!(
+            format_ask_reply(&qs, &ans),
+            "\"Which framework?\"=\"Fast\", \"Any notes?\"=\"[Custom input] keep it small\""
+        );
+    }
 }

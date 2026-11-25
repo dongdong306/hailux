@@ -268,14 +268,18 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   (`ChatSession::current_model_display` vs `manager.resolved()`) at every request start.
 - **question reply contract** (5 implementations must stay in lockstep): TUI submits
   `"question"="answer"` pairs, comma-joined, with `\` and `"` escaped
-  (`tui/ask_user.rs::ask_escape`); parsed back by
+  (`tui/ask_user.rs::ask_escape`; formatting lives in `tui/ask_user.rs::format_ask_reply`);
+  parsed back by
   `tui/history_cell/ask_user_render.rs::parse_ask_user_pairs`;
   Web mirrors both (`web/src/components/dialogs.tsx::formatAskReply` and
   `web/src/components/assistant-ui/tool-fallback.tsx::parseAskUserPairs`);
   `share/mod.rs::parse_ask_user_pairs` re-parses for HTML export rendering. Magic strings:
   `"[User Cancelled]"` (sent as fallback by `tui/ask_user.rs` and `web/task_registry.rs`,
-  checked in `agent/tools/question.rs`) and `"Unanswered"` (default in `tui/ask_user.rs`, rendered
-  by `tui/history_cell/ask_user_render.rs`). A single question also routes through the Confirm tab — no
+  checked in `agent/tools/question.rs`), `"Unanswered"` (default in `tui/ask_user.rs`, rendered
+  by `tui/history_cell/ask_user_render.rs`), and `"[Custom input] "` (prefix marking free-text
+  answers; constant in `agent/event.rs::CUSTOM_ANSWER_PREFIX`, membership rule in
+  `agent/event.rs::is_custom_answer`, mirrored by web `dialogs.tsx::isCustomAnswer`,
+  explained to the model by `agent/tools/question.rs`). A single question also routes through the Confirm tab — no
   auto-submit on selection (TUI and Web aligned).
 - **Permission defaults**: In-workdir operations allowed by default via builtin lowest-priority
   rules in `permission/mod.rs::default_rules()`: `* allow`, `external_directory * ask`,

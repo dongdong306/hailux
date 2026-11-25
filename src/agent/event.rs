@@ -28,6 +28,19 @@ pub struct QuestionInfo {
     pub options: Vec<QuestionOption>,
 }
 
+/// Prefix marking a question answer as free text typed by the user instead of
+/// an offered option. Part of the question reply contract: appended by the
+/// submit surfaces (`tui/ask_user.rs::format_ask_reply`, web
+/// `dialogs.tsx::formatAskReply`), explained to the model by
+/// `agent/tools/question.rs`; parsed back verbatim by the history renderers.
+pub const CUSTOM_ANSWER_PREFIX: &str = "[Custom input] ";
+
+/// The answer is user-typed free text: not `Unanswered` and not one of the
+/// offered option labels (shared by TUI and the question tool).
+pub fn is_custom_answer(q: &QuestionInfo, ans: &str) -> bool {
+    ans != "Unanswered" && !q.options.iter().any(|o| o.label == ans)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskStatus {
     Completed,
