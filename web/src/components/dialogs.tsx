@@ -2,7 +2,7 @@
 // (Skills and MCP management are inline views, see skills-manager.tsx /
 //   mcp-manager.tsx; model provider management is in settings-view.tsx;
 //   model + reasoning-effort switching is in model-effort-menu.tsx)
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, Folder, ShieldAlert } from "lucide-react";
 import { useApp } from "../store/app-store";
 import { cn } from "../lib/utils";
@@ -135,12 +135,20 @@ function formatAskReply(questions: QuestionInfo[], answers: (string | null)[]) {
     .join(", ");
 }
 
-export function AskUserDialog() {
+/** Bottom panel that takes over the composer slot while a question is pending
+ *  (the TUI renders the same panel in its input slot). One question per tab —
+ *  headers as tabs, picking an option advances, a Confirm tab reviews all
+ *  answers — so the panel height stays small no matter how many questions.
+ *  The thread above stays fully scrollable. Esc inside a text input only
+ *  leaves editing (mirrors the TUI); elsewhere it cancels the question. */
+export function AskUserPanel() {
   const askUser = useApp((s) => s.askUser);
   const reply = useApp((s) => s.replyAsk);
+  const panelRef = useRef<HTMLDivElement>(null);
   const count = askUser?.questions.length ?? 0;
   // Parent mounts this with key={requestId}: each new round of questions remounts
   // the whole component, so the initial state is this round's questions
+  const [tab, setTab] = useState(0);
   const [answers, setAnswers] = useState<(string | null)[]>(() =>
     Array.from({ length: count }, () => null),
   );
@@ -148,8 +156,36 @@ export function AskUserDialog() {
     Array.from({ length: count }, () => false),
   );
 
+  useEffect(() => {
+    // Text inputs inside the panel swallow Esc themselves (leave editing);
+    // anywhere else Esc cancels the question
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (
+        e.target instanceof HTMLInputElement &&
+        panelRef.current?.contains(e.target)
+      ) {
+        return;
+      }
+      reply("[User Cancelled]");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [reply]);
+
   if (!askUser) return null;
   const questions = askUser.questions;
+  const confirmTab = questions.length;
+  const isConfirm = tab === confirmTab;
+  const q = isConfirm ? null : questions[tab]!;
+
+  /** Collapses the custom input of question qi (Esc while typing) */
+  const closeCustom = (qi: number) =>
+    setCustomOpen((prev) => {
+      const c = [...prev];
+      c[qi] = false;
+      return c;
+    });
 
   /** Whether this question slot holds a custom free-text answer */
   const isCustom = (qi: number) => isCustomAnswer(questions[qi]!, answers[qi]);
@@ -158,7 +194,7 @@ export function AskUserDialog() {
 
   const pick = (qi: number, label: string) => {
     // Selecting an option is mutually exclusive with a custom answer:
-    // set the answer and collapse the custom input
+    // set the answer, collapse the custom input and advance (TUI parity)
     setAnswers((prev) => {
       const next = [...prev];
       next[qi] = label;
@@ -169,6 +205,7 @@ export function AskUserDialog() {
       c[qi] = false;
       return c;
     });
+    setTab(Math.min(qi + 1, confirmTab));
   };
 
   /** Expands/collapses the custom input; expanding clears a selected option (mutual exclusion) */
@@ -197,6 +234,17 @@ export function AskUserDialog() {
     });
   };
 
+  /** Enter on a custom input: commit non-empty text and advance (TUI parity) */
+  const commitCustom = (qi: number, value: string) => {
+    const v = value.trim();
+    if (!v) {
+      closeCustom(qi);
+      return;
+    }
+    setCustomAnswer(qi, v);
+    setTab(Math.min(qi + 1, confirmTab));
+  };
+
   /** Radio circle: shared by options and custom answers */
   const Circle = ({ filled }: { filled: boolean }) => (
     <span
@@ -211,103 +259,174 @@ export function AskUserDialog() {
     </span>
   );
 
+  const tabBtn = (ti: number, label: string, answered: boolean) => (
+    <button
+      key={ti}
+      type="button"
+      className={cn(
+        "cursor-pointer rounded-md px-2 py-0.5 text-xs transition-colors",
+        ti === tab
+          ? "bg-primary font-medium text-primary-foreground"
+          : answered
+            ? "text-emerald-600 hover:bg-muted/60 dark:text-emerald-400"
+            : "text-muted-foreground/60 hover:bg-muted/60 hover:text-foreground",
+      )}
+      onClick={() => setTab(ti)}
+    >
+      {label}
+    </button>
+  );
+
   const unanswered = answers.some((a) => a === null || !a!.trim());
 
   return (
-    <Overlay onClose={() => reply("[User Cancelled]")} closeOnMask={false}>
-      {questions.map((q, qi) => (
-        <div key={qi} className="mb-4">
-          <h4 className="mb-0.5 text-sm font-medium">{q.question}</h4>
-          {q.header && (
-            <p className="mb-2 text-xs text-muted-foreground/60">{q.header}</p>
-          )}
-          {q.options.length > 0 ? (
-            <div className="space-y-1">
-              {q.options.map((o) => (
-                <label
-                  key={o.label}
-                  className={cn(
-                    "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 text-sm transition-colors",
-                    answers[qi] === o.label
-                      ? "border-primary/30 bg-primary/[0.06]"
-                      : "border-border/50 hover:bg-muted/60",
-                  )}
-                  onClick={() => pick(qi, o.label)}
-                >
-                  <Circle filled={answers[qi] === o.label} />
-                  <span>
-                    <span className="font-medium">{o.label}</span>
-                    {o.description && (
-                      <span className="block text-xs text-muted-foreground">
-                        {o.description}
-                      </span>
-                    )}
-                  </span>
-                </label>
-              ))}
+    <div ref={panelRef} className="hlx-slide-up shrink-0 px-4 pb-4 pt-2">
+      <div className="mx-auto w-full max-w-3xl">
+        <div className="overflow-hidden rounded-xl border border-primary/25 bg-popover shadow-lg">
+          <div className="flex items-center gap-2 border-b border-border/60 px-4 py-2">
+            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-bold text-primary">
+              ?
+            </span>
+            <span className="text-sm font-medium">需要你的回答</span>
+            <span className="ml-auto hidden text-[11px] text-muted-foreground/60 sm:inline">
+              上方历史可滚动 · Esc 取消
+            </span>
+          </div>
 
-              {/* Custom input (matches the TUI's always-appended "Type your own answer") */}
-              <button
-                type="button"
-                className={cn(
-                  "flex w-full cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-                  customOpen[qi] || isCustom(qi)
-                    ? "border-primary/30 bg-primary/[0.06] text-foreground"
-                    : "border-border/50 text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+          {/* Tab bar: one question per tab + Confirm review (TUI parity) */}
+          <div className="hlx-input-scroll flex items-center gap-1 overflow-x-auto border-b border-border/60 px-3 py-1.5">
+            {questions.map((tq, ti) =>
+              tabBtn(ti, tq.header || `Q${ti + 1}`, !!answers[ti]?.trim()),
+            )}
+            {tabBtn(confirmTab, "Confirm", !unanswered)}
+          </div>
+
+          <div className="hlx-input-scroll max-h-[50vh] overflow-y-auto overscroll-contain p-4">
+            {isConfirm ? (
+              <>
+                <div className="space-y-1.5">
+                  {questions.map((cq, qi) => {
+                    const val = answers[qi]?.trim() || "";
+                    return (
+                      <div key={qi} className="flex gap-2 text-sm">
+                        <span className="shrink-0 text-muted-foreground/60">
+                          {cq.header || `Q${qi + 1}`}:
+                        </span>
+                        <span className={val ? "" : "text-destructive"}>
+                          {val || "(未回答)"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className={btnOutline}
+                    onClick={() => reply("[User Cancelled]")}
+                  >
+                    取消
+                  </button>
+                  <button type="button" className={btnPrimary} onClick={submit}>
+                    提交{unanswered ? "（未答项记为 Unanswered）" : ""}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h4 className="mb-0.5 text-sm font-medium">{q!.question}</h4>
+                {q!.header && (
+                  <p className="mb-2 text-xs text-muted-foreground/60">
+                    {q!.header}
+                  </p>
                 )}
-                onClick={() => toggleCustom(qi)}
-              >
-                <Circle filled={customOpen[qi] || isCustom(qi)} />
-                输入自定义回答
-              </button>
-              {customOpen[qi] && (
-                <input
-                  type="text"
-                  autoFocus
-                  value={isCustom(qi) ? answers[qi]! : ""}
-                  className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
-                  placeholder="输入自定义回答"
-                  onChange={(e) => setCustomAnswer(qi, e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      setCustomAnswer(qi, e.currentTarget.value.trim());
-                    }
-                  }}
-                />
-              )}
-            </div>
-          ) : (
-            <input
-              type="text"
-              autoFocus
-              value={answers[qi] ?? ""}
-              className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
-              placeholder="输入回答"
-              onChange={(e) => setCustomAnswer(qi, e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  setCustomAnswer(qi, e.currentTarget.value.trim());
-                }
-              }}
-            />
-          )}
+                {q!.options.length > 0 ? (
+                  <div className="space-y-1">
+                    {q!.options.map((o) => (
+                      <label
+                        key={o.label}
+                        className={cn(
+                          "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 text-sm transition-colors",
+                          answers[tab] === o.label
+                            ? "border-primary/30 bg-primary/[0.06]"
+                            : "border-border/50 hover:bg-muted/60",
+                        )}
+                        onClick={() => pick(tab, o.label)}
+                      >
+                        <Circle filled={answers[tab] === o.label} />
+                        <span>
+                          <span className="font-medium">{o.label}</span>
+                          {o.description && (
+                            <span className="block text-xs text-muted-foreground">
+                              {o.description}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                    ))}
+
+                    {/* Custom input (matches the TUI's always-appended "Type your own answer") */}
+                    <button
+                      type="button"
+                      className={cn(
+                        "flex w-full cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                        customOpen[tab] || isCustom(tab)
+                          ? "border-primary/30 bg-primary/[0.06] text-foreground"
+                          : "border-border/50 text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                      )}
+                      onClick={() => toggleCustom(tab)}
+                    >
+                      <Circle filled={customOpen[tab] || isCustom(tab)} />
+                      输入自定义回答
+                    </button>
+                    {customOpen[tab] && (
+                      <input
+                        type="text"
+                        autoFocus
+                        value={isCustom(tab) ? answers[tab]! : ""}
+                        className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
+                        placeholder="输入自定义回答"
+                        onChange={(e) => setCustomAnswer(tab, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitCustom(tab, e.currentTarget.value);
+                          } else if (e.key === "Escape") {
+                            // Leave editing only; the typed text stays as the answer
+                            closeCustom(tab);
+                            e.currentTarget.blur();
+                          }
+                        }}
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <input
+                    type="text"
+                    autoFocus
+                    value={answers[tab] ?? ""}
+                    className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-primary/30 focus:ring-2 focus:ring-ring/30"
+                    placeholder="输入回答"
+                    onChange={(e) => setCustomAnswer(tab, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitCustom(tab, e.currentTarget.value);
+                      } else if (e.key === "Escape") {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                  />
+                )}
+                <p className="mt-3 text-[11px] text-muted-foreground/60">
+                  选择后自动进入下一项 · 在 Confirm 页提交
+                </p>
+              </>
+            )}
+          </div>
         </div>
-      ))}
-      <div className="flex justify-end gap-2">
-        <button
-          type="button"
-          className={btnOutline}
-          onClick={() => reply("[User Cancelled]")}
-        >
-          取消
-        </button>
-        <button type="button" className={btnPrimary} onClick={submit}>
-          提交{unanswered ? "（未答项记为 Unanswered）" : ""}
-        </button>
       </div>
-    </Overlay>
+    </div>
   );
 }
 

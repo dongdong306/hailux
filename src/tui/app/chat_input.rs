@@ -116,27 +116,19 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Up if input_empty => {
-                    self.should_auto_scroll = false;
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    self.scroll_chat(3);
                     return Ok(());
                 }
                 KeyCode::Down if input_empty => {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                    if self.scroll_offset == 0 {
-                        self.should_auto_scroll = true;
-                    }
+                    self.scroll_chat(-3);
                     return Ok(());
                 }
                 KeyCode::PageUp if input_empty => {
-                    self.should_auto_scroll = false;
-                    self.scroll_offset = self.scroll_offset.saturating_add(20);
+                    self.scroll_chat(20);
                     return Ok(());
                 }
                 KeyCode::PageDown if input_empty => {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(20);
-                    if self.scroll_offset == 0 {
-                        self.should_auto_scroll = true;
-                    }
+                    self.scroll_chat(-20);
                     return Ok(());
                 }
                 _ => {}
@@ -351,18 +343,14 @@ impl App {
                     self.handle_paste(pasted);
                 }
                 self.paste_burst.clear_window_after_non_char();
-                self.should_auto_scroll = false;
-                self.scroll_offset = self.scroll_offset.saturating_add(20);
+                self.scroll_chat(20);
             }
             KeyCode::PageDown => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
                     self.handle_paste(pasted);
                 }
                 self.paste_burst.clear_window_after_non_char();
-                self.scroll_offset = self.scroll_offset.saturating_sub(20);
-                if self.scroll_offset == 0 {
-                    self.should_auto_scroll = true;
-                }
+                self.scroll_chat(-20);
             }
             _ => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
