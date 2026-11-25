@@ -115,8 +115,8 @@ subagent delegation, and custom slash commands.
     Requests go through async-openai's `create_stream_byot` (BYOT = bring your own
     transport, called from `agent/stream.rs`). Messages are stored as
     `SharedMessage = Arc<CompatibleChatCompletionRequestMessage>`:
-    cloning a message list is O(n) pointer copies; plan-mode prompt injection clones
-    and mutates only the modified message via `Arc::make_mut`.
+    cloning a message list is O(n) pointer copies; reminder injection (plan-mode
+    prompt / exit / failure) mutates only the modified message via `Arc::make_mut`.
   - `tools/` — per-tool modules (`bash.rs`, `read.rs`, `edit.rs`, `write.rs`, `grep.rs`,
     `glob.rs`, `web_fetch.rs`, `todo.rs`, `ask.rs`, plus shared `diff.rs`). `mod.rs` holds
     the `Tool` trait, `ToolRegistry` (converts tools to OpenAI function-calling schema),
@@ -308,7 +308,13 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   best-effort trade-off); `~` expands; globs resolve by their path prefix so `../x/*.pem` is
   gated while in-workdir globs pass.
 - **Plan mode** (`/plan` or Shift+Tab): filters out write/edit tools from the tool list and
-  injects a read-only system-reminder into the last user message (on a clone, not stored).
+  appends a read-only system-reminder to each user message entering while plan mode is on
+  (persistent context, persisted via `PersistUserReminder` so rebuilds splice it back);
+  the first message after leaving plan mode carries an exit reminder that countermands
+  the historical ones (`agent/agent/mod.rs::chat_stream`, tracked by `plan_context`,
+  restored from the last *active* (non-compacted) user row's `runtime_meta.plan_mode` on
+  session rebuild via `storage::stored_plan_mode` — compaction wipes the rows carrying
+  the reminders from the rebuilt context, so nothing needs countermanding after it).
   `bash` stays available but is hard-gated by `permission/bash_readonly.rs::is_read_only_bash_command`
   (fail-closed allowlist: git read subcommands, ls/cat/grep, PowerShell Get-* cmdlets; redirects
   `>`/`>>` and unknown commands are denied) — rejected in the agent permission check without a dialog.

@@ -25,7 +25,7 @@ use base64::Engine as _;
 use crate::agent::event::{CoreEvent, CoreEventTx, create_core_event_channel};
 use crate::agent::media;
 use crate::session::ChatSession;
-use crate::storage::{MessageRole, StoredMessage};
+use crate::storage::{MessageRole, StoredMessage, plan_mode_runtime_meta};
 use crate::web::protocol::{self, ServerEvent};
 use crate::web::state::WebServerState;
 
@@ -772,7 +772,10 @@ async fn persist_user_message(
         completion_tokens: None,
         cached_tokens: None,
         model: None,
-        runtime_meta: None,
+        // Plan mode was synced from the global state at runner entry, so
+        // this reflects the mode the message actually entered under (read
+        // back by badge parsers and the plan-context restore on rebuild).
+        runtime_meta: plan_mode_runtime_meta(session.plan_mode()),
         think_ms: None,
         compacted: false,
         attachments: attachments_json,

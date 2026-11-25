@@ -52,6 +52,11 @@ pub struct Agent {
     native_reasoning: bool,
     reasoning_effort: ReasoningEffort,
     plan_mode: bool,
+    /// True when the context's latest user entry carries the plan-mode
+    /// reminder. Set at message entry (`chat_stream`), consumed by the exit
+    /// reminder on the first message after leaving plan mode, and restored
+    /// from the last user row's `runtime_meta.plan_mode` on session rebuild.
+    plan_context: bool,
     cancel: Arc<AtomicBool>,
     permission: crate::permission::PermissionManager,
     work_dir: String,
@@ -93,6 +98,7 @@ impl Agent {
             native_reasoning,
             reasoning_effort,
             plan_mode: false,
+            plan_context: false,
             cancel: Arc::new(AtomicBool::new(false)),
             permission,
             work_dir: work_dir.to_string(),
@@ -146,6 +152,16 @@ impl Agent {
 
     pub fn plan_mode(&self) -> bool {
         self.plan_mode
+    }
+
+    /// Restored from the last user row on session rebuild (TUI resume +
+    /// `ChatSession::switch_session`); see `plan_context`
+    pub fn set_plan_context(&mut self, on: bool) {
+        self.plan_context = on;
+    }
+
+    pub fn plan_context(&self) -> bool {
+        self.plan_context
     }
 
     pub fn switch_model(
@@ -232,6 +248,35 @@ impl Agent {
         self.messages
             .push(Arc::new(build_user_message(user_input, &attachments)));
 
+        // Plan reminders are persistent message context, not request-level
+        // injections: every user message entering while plan mode is on
+        // carries the reminder, and the first message after leaving it
+        // carries an exit reminder that countermands the historical ones.
+        // Both land in the row's runtime_meta via PersistUserReminder so
+        // rebuilds stay byte-identical. Ordered before the failure reminder
+        // below — in plan mode a retried turn may legitimately carry both.
+        if self.plan_mode {
+            messages::append_text_to_last_user_message(
+                &mut self.messages,
+                crate::prompts::PLAN_MODE,
+            );
+            self.plan_context = true;
+            let _ = event_tx.try_send(CoreEvent::PersistUserReminder {
+                session_id: session_id.to_string(),
+                reminder: crate::prompts::PLAN_MODE.to_string(),
+            });
+        } else if self.plan_context {
+            messages::append_text_to_last_user_message(
+                &mut self.messages,
+                crate::prompts::PLAN_MODE_EXIT,
+            );
+            self.plan_context = false;
+            let _ = event_tx.try_send(CoreEvent::PersistUserReminder {
+                session_id: session_id.to_string(),
+                reminder: crate::prompts::PLAN_MODE_EXIT.to_string(),
+            });
+        }
+
         // Surface the previous run's failure as a transient system-reminder on
         // the new user message (the DB user row keeps the original text only;
         // the reminder lands in the row's runtime_meta via PersistUserReminder
@@ -270,6 +315,7 @@ impl Agent {
             client,
             tool_registry,
             messages,
+            session_id: session_id.to_string(),
             model: self.model.clone(),
             model_display: self.model_display.clone(),
             max_tokens: self.max_tokens,

@@ -20,6 +20,18 @@ impl App {
         let active_stored: Vec<&crate::storage::StoredMessage> =
             stored.iter().filter(|m| !m.compacted).collect();
 
+        // Restore the plan-context flag from the last active user row (same
+        // rule as ChatSession::switch_session): drives the exit reminder on
+        // the first message after resuming a plan-mode turn in chat mode.
+        // Active rows only — compacted rows left the context, so their
+        // reminders need no countermand (see stored_plan_mode).
+        let plan_context = active_stored
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| crate::storage::stored_plan_mode(m))
+            .unwrap_or(false);
+
         let mut chat_messages = Vec::new();
         let mut display_messages = Vec::new();
 
@@ -218,6 +230,8 @@ impl App {
             final_messages.extend(chat_messages);
             self.agent.sync_messages(final_messages);
         }
+
+        self.agent.set_plan_context(plan_context);
 
         self.should_auto_scroll = true;
         self.scroll_offset = 0;

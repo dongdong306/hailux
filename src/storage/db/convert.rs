@@ -215,6 +215,27 @@ fn stored_user_reminders(msg: &StoredMessage) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Serialized `runtime_meta` marking a user turn that entered in plan mode.
+/// Written by TUI and Web persistence; read back by the plan badge parsers
+/// (resume replay, share export) and the plan-context restore on rebuild
+/// (see `stored_plan_mode`).
+pub fn plan_mode_runtime_meta(on: bool) -> Option<String> {
+    on.then(|| r#"{"plan_mode":true}"#.to_string())
+}
+
+/// Whether a stored user row entered in plan mode (`runtime_meta.plan_mode`).
+/// The plan-context restore intentionally reads the last *active*
+/// (non-compacted) user row: compaction wipes the rows carrying the plan
+/// reminders from the rebuilt context, so their reminders need no exit
+/// countermand.
+pub fn stored_plan_mode(msg: &StoredMessage) -> bool {
+    msg.runtime_meta
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("plan_mode").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
 pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompletionRequestMessage> {
     match msg.role {
         MessageRole::System => Some(

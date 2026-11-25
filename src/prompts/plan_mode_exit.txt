@@ -1,0 +1,7 @@
+<system-reminder>
+# Planning Mode Ended - System Reminder
+
+Planning mode has been switched off: the READ-ONLY constraint no longer applies. You may now edit files, run write commands, and use all tools normally.
+
+Ignore the planning-mode reminders earlier in this conversation — they no longer govern your behavior. Proceed with implementation directly: execute the plan that was presented and approved, or follow the user's latest instruction. Do not re-plan and do not ask for permission to start.
+</system-reminder>
