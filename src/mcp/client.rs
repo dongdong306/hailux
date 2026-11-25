@@ -4,7 +4,7 @@ use http::{HeaderName, HeaderValue};
 use rmcp::{
     RoleClient, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock,
+        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, ContentBlock,
         Implementation, Tool as McpToolDef,
     },
     service::RunningService,
@@ -21,8 +21,8 @@ use std::time::Duration;
 use tokio::process::Command;
 
 /// Connection handle type for a single MCP server (both stdio and http use
-/// a `ClientInfo` handler, so the type is unified).
-pub type McpClient = RunningService<RoleClient, ClientInfo>;
+/// a `ClientConfig` handler, so the type is unified).
+pub type McpClient = RunningService<RoleClient, ClientConfig>;
 
 /// Status snapshot after an MCP server connects successfully (for UI
 /// rendering; excludes the connection handle).
@@ -179,11 +179,10 @@ async fn connect_and_gather(
     let connect_fut = async {
         let client = connect_one(config).await?;
 
-        let (peer_name, peer_version) = match client.peer_info() {
-            Some(info) => (
-                info.server_info.name.clone(),
-                info.server_info.version.clone(),
-            ),
+        // `server_info` is optional: discovery responses may omit it.
+        let (peer_name, peer_version) = match client.peer_info().and_then(|i| i.server_info.clone())
+        {
+            Some(implementation) => (implementation.name.clone(), implementation.version.clone()),
             None => (String::new(), String::new()),
         };
 
@@ -334,10 +333,10 @@ fn resolve_program(command: &str) -> String {
     command.to_string()
 }
 
-fn build_client_info() -> ClientInfo {
+fn build_client_info() -> ClientConfig {
     let implementation =
         Implementation::new("hailux", env!("CARGO_PKG_VERSION")).with_title("hailux");
-    ClientInfo::new(ClientCapabilities::default(), implementation)
+    ClientConfig::new(ClientCapabilities::default(), implementation)
 }
 
 /// Converts the config's header name/value map into http types.

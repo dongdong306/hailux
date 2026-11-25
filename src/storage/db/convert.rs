@@ -282,6 +282,7 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
                     parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                         ChatCompletionRequestMessageContentPartText {
                             text: msg.content.clone(),
+                            prompt_cache_breakpoint: None,
                         },
                     ));
                 }
@@ -292,6 +293,7 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
                                 url: att.data_url.clone(),
                                 detail: None,
                             },
+                            prompt_cache_breakpoint: None,
                         },
                     )
                 }));
@@ -299,6 +301,7 @@ pub fn from_stored_message(msg: &StoredMessage) -> Option<CompatibleChatCompleti
                     parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                         ChatCompletionRequestMessageContentPartText {
                             text: format!("\n\n{r}"),
+                            prompt_cache_breakpoint: None,
                         },
                     ));
                 }

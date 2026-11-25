@@ -34,6 +34,7 @@ pub(super) fn image_content_part(att: &Attachment) -> ChatCompletionRequestUserM
                 url: att.data_url.clone(),
                 detail: None,
             },
+            prompt_cache_breakpoint: None,
         },
     )
 }
@@ -110,6 +111,7 @@ pub fn build_user_message(
             parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                 ChatCompletionRequestMessageContentPartText {
                     text: text.to_string(),
+                    prompt_cache_breakpoint: None,
                 },
             ));
         }
@@ -149,6 +151,7 @@ pub(super) fn append_text_to_last_user_message(messages: &mut [SharedMessage], t
             parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                 ChatCompletionRequestMessageContentPartText {
                     text: format!("\n\n{text}"),
+                    prompt_cache_breakpoint: None,
                 },
             ));
         }
@@ -196,7 +199,10 @@ pub(super) fn sanitize_messages_for_request(
                             unsupported_image_text()
                         };
                         ChatCompletionRequestUserMessageContentPart::Text(
-                            ChatCompletionRequestMessageContentPartText { text },
+                            ChatCompletionRequestMessageContentPartText {
+                                text,
+                                prompt_cache_breakpoint: None,
+                            },
                         )
                     }
                     other => other.clone(),
@@ -258,6 +264,7 @@ pub(super) fn strip_media_for_compaction(msg: &SharedMessage) -> SharedMessage {
                 ChatCompletionRequestUserMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
                         text: "[Attached image: removed for context compaction]".to_string(),
+                        prompt_cache_breakpoint: None,
                     },
                 )
             }

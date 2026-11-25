@@ -335,6 +335,7 @@ pub(super) async fn handle_tool_calls_stream(
         let mut parts = vec![ChatCompletionRequestUserMessageContentPart::Text(
             ChatCompletionRequestMessageContentPartText {
                 text: tool_attachment_note(&pending_attachments),
+                prompt_cache_breakpoint: None,
             },
         )];
         parts.extend(
