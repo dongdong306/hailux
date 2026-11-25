@@ -121,6 +121,7 @@ mod tests {
                 r#type: None,
                 param: None,
                 code: None,
+                misalignment: None,
             },
         })
     }
