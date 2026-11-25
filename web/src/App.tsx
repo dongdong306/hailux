@@ -14,7 +14,7 @@ import { Sidebar } from "./components/sidebar";
 import { Thread } from "./components/assistant-ui/thread";
 import { ChatInput } from "./components/chat-input";
 import {
-  AskUserDialog,
+  AskUserPanel,
   PermissionDialog,
   WorkdirPicker,
 } from "./components/dialogs";
@@ -90,9 +90,12 @@ export default function App() {
   const contextUsed = contextPromptTokens + contextCompletionTokens;
   const contextPct =
     contextWindow > 0 ? Math.min(contextUsed / contextWindow, 1) : null;
-  // The question requestId change remounts AskUserDialog via key, leaving no
+  // The question requestId change remounts AskUserPanel via key, leaving no
   // residual internal state
   const askRequestId = useApp((s) => s.askUser?.requestId);
+  // While a question is pending the panel takes over the composer slot; the
+  // composer stays mounted (hidden) so its draft survives
+  const askActive = askRequestId !== undefined;
   // Cache hit rate accumulated in this conversation
   const hitRate =
     promptTokens > 0 ? (cachedTokens / promptTokens) * 100 : 0;
@@ -234,13 +237,13 @@ export default function App() {
           ) : (
             <>
               <Thread />
-              <ChatInput />
+              <ChatInput hidden={askActive} />
+              {askActive && <AskUserPanel key={askRequestId} />}
             </>
           )}
         </main>
 
         <PermissionDialog />
-        <AskUserDialog key={askRequestId} />
         <AddModelDialog />
         <WorkdirPicker />
       </div>

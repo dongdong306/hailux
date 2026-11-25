@@ -113,7 +113,9 @@ interface SlashState {
   selected: number;
 }
 
-export function ChatInput() {
+/** `hidden` keeps the composer mounted (display:none) so the draft text and
+ *  attachments survive a question round that takes over the composer slot */
+export function ChatInput({ hidden = false }: { hidden?: boolean } = {}) {
   const [text, setText] = useState("");
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
@@ -694,7 +696,7 @@ export function ChatInput() {
   };
 
   return (
-    <div className="shrink-0 px-4 pb-4 pt-2">
+    <div className={cn("shrink-0 px-4 pb-4 pt-2", hidden && "hidden")}>
       <div className="mx-auto w-full max-w-3xl">
         {escHint && (
           <p className="mb-2 text-center text-[11px] text-muted-foreground/60">

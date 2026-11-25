@@ -189,19 +189,32 @@ impl AskUserState {
                         self.editing_custom = false;
                         self.custom_cursor = 0;
                     }
-                    KeyCode::Up if !is_confirm => {
-                        let q = &self.questions[self.current_tab];
-                        let total = q.options.len() + 1;
-                        if self.selected == 0 {
-                            self.selected = total - 1;
+                    KeyCode::Up => {
+                        if is_confirm {
+                            // Browse the answer review list; windowing keeps
+                            // the cursor row visible
+                            self.selected = self.selected.saturating_sub(1);
                         } else {
-                            self.selected -= 1;
+                            let q = &self.questions[self.current_tab];
+                            let total = q.options.len() + 1;
+                            if self.selected == 0 {
+                                self.selected = total - 1;
+                            } else {
+                                self.selected -= 1;
+                            }
                         }
                     }
-                    KeyCode::Down if !is_confirm => {
-                        let q = &self.questions[self.current_tab];
-                        let total = q.options.len() + 1;
-                        self.selected = (self.selected + 1) % total;
+                    KeyCode::Down => {
+                        if is_confirm {
+                            let last = self.questions.len().saturating_sub(1);
+                            if self.selected < last {
+                                self.selected += 1;
+                            }
+                        } else {
+                            let q = &self.questions[self.current_tab];
+                            let total = q.options.len() + 1;
+                            self.selected = (self.selected + 1) % total;
+                        }
                     }
                     KeyCode::Char(c) if !is_confirm && c.is_ascii_digit() => {
                         let digit = c.to_digit(10).unwrap_or(0);
@@ -338,20 +351,47 @@ impl AskUserState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_ask_user(
-    area: Rect,
-    buf: &mut Buffer,
-    questions: &[event::QuestionInfo],
-    current_tab: usize,
-    selected: usize,
-    answers: &[Option<String>],
-    custom_inputs: &[String],
-    custom_cursor: usize,
-    editing_custom: bool,
-) -> Option<(u16, u16)> {
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+/// Borrowed view of the question dialog state, shared by the panel height
+/// measure and the renderer so the two cannot drift apart.
+pub(crate) struct AskUserView<'a> {
+    pub questions: &'a [event::QuestionInfo],
+    pub current_tab: usize,
+    pub selected: usize,
+    pub answers: &'a [Option<String>],
+    pub custom_inputs: &'a [String],
+    pub custom_cursor: usize,
+    pub editing_custom: bool,
+}
+
+/// Panel lines plus the indices the renderer needs. The first `tab_rows` lines
+/// are the tab bar; the selected block is body-relative (tab rows excluded).
+struct AskUserLines {
+    lines: Vec<Line<'static>>,
+    tab_rows: usize,
+    selected_block: Option<(usize, usize)>,
+    editing_line_idx: Option<usize>,
+    cur_col: usize,
+}
+
+/// Content-driven height of the question panel at the given width (tab bar +
+/// current tab content + 2 border rows + 2 help rows). The caller clamps it to
+/// the available space; the renderer keeps the selected row visible.
+pub(crate) fn ask_user_panel_height(view: &AskUserView<'_>, width: u16) -> u16 {
+    (build_ask_user_lines(view, width).lines.len() + 4) as u16
+}
+
+fn build_ask_user_lines(view: &AskUserView<'_>, width: u16) -> AskUserLines {
     use textwrap::wrap;
+
+    let AskUserView {
+        questions,
+        current_tab,
+        selected,
+        answers,
+        custom_inputs,
+        custom_cursor,
+        editing_custom,
+    } = *view;
 
     let confirm_tab = questions.len();
     let is_confirm = current_tab == confirm_tab;
@@ -359,74 +399,21 @@ pub(crate) fn render_ask_user(
         .get(current_tab)
         .map(|s| s.as_str())
         .unwrap_or("");
-
-    let dialog_width = (area.width as usize).clamp(50, 80);
-    let inner_w = dialog_width.saturating_sub(4);
-
-    // The tab bar always takes 1 row (the Confirm tab exists even for a single
-    // question); +3 for borders, +1 for the help row
-    let question_lines = if is_confirm {
-        let mut total = 0;
-        for (i, q) in questions.iter().enumerate() {
-            let val = answers[i].as_deref().unwrap_or("(not answered)");
-            let line_text = format!(" {}: {}", q.header, val);
-            total += wrap(&line_text, inner_w).len().max(1);
-        }
-        total
-    } else {
-        let q = &questions[current_tab];
-        let qw = wrap(&q.question, inner_w);
-        let mut lines = qw.len();
-        for opt in &q.options {
-            lines += 1 + wrap(&format!("  {}", opt.description), inner_w.saturating_sub(5)).len();
-        }
-        let edit_lines = if editing_custom {
-            let tw = inner_w.saturating_sub(5).max(1);
-            wrap_input(custom_input, 0, tw).0.len()
-        } else {
-            0
-        };
-        lines + 1 + edit_lines
-    };
-
-    let dialog_height = (question_lines + 5) as u16;
-    let dialog_x = (area.width as usize).saturating_sub(dialog_width) / 2;
-    let dialog_y = (area.height as usize).saturating_sub(dialog_height as usize) / 2;
-
-    let dialog_area = Rect::new(
-        dialog_x as u16,
-        dialog_y as u16,
-        dialog_width as u16,
-        dialog_height,
-    );
-
-    Clear.render(dialog_area, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray))
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            " ? ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_alignment(Alignment::Center);
-
-    let inner = block.inner(dialog_area);
-    block.render(dialog_area, buf);
-
-    let [content_area, help_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
-    let content_width = content_area.width as usize;
+    // Mirror the block geometry: inner = width - 2 border columns; text wraps
+    // 2 columns narrower than the inner width
+    let content_width = width.saturating_sub(2) as usize;
+    let inner_w = width.saturating_sub(4) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut cursor_pos = None;
+    let mut selected_block = None;
     let mut editing_line_idx: Option<usize> = None;
+    let mut cur_col = 0usize;
 
+    // Tab bar: greedy-wrapped into as many rows as needed so the Confirm tab
+    // always stays fully visible on narrow panels
     {
-        let mut tab_spans = Vec::new();
+        let mut row_spans: Vec<Span> = Vec::new();
+        let mut row_w = 0usize;
         for (i, q) in questions.iter().enumerate() {
             let active = i == current_tab;
             let answered = answers[i].is_some();
@@ -441,7 +428,14 @@ pub(crate) fn render_ask_user(
                 Style::default().fg(Color::DarkGray)
             };
             let prefix = if i > 0 { " " } else { "" };
-            tab_spans.push(Span::styled(format!("{prefix} {} ", q.header), style));
+            let span = Span::styled(format!("{prefix} {} ", q.header), style);
+            let w = span.content.width();
+            if row_w > 0 && row_w + w > content_width {
+                lines.push(Line::from(std::mem::take(&mut row_spans)));
+                row_w = 0;
+            }
+            row_w += w;
+            row_spans.push(span);
         }
         let active = current_tab == confirm_tab;
         let style = if active {
@@ -452,25 +446,45 @@ pub(crate) fn render_ask_user(
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        tab_spans.push(Span::styled(" Confirm ", style));
-        lines.push(Line::from(tab_spans));
+        let span = Span::styled(" Confirm ", style);
+        let w = span.content.width();
+        if row_w > 0 && row_w + w > content_width {
+            lines.push(Line::from(std::mem::take(&mut row_spans)));
+        }
+        row_spans.push(span);
+        lines.push(Line::from(row_spans));
     }
+    let tab_rows = lines.len();
 
     if is_confirm {
         for (i, q) in questions.iter().enumerate() {
             let val = answers[i].as_deref().unwrap_or("(not answered)");
-            let val_style = if answers[i].is_some() {
-                Style::default().fg(Color::White)
-            } else {
+            // selected doubles as the confirm-page cursor: ↑↓ browse, windowing
+            // keeps the cursor row in view
+            let active = i == selected;
+            let val_style = if answers[i].is_none() {
                 Style::default().fg(Color::Red)
+            } else if active {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
             };
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!(" {}: ", q.header),
-                    Style::default().fg(Color::DarkGray),
+                    format!("{} {}: ", if active { "▸" } else { " " }, q.header),
+                    Style::default().fg(if active {
+                        Color::White
+                    } else {
+                        Color::DarkGray
+                    }),
                 ),
                 Span::styled(val.to_string(), val_style),
             ]));
+            if active {
+                selected_block = Some((lines.len() - 2, lines.len() - 1));
+            }
         }
     } else {
         let q = &questions[current_tab];
@@ -485,6 +499,7 @@ pub(crate) fn render_ask_user(
 
         for (i, opt) in q.options.iter().enumerate() {
             let active = i == selected;
+            let block_start = lines.len();
             let picked = answers[current_tab].as_deref() == Some(&opt.label);
 
             let (num_style, label_style, fill_bg, dim_style) = if active {
@@ -532,10 +547,14 @@ pub(crate) fn render_ask_user(
                     Span::styled(" ".repeat(content_width), Style::default().bg(fill_bg)),
                 ]));
             }
+            if active {
+                selected_block = Some((block_start - 1, lines.len() - 1));
+            }
         }
 
         let custom_idx = q.options.len();
         let active = selected == custom_idx;
+        let block_start = lines.len();
         let custom_picked = answers[current_tab]
             .as_deref()
             .is_some_and(|v| v == custom_input.trim() && !custom_input.trim().is_empty());
@@ -580,7 +599,8 @@ pub(crate) fn render_ask_user(
 
         if editing_custom {
             let tw = content_width.saturating_sub(5).max(1);
-            let (wrapped, cur_row, cur_col) = wrap_input(custom_input, custom_cursor, tw);
+            let (wrapped, cur_row, cur_col_at_cursor) = wrap_input(custom_input, custom_cursor, tw);
+            cur_col = cur_col_at_cursor;
 
             for (li, wline) in wrapped.iter().enumerate() {
                 if li == cur_row {
@@ -601,22 +621,90 @@ pub(crate) fn render_ask_user(
                 ));
                 lines.push(Line::from(spans));
             }
-
-            cursor_pos = editing_line_idx.map(|li| {
-                let cx = (content_area.x + 5 + cur_col as u16)
-                    .min(content_area.x + content_area.width.saturating_sub(1));
-                let cy = content_area.y + li as u16;
-                (cx, cy)
-            });
+        }
+        if active {
+            selected_block = Some((block_start - 1, lines.len() - 1));
         }
     }
 
+    AskUserLines {
+        lines,
+        tab_rows,
+        selected_block,
+        editing_line_idx,
+        cur_col,
+    }
+}
+
+/// Windows the body (tab rows excluded) to `visible` rows, keeping the selected
+/// block in view. Returns the shown lines and the body offset they start at.
+fn window_ask_user_lines(
+    mut lines: Vec<Line<'static>>,
+    visible: usize,
+    tab_rows: usize,
+    selected_block: Option<(usize, usize)>,
+) -> (Vec<Line<'static>>, usize) {
+    let tab_rows = tab_rows.min(lines.len()).max(1);
+    let body: Vec<Line<'static>> = lines.drain(tab_rows..).collect();
+    let body_len = body.len();
+    let body_visible = visible.saturating_sub(tab_rows).max(1);
+    if body_len <= body_visible {
+        let mut shown = lines;
+        shown.extend(body);
+        return (shown, 0);
+    }
+
+    let (sel_start, sel_end) = selected_block.unwrap_or((0, 0));
+    // A block taller than the window is shown from its start
+    let win_start = sel_end
+        .saturating_sub(body_visible)
+        .min(sel_start)
+        .min(body_len - body_visible);
+    let win_end = (win_start + body_visible).min(body_len);
+    let mut shown = lines;
+    shown.extend_from_slice(&body[win_start..win_end]);
+    (shown, win_start)
+}
+
+/// Renders the question panel into the input slot and returns the custom-input
+/// cursor position, if editing
+pub(crate) fn render_ask_user_panel(
+    rect: Rect,
+    buf: &mut Buffer,
+    view: &AskUserView<'_>,
+) -> Option<(u16, u16)> {
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    let built = build_ask_user_lines(view, rect.width);
+    let is_confirm = view.current_tab == view.questions.len();
+
+    Clear.render(rect, buf);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray))
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " ? ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let [content_area, help_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
+    let visible = content_area.height as usize;
+
+    let (lines, win_start) =
+        window_ask_user_lines(built.lines, visible, built.tab_rows, built.selected_block);
     Paragraph::new(lines).render(content_area, buf);
 
     let help_text = if is_confirm {
-        "enter=submit  esc=cancel"
+        "↑↓=browse  enter=submit  esc=cancel"
     } else {
-        "←→=tab  ↑↓=select  1-9=quick pick  enter=confirm  esc=cancel"
+        "←→=tab  ↑↓=select  1-9=pick  enter=confirm  wheel/pgup=scroll  esc=cancel"
     };
     let help_pad = (help_area.width as usize).saturating_sub(UnicodeWidthStr::width(help_text)) / 2;
     let help_lines = vec![
@@ -628,7 +716,16 @@ pub(crate) fn render_ask_user(
     ];
     Paragraph::new(help_lines).render(help_area, buf);
 
-    cursor_pos
+    // The tab rows stay; body rows shift by win_start
+    built
+        .editing_line_idx
+        .map(|li| li.saturating_sub(win_start))
+        .filter(|li| *li < visible)
+        .map(|li| {
+            let cx = (content_area.x + 5 + built.cur_col as u16)
+                .min(content_area.x + content_area.width.saturating_sub(1));
+            (cx, content_area.y + li as u16)
+        })
 }
 
 #[cfg(test)]
@@ -693,6 +790,85 @@ mod tests {
         assert_eq!(
             format_ask_reply(&qs, &ans),
             "\"Which framework?\"=\"Fast\", \"Any notes?\"=\"[Custom input] keep it small\""
+        );
+    }
+
+    #[test]
+    fn panel_height_matches_built_lines() {
+        // The measure and the renderer share build_ask_user_lines, so an
+        // unclamped panel always fits: tab row + body + 2 borders + 2 help rows
+        let q = question_with_options(&["React", "Vue", "Svelte"]);
+        let answers: Vec<Option<String>> = vec![None];
+        let inputs = vec![String::new()];
+        for (tab, sel, editing) in [(0, 0, false), (0, 3, true), (1, 0, false)] {
+            let view = AskUserView {
+                questions: std::slice::from_ref(&q),
+                current_tab: tab,
+                selected: sel,
+                answers: &answers,
+                custom_inputs: &inputs,
+                custom_cursor: 0,
+                editing_custom: editing,
+            };
+            let built = build_ask_user_lines(&view, 60);
+            assert_eq!(
+                ask_user_panel_height(&view, 60) as usize,
+                built.lines.len() + 4
+            );
+        }
+    }
+
+    #[test]
+    fn window_keeps_selected_block_visible() {
+        // 1 tab row + 8 body rows
+        let lines: Vec<Line<'static>> = (0..9).map(|i| Line::from(format!("row {i}"))).collect();
+        // Fits: unchanged
+        let (shown, start) = window_ask_user_lines(lines.clone(), 9, 1, Some((7, 8)));
+        assert_eq!((shown.len(), start), (9, 0));
+        // Clamped to 4 rows (3 body): block [7,8) → body 5..8
+        let (shown, start) = window_ask_user_lines(lines.clone(), 4, 1, Some((7, 8)));
+        assert_eq!((shown.len(), start), (4, 5));
+        assert_eq!(shown[0].to_string(), "row 0");
+        assert_eq!(shown[3].to_string(), "row 8");
+        // Block taller than the window: shown from its start
+        let (shown, start) = window_ask_user_lines(lines.clone(), 3, 1, Some((2, 7)));
+        assert_eq!(start, 2);
+        assert_eq!(shown[2].to_string(), "row 4");
+        // No selection: top rows
+        let (_, start) = window_ask_user_lines(lines, 4, 1, None);
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn tab_bar_wraps_when_narrow() {
+        // Six headers do not fit a 40-column panel: the tab bar wraps onto
+        // multiple rows and Confirm stays fully visible on the last row
+        let qs: Vec<QuestionInfo> = (0..6)
+            .map(|i| QuestionInfo {
+                question: format!("question {i}"),
+                header: format!("Q{i} header"),
+                options: Vec::new(),
+            })
+            .collect();
+        let answers: Vec<Option<String>> = vec![None; qs.len()];
+        let view = AskUserView {
+            questions: &qs,
+            current_tab: 0,
+            selected: 0,
+            answers: &answers,
+            custom_inputs: &[],
+            custom_cursor: 0,
+            editing_custom: false,
+        };
+        let built = build_ask_user_lines(&view, 40);
+        assert!(built.tab_rows > 1);
+        let last = &built.lines[built.tab_rows - 1];
+        let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("Confirm"));
+        // Height accounting covers the extra tab rows
+        assert_eq!(
+            ask_user_panel_height(&view, 40) as usize,
+            built.lines.len() + 4
         );
     }
 }

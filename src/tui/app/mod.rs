@@ -478,6 +478,22 @@ impl App {
         Ok(())
     }
 
+    /// Scrolls the chat history by `delta` lines (positive = towards older
+    /// messages). Reaching the bottom re-enables auto-scroll. Shared by the
+    /// chat keys, the mouse wheel and the question panel (which keeps the
+    /// history scrollable while it occupies the input slot).
+    pub(super) fn scroll_chat(&mut self, delta: i32) {
+        if delta >= 0 {
+            self.should_auto_scroll = false;
+            self.scroll_offset = self.scroll_offset.saturating_add(delta as u16);
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_sub(-delta as u16);
+            if self.scroll_offset == 0 {
+                self.should_auto_scroll = true;
+            }
+        }
+    }
+
     async fn cleanup_on_quit(&mut self) {
         self.agent.interrupt();
 
@@ -728,7 +744,24 @@ impl App {
                         return Ok(());
                     }
                 };
-                st.handle_event(event, &mut self.state)?;
+                // The panel occupies the input slot: wheel / paging scroll the
+                // history behind it while arrows keep selecting options
+                let scroll = match &event {
+                    AppEvent::ScrollUp => Some(3),
+                    AppEvent::ScrollDown => Some(-3),
+                    AppEvent::InputKey(key) if !st.editing_custom => match key.code {
+                        KeyCode::PageUp => Some(20),
+                        KeyCode::PageDown => Some(-20),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(delta) = scroll {
+                    self.scroll_chat(delta);
+                    st.save(&mut self.state);
+                } else {
+                    st.handle_event(event, &mut self.state)?;
+                }
                 if matches!(self.state, AppState::Chat) {
                     self.timing.resume();
                 }

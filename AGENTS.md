@@ -281,6 +281,19 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
   `agent/event.rs::is_custom_answer`, mirrored by web `dialogs.tsx::isCustomAnswer`,
   explained to the model by `agent/tools/question.rs`). A single question also routes through the Confirm tab — no
   auto-submit on selection (TUI and Web aligned).
+- **Question panel takes over the input slot** (not a modal): while a question is
+  pending the history above stays scrollable. TUI: `ChatWidget.input_hidden` leaves
+  the input slot blank and `RenderResult.input_area` hands its rect to
+  `ask_user::render_ask_user_panel`; the height is content-driven
+  (`ask_user_panel_height`, measured and rendered by the same `build_ask_user_lines`)
+  and clamped to 60% / `height-6` in `app_render.rs`, with keep-selected-visible
+  windowing (`window_ask_user_lines`) when clamped; wheel / PgUp / PgDn scroll the
+  history via `App::scroll_chat` (shared with the chat keys), arrows keep selecting
+  options, and only the panel's own custom-input cursor is shown. Web mirrors the
+  TUI's tab model (one question per tab, picking advances, Confirm tab reviews):
+  `AskUserPanel` renders in the composer slot while `ChatInput hidden` stays
+  mounted (its draft is local state — never unmount it); Esc inside a text input
+  only leaves editing, elsewhere it cancels.
 - **Permission defaults**: In-workdir operations allowed by default via builtin lowest-priority
   rules in `permission/mod.rs::default_rules()`: `* allow`, `external_directory * ask`,
   `read *.env` / `*.env.* ask` (`.env.example allow`), `mcp * ask`. Grep aligns with the env

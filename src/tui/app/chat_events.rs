@@ -51,16 +51,8 @@ impl App {
                 self.submit_text(text, attachments, mentions).await?;
             }
             AppEvent::Resize => {}
-            AppEvent::ScrollUp => {
-                self.should_auto_scroll = false;
-                self.scroll_offset = self.scroll_offset.saturating_add(3);
-            }
-            AppEvent::ScrollDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                if self.scroll_offset == 0 {
-                    self.should_auto_scroll = true;
-                }
-            }
+            AppEvent::ScrollUp => self.scroll_chat(3),
+            AppEvent::ScrollDown => self.scroll_chat(-3),
             AppEvent::McpReady(_) => {}
             // Fetch results belong to the model picker / setup form (handle_event routes
             // them there); ignored here to keep the match exhaustive

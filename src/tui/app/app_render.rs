@@ -81,6 +81,43 @@ impl App {
         self.input
             .set_input_scroll_row(new_scroll.min(max_input_scroll));
 
+        // While a question is pending its panel takes over the input slot:
+        // content-driven height, clamped so the history keeps its Min(3) rows
+        // plus the timing row and status bar
+        let ask_view = match &self.state {
+            AppState::AskUser {
+                questions,
+                current_tab,
+                selected,
+                answers,
+                custom_inputs,
+                custom_cursor,
+                editing_custom,
+                ..
+            } => Some(ask_user::AskUserView {
+                questions,
+                current_tab: *current_tab,
+                selected: *selected,
+                answers,
+                custom_inputs,
+                custom_cursor: *custom_cursor,
+                editing_custom: *editing_custom,
+            }),
+            _ => None,
+        };
+        let (input_area_height, input_hidden) = match &ask_view {
+            Some(view) => {
+                let cap = (area.height * 6 / 10)
+                    .min(area.height.saturating_sub(6))
+                    .max(5);
+                (
+                    ask_user::ask_user_panel_height(view, area.width).min(cap),
+                    true,
+                )
+            }
+            None => (input_area_height, false),
+        };
+
         if self.render.dirty {
             let mut cells: Vec<Box<dyn HistoryCell>> = Vec::new();
             cells.push(Box::new(SessionHeaderCell {
@@ -122,6 +159,7 @@ impl App {
             model_name: &self.resolved.display,
             input_scroll_row: self.input.input_scroll_row(),
             input_area_height,
+            input_hidden,
             directory: &self.work_dir,
             plan_mode: self.plan_mode,
             yolo_mode: self.agent.permission().mode() == crate::permission::PermissionMode::Yolo,
@@ -141,6 +179,15 @@ impl App {
         let result = widget.render(area, frame.buffer_mut());
         self.scroll_offset = result.scroll_offset;
         self.last_total_lines = result.total_lines;
+        let input_area = result.input_area;
+
+        // The question panel replaces the input slot; rendered right after the
+        // widget so the state borrow ends before the overlays below
+        if let Some(view) = &ask_view
+            && let Some(pos) = ask_user::render_ask_user_panel(input_area, frame.buffer_mut(), view)
+        {
+            frame.set_cursor_position(pos);
+        }
 
         // The input box is pinned to the bottom: the queue strip and timing
         // row squeeze the Min(3) messages area upward, so the cursor position
@@ -161,7 +208,9 @@ impl App {
             | AppState::Stats { .. }
             | AppState::Setup(_) => false,
             AppState::Permission { .. } => false,
-            AppState::AskUser { editing_custom, .. } => *editing_custom,
+            // The question panel owns the cursor (custom input) while it
+            // replaces the input slot
+            AppState::AskUser { .. } => false,
         };
 
         if show_cursor {
@@ -331,33 +380,6 @@ impl App {
                 messages,
                 scroll_offset,
             );
-        }
-
-        if let AppState::AskUser {
-            questions,
-            current_tab,
-            selected,
-            answers,
-            custom_inputs,
-            custom_cursor,
-            editing_custom,
-            ..
-        } = &self.state
-        {
-            let cursor_pos = ask_user::render_ask_user(
-                area,
-                frame.buffer_mut(),
-                questions,
-                *current_tab,
-                *selected,
-                answers,
-                custom_inputs,
-                *custom_cursor,
-                *editing_custom,
-            );
-            if let Some(pos) = cursor_pos {
-                frame.set_cursor_position(pos);
-            }
         }
 
         if let AppState::Permission {

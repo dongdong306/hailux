@@ -64,6 +64,9 @@ impl RenderCache {
 pub struct RenderResult {
     pub total_lines: u16,
     pub scroll_offset: u16,
+    /// The input slot's rect (also valid when the input is hidden, so a
+    /// replacement panel can render into it)
+    pub input_area: Rect,
 }
 
 /// Queue strip height, shared by the chat_widget layout and the app_render
@@ -90,6 +93,9 @@ pub struct ChatWidget<'a> {
     pub model_name: &'a str,
     pub input_scroll_row: u16,
     pub input_area_height: u16,
+    /// Leaves the input slot blank: the question panel renders into it instead
+    /// of the input box while a question is pending
+    pub input_hidden: bool,
     pub directory: &'a str,
     pub plan_mode: bool,
     pub yolo_mode: bool,
@@ -206,20 +212,23 @@ impl<'a> ChatWidget<'a> {
         if queue_height > 0 {
             self.render_queue(queue_area, buf);
         }
-        self.render_input(input_area, buf);
+        if !self.input_hidden {
+            self.render_input(input_area, buf);
+
+            if self.show_suggestions && !self.command_suggestions.is_empty() {
+                self.render_suggestions(area, input_area, buf);
+            }
+
+            if self.show_file_picker && !self.file_picker_results.is_empty() {
+                self.render_file_picker(area, input_area, buf);
+            }
+        }
         self.render_status(status_area, buf);
-
-        if self.show_suggestions && !self.command_suggestions.is_empty() {
-            self.render_suggestions(area, input_area, buf);
-        }
-
-        if self.show_file_picker && !self.file_picker_results.is_empty() {
-            self.render_file_picker(area, input_area, buf);
-        }
 
         RenderResult {
             total_lines,
             scroll_offset: self.scroll_offset,
+            input_area,
         }
     }
 
