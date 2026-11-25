@@ -186,7 +186,6 @@ pub(super) struct RenderState {
     pub(super) cells: Vec<Box<dyn HistoryCell>>,
     pub(super) dirty: bool,
     pub(super) force_clear: bool,
-    pub(super) ime_anchor: Option<(u16, u16)>,
 }
 
 impl Default for RenderState {
@@ -196,7 +195,6 @@ impl Default for RenderState {
             cells: Vec::new(),
             dirty: true,
             force_clear: false,
-            ime_anchor: None,
         }
     }
 }
@@ -468,10 +466,6 @@ impl App {
                     self.render.force_clear = false;
                 }
                 terminal.draw(|f| self.render(f))?;
-            }
-
-            if let Some((x, y)) = self.render.ime_anchor {
-                crossterm::execute!(terminal.backend_mut(), crossterm::cursor::MoveTo(x, y))?;
             }
         }
 
