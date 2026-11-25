@@ -1,14 +1,16 @@
-//! 图片附件基础设施：魔数嗅探 + 统一的 data URL 附件载体。
+//! Image attachment infrastructure: magic-number sniffing + a unified data URL attachment carrier.
 //!
-//! 所有媒体以 `data:<mime>;base64,<data>` 形式在内存/存储层流转，
-//! 仅在「发送给 Provider 前」按模型视觉能力做降级（见 agent.rs 的 build_request 校验）。
+//! All media flows through memory/storage as `data:<mime>;base64,<data>`;
+//! degradation by model vision capability happens only "before sending to the Provider"
+//! (see the build_request validation in agent.rs).
 
 use serde::{Deserialize, Serialize};
 
-/// 单张图片附件。`data_url` 约定为 `data:<mime>;base64,<data>`。
+/// A single image attachment. The `data_url` convention is `data:<mime>;base64,<data>`.
 ///
-/// `name` 为可选来源标识（如 read 工具填图片文件名），仅用于 agent 层生成
-/// 给模型的提示文本；serde 兼容旧数据（缺省 None），序列化时省略。
+/// `name` is an optional source identifier (e.g. the read tool fills in the image
+/// file name), used only by the agent layer to generate hint text for the model;
+/// serde stays compatible with old data (defaults to None) and omits it when serializing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     pub mime: String,
@@ -18,7 +20,7 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    /// 从原始字节构造附件（base64 编码内联）。
+    /// Builds an attachment from raw bytes (base64-encoded inline).
     pub fn from_bytes(mime: &str, bytes: &[u8]) -> Self {
         use base64::Engine as _;
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -29,20 +31,20 @@ impl Attachment {
         }
     }
 
-    /// data URL 中 base64 载荷是否为空（损坏/空图片校验）。
+    /// Whether the base64 payload in the data URL is empty (corrupted/empty-image check).
     pub fn payload_is_empty(&self) -> bool {
         data_url_payload_is_empty(&self.data_url)
     }
 }
 
-/// 附件原始字节上限（10 MiB）。base64 后约 13.3 MiB，
-/// 在主流 OpenAI-compatible Provider 的请求体限制之内。
+/// Upper limit on raw attachment bytes (10 MiB). After base64 encoding this is ~13.3 MiB,
+/// within the request body limits of mainstream OpenAI-compatible Providers.
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
-/// 单条消息附件数量上限。
+/// Upper limit on the number of attachments per message.
 pub const MAX_ATTACHMENT_COUNT: usize = 6;
 
-/// data URL 中 base64 载荷是否为空（无逗号 / 载荷全空白均视为空）。
+/// Whether the base64 payload in a data URL is empty (no comma, or an all-whitespace payload).
 pub fn data_url_payload_is_empty(data_url: &str) -> bool {
     data_url
         .rsplit_once(',')
@@ -50,8 +52,8 @@ pub fn data_url_payload_is_empty(data_url: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// 通过魔数字节嗅探是否为受支持的图片格式，返回 MIME。
-/// 支持 PNG / JPEG / GIF / WebP。
+/// Sniffs magic bytes to detect a supported image format and returns the MIME.
+/// Supports PNG / JPEG / GIF / WebP.
 pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         return Some("image/png");
@@ -69,7 +71,7 @@ pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// MIME 是否为受支持的图片类型。
+/// Whether the MIME is a supported image type.
 pub fn is_supported_image_mime(mime: &str) -> bool {
     matches!(
         mime,
@@ -77,7 +79,8 @@ pub fn is_supported_image_mime(mime: &str) -> bool {
     )
 }
 
-/// 按扩展名推断图片 MIME（@文件引用等无法立即读字节的入口用）。
+/// Infers the image MIME from a file extension, for entry points that cannot read bytes
+/// immediately (e.g. @file references).
 pub fn mime_from_extension(path: &std::path::Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {

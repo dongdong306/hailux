@@ -1,32 +1,34 @@
-// subagent 步骤折叠辅助：动词摘要、结果摘要、task 结果块解析
-// （对齐 TUI subagent_step_summary / task_outcomes_from_result）
+// subagent step folding helpers: verb summaries, result summaries, task
+// result block parsing
+// (aligned with the TUI's subagent_step_summary / task_outcomes_from_result)
 
-/** 折叠进 task part 的单条实时步骤（挂在 args._steps） */
+/** One live step folded into the task part (attached at args._steps) */
 export interface TaskStepData {
-  /** 来源任务在 tasks 数组中的下标（同名 subagent 并发时区分实例） */
+  /** Index of the source task in the tasks array (tells apart concurrent
+   *  same-named subagents) */
   index: number;
   agent: string;
   text: string;
   done: boolean;
 }
 
-/** task 结果中单个任务的产出 */
+/** One task's outcome within the task result */
 export interface TaskOutcome {
   agent: string;
   ok: boolean;
   firstLine: string;
-  /** 完整输出（task_result / error 内容），供展开查看 */
+  /** Full output (task_result / error content), for the expanded view */
   full: string;
 }
 
-/** 工具动词表（对齐 TUI ToolCategory::verb_done） */
+/** Tool verb table (aligned with the TUI's ToolCategory::verb_done) */
 const VERB_DONE: Record<string, string> = {
   read: "Read",
   write: "Wrote",
   edit: "Edited",
   grep: "Searched",
   glob: "Listed",
-  bash: "Ran",
+  shell: "Ran",
   web_fetch: "Fetched",
   todo_write: "Updated",
 };
@@ -45,7 +47,7 @@ function parseArgsLoose(raw: string | undefined): Record<string, any> {
   }
 }
 
-/** subagent 步骤摘要：动词前缀 + 目标（如 "Read src/main.rs"） */
+/** Subagent step summary: verb prefix + target (e.g. "Read src/main.rs") */
 export function subagentStepSummary(name: string, argsText: string | undefined): string {
   const args = parseArgsLoose(argsText);
   let detail = "";
@@ -65,7 +67,7 @@ export function subagentStepSummary(name: string, argsText: string | undefined):
     if (args.replace_all === true) detail += " (replace all)";
   } else if (name === "write") {
     detail = typeof args.file_path === "string" ? args.file_path : "";
-  } else if (name === "bash") {
+  } else if (name === "shell") {
     detail = truncate(String(args.command_string ?? ""), 60);
   } else if (name === "web_fetch") {
     detail = String(args.url ?? "");
@@ -79,7 +81,7 @@ export function subagentStepSummary(name: string, argsText: string | undefined):
   } else if (name === "skill") {
     detail = String(args.name ?? "");
   } else if (name.startsWith("mcp__")) {
-    // mcp__server__tool → 工具短名
+    // mcp__server__tool → short tool name
     detail = name.split("__").slice(2).join("__") || name;
   } else if (name !== "todo_write") {
     detail = truncate(argsText ?? "", 40);
@@ -94,7 +96,8 @@ function xmlTag(s: string, tag: string): string | null {
   return m?.[1] ?? null;
 }
 
-/** 步骤完成后的结果摘要（单行，追加在步骤文本后，如 " — 42 lines"） */
+/** Result summary after a step completes (single line, appended after the
+ *  step text, e.g. " — 42 lines") */
 export function subagentStepResultSummary(name: string, result: string | undefined): string {
   const r = (result ?? "").trim();
   if (!r) return "";
@@ -115,8 +118,9 @@ export function subagentStepResultSummary(name: string, result: string | undefin
   if (name === "edit" || name === "write") {
     return r.includes("成功") ? "done" : truncate(r, 40);
   }
-  if (name === "bash") {
-    // 对齐 Rust tool_result_summary：≤3 行整段截断 120 字符，>3 行取前 3 行 + 计数
+  if (name === "shell") {
+    // Aligned with the Rust tool_result_summary: ≤3 lines truncate the whole
+    // text to 120 chars; >3 lines take the first 3 lines + a count
     const lines = r.split("\n");
     if (lines.length <= 3) {
       return truncate(r, 120);
@@ -132,8 +136,9 @@ export function subagentStepResultSummary(name: string, result: string | undefin
   return truncate(r.split("\n")[0] ?? "", 40);
 }
 
-/** 逐行解析 task 结果中的 `<task ...>` 块（兼容有无 `<tasks>` 包裹），
- *  返回顺序与 tasks 数组一致 */
+/** Parse the `<task ...>` blocks in a task result line by line (tolerates
+ *  presence or absence of a `<tasks>` wrapper),
+ *  returns in the same order as the tasks array */
 export function parseTaskOutcomes(result: string): TaskOutcome[] {
   const out: TaskOutcome[] = [];
   let cur: { agent: string; ok: boolean; buf: string[] } | null = null;

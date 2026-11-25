@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR_NAME: &str = ".hailux";
 const MCP_CONFIG_FILE_NAME: &str = "mcp.toml";
 
-/// 单个 MCP 服务器的配置。通过 untagged enum 区分传输方式：
-/// - 包含 `command` 字段 → stdio 本地子进程
-/// - 包含 `url` 字段 → 远程 streamable-http / SSE
+/// Configuration for a single MCP server. An untagged enum distinguishes
+/// the transport type:
+/// - has a `command` field -> stdio local subprocess
+/// - has a `url` field -> remote streamable-http / SSE
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ServerConfig {
@@ -21,7 +22,8 @@ pub enum ServerConfig {
     },
     Http {
         url: String,
-        /// 附加到每个 HTTP 请求的自定义 header（可用于鉴权，如 Authorization / X-API-Key）
+        /// Custom headers attached to every HTTP request (usable for auth,
+        /// e.g. Authorization / X-API-Key)
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
     },
@@ -36,7 +38,7 @@ impl ServerConfig {
     }
 }
 
-/// `~/.hailux/mcp.toml` 的根结构。
+/// Root structure of `~/.hailux/mcp.toml`.
 ///
 /// ```toml
 /// [mcp_servers.context7]
@@ -58,7 +60,8 @@ fn mcp_config_file_path() -> Result<PathBuf> {
     Ok(home.join(CONFIG_DIR_NAME).join(MCP_CONFIG_FILE_NAME))
 }
 
-/// 首次运行时写入的示例模板（全部注释，取消注释即可启用对应服务器）。
+/// Sample template written on first run (all commented out; uncomment a
+/// section to enable the corresponding server).
 const SAMPLE_TEMPLATE: &str = r#"# ──────────────────────────────────────────────────────────────
 # hailux MCP 服务器配置
 # ──────────────────────────────────────────────────────────────
@@ -114,10 +117,11 @@ const SAMPLE_TEMPLATE: &str = r#"# ───────────────
 # ──────────────────────────────────────────────────────────────
 "#;
 
-/// 读取 MCP 配置文件。
+/// Reads the MCP config file.
 ///
-/// 文件不存在时，自动在配置目录生成示例模板（全部注释），便于用户编辑；
-/// 生成失败不阻断启动，仍返回空配置。
+/// When the file does not exist, automatically generates the sample template
+/// (fully commented out) in the config directory for easy editing; if
+/// generation fails, startup is not blocked and an empty config is returned.
 pub fn load() -> Result<McpConfig> {
     let path = mcp_config_file_path()?;
     if !path.exists() {
@@ -131,8 +135,9 @@ pub fn load() -> Result<McpConfig> {
     Ok(config)
 }
 
-/// 将配置写回 `~/.hailux/mcp.toml`（全量序列化，文件内注释不保留）。
-/// 必要时创建父目录。
+/// Writes the config back to `~/.hailux/mcp.toml` (full serialization;
+/// in-file comments are not preserved). Creates the parent directory if
+/// needed.
 pub fn save(config: &McpConfig) -> Result<()> {
     let path = mcp_config_file_path()?;
     if let Some(parent) = path.parent()
@@ -147,7 +152,9 @@ pub fn save(config: &McpConfig) -> Result<()> {
     Ok(())
 }
 
-/// 将示例模板写入指定路径，必要时创建父目录。失败时打印警告但不阻断启动。
+/// Writes the sample template to the given path, creating the parent
+/// directory if needed. On failure, prints a warning but does not block
+/// startup.
 fn create_sample_file(path: &Path) {
     if let Some(parent) = path.parent()
         && !parent.exists()
@@ -169,7 +176,7 @@ fn create_sample_file(path: &Path) {
     }
 }
 
-/// 返回配置文件路径的字符串表示（供 UI 提示使用）。
+/// Returns the config file path as a string (used for UI hints).
 pub fn config_path_display() -> String {
     match mcp_config_file_path() {
         Ok(p) => p.display().to_string(),

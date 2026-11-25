@@ -9,7 +9,7 @@ use crate::agent::models::CompatibleChatCompletionRequestMessage;
 use crate::agent::skill::{SkillInfo, format_available_skills};
 use crate::agent::tools::{Tool, ToolExecuteError};
 use crate::agent::{
-    BashTool, EditTool, GlobTool, GrepTool, ReadTool, SkillTool, TodoWriteTool, WebFetchTool,
+    EditTool, GlobTool, GrepTool, ReadTool, ShellTool, SkillTool, TodoWriteTool, WebFetchTool,
     WriteTool,
 };
 use crate::mcp::{McpTool, SharedMcpBackends};
@@ -17,7 +17,8 @@ use crate::storage::{ChatStorage, MessageRole};
 
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 
-/// TaskTool 的可克隆依赖集合，供并发运行的多个 subagent 任务共享
+/// Cloneable dependency set of TaskTool, shared by concurrently running
+/// subagent tasks
 #[derive(Clone)]
 pub(super) struct SharedTaskCtx {
     pub(super) skills: Vec<SkillInfo>,
@@ -27,14 +28,15 @@ pub(super) struct SharedTaskCtx {
     pub(super) current_session_id: Arc<Mutex<Option<String>>>,
     pub(super) mcp_backends: SharedMcpBackends,
     pub(super) config: SharedConfig,
-    /// 主会话的事件通道句柄，用于将 subagent 的工具调用过程实时转发到聊天区
+    /// Handle to the main session's event channel, forwarding subagent tool
+    /// activity to the chat area in real time
     pub(super) main_event_hub: crate::agent::event::EventHub,
-    /// 权限管理器（与主 Agent 共享）
+    /// Permission manager (shared with the main Agent)
     pub(super) permission: crate::permission::PermissionManager,
 }
 
 impl SharedTaskCtx {
-    /// 构建 subagent 的 Agent 并注册工具
+    /// Builds the subagent's Agent and registers its tools
     fn build_subagent(&self, config: &SubagentConfig) -> Result<Agent, ToolExecuteError> {
         let model_selector = config.model.as_ref().ok_or_else(|| ToolExecuteError {
             message: format!("subagent \"{}\" has no model configured; please specify the model field in AGENTS.md", config.name),
@@ -84,7 +86,6 @@ impl SharedTaskCtx {
             app_config.retry_config(),
         );
 
-        // 注册内建工具（不包含 task 和 ask_user）
         let allowed = config.allowed_tools.as_ref();
 
         let register_if =
@@ -96,7 +97,7 @@ impl SharedTaskCtx {
                 }
             };
 
-        register_if(Box::new(BashTool), &mut agent, allowed);
+        register_if(Box::new(ShellTool), &mut agent, allowed);
         register_if(Box::new(ReadTool), &mut agent, allowed);
         register_if(Box::new(EditTool), &mut agent, allowed);
         register_if(Box::new(WriteTool), &mut agent, allowed);
@@ -104,9 +105,10 @@ impl SharedTaskCtx {
         register_if(Box::new(GlobTool), &mut agent, allowed);
         register_if(Box::<WebFetchTool>::default(), &mut agent, allowed);
         register_if(Box::new(TodoWriteTool), &mut agent, allowed);
-        // ask_user 不注册给 subagent
+        // question is intentionally omitted: subagents run non-interactively
+        // (isolated event channel, only the final text is returned).
 
-        // 注册 skill 工具（仅注册 allowed_skills 中指定的 skill）
+        // Register the skill tool (only skills listed in allowed_skills)
         let mut skills_available = String::new();
         if let Some(ref allowed_skill_names) = config.allowed_skills {
             let filtered_skills: Vec<SkillInfo> = self
@@ -117,7 +119,7 @@ impl SharedTaskCtx {
                 .collect();
             if !filtered_skills.is_empty() {
                 agent.register_tool(Box::new(SkillTool::new(filtered_skills.clone())));
-                // 将 skill 摘要注入 system prompt
+                // Inject the skill summary into the system prompt
                 let available = format_available_skills(&filtered_skills);
                 if !available.is_empty() {
                     skills_available = format!(
@@ -130,7 +132,7 @@ impl SharedTaskCtx {
             }
         }
 
-        // 注册 MCP 工具（仅注册 allowed_mcp_servers 中指定的服务器）
+        // Register MCP tools (only servers listed in allowed_mcp_servers)
         if let Some(ref allowed_servers) = config.allowed_mcp_servers
             && let Ok(backends) = self.mcp_backends.lock()
         {
@@ -154,7 +156,7 @@ impl SharedTaskCtx {
             }
         }
 
-        // 设置 system prompt
+        // Set the system prompt
         let mut system_prompt = config.system_prompt.clone();
         system_prompt.push_str(&skills_available);
         system_prompt.push_str(&format!("\n\nCurrent working directory: {}", self.work_dir));
@@ -164,8 +166,9 @@ impl SharedTaskCtx {
     }
 }
 
-/// 运行单个 subagent 任务，始终返回格式化的 `<task>` 结果块；
-/// 内部失败以 `state="failed"` + `<error>` 呈现，不影响其他并发任务
+/// Runs a single subagent task, always returning a formatted `<task>` result
+/// block; internal failures surface as `state="failed"` + `<error>` without
+/// affecting other concurrent tasks
 pub(super) async fn run_subagent_task(
     ctx: SharedTaskCtx,
     config: SubagentConfig,
@@ -205,7 +208,7 @@ async fn run_subagent_task_inner(
     } = spec;
     let subagent_name = config.name.clone();
 
-    // 获取 parent session_id
+    // Get the parent session_id
     let parent_id = {
         let guard = ctx
             .current_session_id
@@ -220,11 +223,13 @@ async fn run_subagent_task_inner(
         message: "No active session; cannot create subagent session".to_string(),
     })?;
 
-    // 判断是恢复已有会话还是创建新会话
+    // Decide whether to resume an existing session or create a new one
     let (sub_session_id, agent) = if let Some(existing_id) = task_id {
-        // 恢复已有会话：加载历史消息
-        // 恢复路径兜底：修复历史悬挂 tool_calls（幂等），主会话中断时
-        // subagent 分离任务的事件通道已关闭，stub 落库只能靠这里补
+        // Resume an existing session: load history messages
+        // Resume-path fallback: repair historical dangling tool_calls
+        // (idempotent). When the main session was interrupted, the detached
+        // task's event channel is already closed, so persisting stubs can
+        // only happen here
         if let Err(e) = ctx.storage.repair_orphaned_tool_calls(&existing_id).await {
             eprintln!("[warn] repair_orphaned_tool_calls: {e}");
         }
@@ -236,10 +241,10 @@ async fn run_subagent_task_inner(
                     message: e.to_string(),
                 })?;
 
-        // 构建 subagent 并加载历史消息
+        // Build the subagent and load history messages
         let mut restore_agent = ctx.build_subagent(&config)?;
 
-        // 将历史消息加载到 agent 中
+        // Load the history messages into the agent
         let mut chat_messages = Vec::new();
         for msg in &stored_messages {
             if let Some(chat_msg) = crate::storage::from_stored_message(msg) {
@@ -247,7 +252,8 @@ async fn run_subagent_task_inner(
             }
         }
         if !chat_messages.is_empty() {
-            // 保留已有的 system prompt（build_subagent 已设置），仅加载非 system 消息
+            // Keep the existing system prompt (set by build_subagent); load
+            // non-system messages only
             let non_system: Vec<_> = chat_messages
                 .into_iter()
                 .filter(|m| {
@@ -260,7 +266,7 @@ async fn run_subagent_task_inner(
             restore_agent.sync_messages(non_system);
         }
 
-        // 持久化新的 user prompt
+        // Persist the new user prompt
         let user_stored = crate::storage::StoredMessage {
             role: MessageRole::User,
             content: prompt.clone(),
@@ -283,8 +289,9 @@ async fn run_subagent_task_inner(
 
         (existing_id, restore_agent)
     } else {
-        // 创建新会话
-        // subagent 实际使用的模型（与 subsession 的 sessions.model 同源，用于用量统计归属）
+        // Create a new session
+        // Model actually used by the subagent (same source as the subsession's
+        // sessions.model, used for usage attribution)
         let sub_model = config.model.clone().unwrap_or_else(|| ctx.model.clone());
         let sub_session_id = ctx
             .storage
@@ -294,7 +301,8 @@ async fn run_subagent_task_inner(
                 message: e.to_string(),
             })?;
 
-        // 将 subagent 名称和任务描述写入 title，格式: "name|description"
+        // Write the subagent name and task description into the title,
+        // format: "name|description"
         let title = format!("{}|{}", config.name, description);
         if let Err(e) = ctx
             .storage
@@ -304,7 +312,7 @@ async fn run_subagent_task_inner(
             eprintln!("[warn] Failed to set subagent session title: {e}");
         }
 
-        // 持久化 user prompt
+        // Persist the user prompt
         let user_stored = crate::storage::StoredMessage {
             role: MessageRole::User,
             content: prompt.clone(),
@@ -329,7 +337,7 @@ async fn run_subagent_task_inner(
             eprintln!("[warn] Failed to persist subagent user message: {e}");
         }
 
-        // 构建 subagent
+        // Build the subagent
         let agent = ctx.build_subagent(&config)?;
 
         (sub_session_id, agent)
@@ -337,17 +345,18 @@ async fn run_subagent_task_inner(
 
     let mut agent = agent;
 
-    // 创建局部 event channel
+    // Create a local event channel
     let (sub_tx, mut sub_rx) = create_core_event_channel();
 
-    // 启动 subagent 流式对话
+    // Start the subagent's streaming conversation
     agent
         .chat_stream(&sub_session_id, &prompt, Vec::new(), sub_tx)
         .map_err(|e| ToolExecuteError {
             message: e.to_string(),
         })?;
 
-    // 消费 subagent 事件，提取最终结果并转发工具调用过程到主 TUI
+    // Consume subagent events: extract the final result and forward tool
+    // activity to the main TUI
     let mut final_text = String::new();
     let mut completed = false;
     while let Some(event) = sub_rx.recv().await {
@@ -356,8 +365,9 @@ async fn run_subagent_task_inner(
                 final_text.push_str(&chunk);
             }
             CoreEvent::AgentRetry { .. } => {
-                // 失败尝试的部分输出作废：清空累积，防止「通道提前关闭」
-                // 场景把两次生成的文本拼在一起返回
+                // Discard partial output of the failed attempt: clear the
+                // accumulation so the "channel closed early" case never
+                // concatenates text from two separate runs
                 final_text.clear();
             }
             CoreEvent::AgentComplete {
@@ -392,14 +402,15 @@ async fn run_subagent_task_inner(
                 model,
                 display,
             } => {
-                // 持久化到 subagent session
+                // Persist to the subagent session
                 let mut stored = crate::storage::to_stored_message(&msg);
                 if let Some(u) = usage {
                     stored.prompt_tokens = Some(u.prompt_tokens as i64);
                     stored.completion_tokens = Some(u.completion_tokens as i64);
                     stored.cached_tokens = Some(u.cached_tokens as i64);
                 }
-                // 用量统计按消息级模型归属（事件携带的流式快照值）
+                // Usage stats are attributed by the message-level model
+                // (streaming snapshot value carried by the event)
                 stored.model = Some(model);
                 if let Some(ref d) = display {
                     stored.runtime_meta = Some(d.clone());
@@ -480,13 +491,14 @@ async fn run_subagent_task_inner(
                     subagent_name: Some(subagent_name.clone()),
                 });
             }
-            // 其他事件全部忽略
+            // All other events are ignored
             _ => {}
         }
     }
 
-    // 信道提前关闭（chat_stream 内部任务异常退出）：已收到的只是截断输出，
-    // 不能当作成功结果返回
+    // Channel closed early (the task inside chat_stream exited abnormally):
+    // what was received is truncated output only and must not be returned as
+    // a successful result
     if !completed {
         return Err(ToolExecuteError {
             message: format!(
@@ -510,7 +522,7 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// 按字符数截断，超长时追加省略号
+/// Truncates by character count, appending an ellipsis when over the limit
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()

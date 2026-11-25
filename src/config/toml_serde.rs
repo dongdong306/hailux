@@ -96,7 +96,7 @@ pub(super) fn config_to_toml(config: &Config) -> Result<String> {
         );
     }
     for (key, table) in [
-        ("bash", &config.permission.bash),
+        ("shell", &config.permission.shell),
         ("read", &config.permission.read),
         ("edit", &config.permission.edit),
         ("write", &config.permission.write),

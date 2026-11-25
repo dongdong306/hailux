@@ -7,11 +7,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::agent::skill::SkillInfo;
 use crate::tui::model_picker::wrap_input;
 
-/// 渲染 skill 查看器二级页面（只读列表）。
+/// Renders the skill viewer secondary page (read-only list).
 ///
-/// - `skills`: 已加载的 skill 列表
-/// - `selected_index`: 当前选中项
-/// - `home_dir`: 用户主目录，用于判断每个 skill 的来源（全局/项目）
+/// - `skills`: loaded skill list
+/// - `selected_index`: currently selected entry
+/// - `home_dir`: user home directory, used to tell each skill's origin (global/project)
 pub fn render_skills_viewer(
     area: Rect,
     buf: &mut Buffer,
@@ -54,7 +54,7 @@ pub fn render_skills_viewer(
     let content_height = content_area.height as usize;
     let content_width = content_area.width as usize;
 
-    // 每个 skill：名称(1) + 描述(最多2行) + 空行(1) = 最多 4 行
+    // Each skill: name(1) + description(up to 2 lines) + blank(1) = up to 4 lines
     const ITEM_LINES: usize = 4;
     const MAX_DESC_LINES: usize = 2;
 
@@ -88,7 +88,7 @@ pub fn render_skills_viewer(
         return;
     }
 
-    // 滚动偏移：选中项尽量居中（以 4 行块为单位）
+    // Scroll offset: keep the selected entry roughly centered (in 4-line blocks)
     let visible_items = content_height / ITEM_LINES;
     let first_visible = if selected_index >= visible_items {
         selected_index - visible_items / 2
@@ -131,14 +131,14 @@ pub fn render_skills_viewer(
 
         let selector = if is_selected { "▸ " } else { "  " };
 
-        // 第 1 行：名称
+        // Line 1: name
         lines.push(Line::from(vec![
             Span::styled(selector, desc_style),
             Span::styled(skill.name.clone(), name_style),
             Span::styled(" ".repeat(content_width), Style::default().bg(fill_bg)),
         ]));
 
-        // 第 2-3 行：描述（折行，最多 2 行，超出截断加省略号）
+        // Lines 2-3: description (wrapped, at most 2 lines; truncated with an ellipsis when over)
         let desc_text = if skill.description.is_empty() {
             "(无描述)".to_string()
         } else {
@@ -166,7 +166,7 @@ pub fn render_skills_viewer(
             ]));
         }
 
-        // 空行间距
+        // blank spacing line
         lines.push(Line::from(""));
     }
 
@@ -175,7 +175,7 @@ pub fn render_skills_viewer(
     render_help(help_area, buf);
 }
 
-/// 渲染单个 skill 的详情页面。
+/// Renders the detail page of a single skill.
 pub fn render_skill_detail(
     area: Rect,
     buf: &mut Buffer,
@@ -226,7 +226,7 @@ pub fn render_skill_detail(
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // 名称
+    // name
     lines.push(Line::from(vec![
         Span::styled("名称  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
@@ -237,7 +237,7 @@ pub fn render_skill_detail(
         ),
     ]));
 
-    // 来源
+    // source
     let source_tag = if is_global(skill, home_dir) {
         "全局"
     } else {
@@ -257,7 +257,7 @@ pub fn render_skill_detail(
 
     lines.push(Line::from(""));
 
-    // 描述
+    // description
     lines.push(Line::from(Span::styled(
         "描述",
         Style::default().fg(Color::DarkGray),
@@ -276,7 +276,7 @@ pub fn render_skill_detail(
         )));
     }
 
-    // 正文内容
+    // body content
     if !skill.content.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -298,7 +298,7 @@ pub fn render_skill_detail(
         }
     }
 
-    // 滚动裁剪
+    // scroll clipping
     let total_lines = lines.len();
     let content_height = content_area.height as usize;
     let max_scroll = total_lines.saturating_sub(content_height);
@@ -312,7 +312,7 @@ pub fn render_skill_detail(
 
     Paragraph::new(visible_lines).render(content_area, buf);
 
-    // 滚动指示器
+    // scroll indicator
     if max_scroll > 0 {
         let indicator = if actual_scroll > 0 && actual_scroll < max_scroll {
             " ↑↓ "
@@ -331,7 +331,7 @@ pub fn render_skill_detail(
         );
     }
 
-    // 帮助文本
+    // help text
     let help_text = if max_scroll > 0 {
         "↑↓ 切换  PgUp/PgDn 翻页  Esc 返回"
     } else {
@@ -361,10 +361,10 @@ fn render_help(area: Rect, buf: &mut Buffer) {
     Paragraph::new(help_lines).render(area, buf);
 }
 
-/// 判断 skill 是否来自全局目录（~/.hailux/skills/）
+/// Whether the skill comes from the global directory (~/.hailux/skills/)
 fn is_global(skill: &SkillInfo, home_dir: &Path) -> bool {
     let global_root = home_dir.join(".hailux").join("skills");
-    // skill.location 已经过 canonicalize，这里也需要 canonicalize 才能正确比较
+    // skill.location is already canonicalized; canonicalize here too for a correct comparison
     let global_root = match global_root.canonicalize() {
         Ok(p) => p,
         Err(_) => global_root,
@@ -372,7 +372,7 @@ fn is_global(skill: &SkillInfo, home_dir: &Path) -> bool {
     skill.location.starts_with(&global_root)
 }
 
-/// 显示主目录，失败时回退到 "~"
+/// Display the home directory, falling back to "~" on failure
 fn display_home(home_dir: &Path) -> String {
     home_dir.display().to_string()
 }

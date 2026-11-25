@@ -8,7 +8,7 @@ use super::{
     HistoryCell, ToolCategory, finish_hasher, tool_call_summary, tool_result_summary, wrap_text,
 };
 
-/// 工具调用：模仿 Codex 风格
+/// Tool call: Codex-style rendering
 ///   • Reading /path/to/file.rs
 ///     └ 42 lines
 ///   • Ran echo done
@@ -42,7 +42,7 @@ impl HistoryCell for ToolCell {
         let color = cat.color();
         let has_result = self.result.is_some();
 
-        // 第一行：• + 动词 + 摘要
+        // First line: • + verb + summary
         let verb = if has_result {
             cat.verb_done()
         } else {
@@ -83,7 +83,7 @@ impl HistoryCell for ToolCell {
 
         let mut lines = vec![header_line];
 
-        // 如果有 display（diff JSON），优先渲染
+        // If there is a display (diff JSON), render it with priority
         if let Some(ref display) = self.display {
             let diff_lines = render_diff_from_json(display, width);
             lines.extend(diff_lines);
@@ -91,7 +91,7 @@ impl HistoryCell for ToolCell {
             if cat == ToolCategory::AskUser {
                 lines.extend(render_ask_user_result(&self.arguments, result, width));
             } else {
-                // 结果行：  └ summary（dim）
+                // Result line:  └ summary (dim)
                 let result_summary = tool_result_summary(&self.name, result);
                 if !result_summary.is_empty() {
                     let detail_w = width.saturating_sub(4) as usize;
@@ -121,11 +121,11 @@ impl HistoryCell for ToolCell {
     }
 }
 
-/// 独立的 SubagentStep（无父 task call）
+/// Standalone SubagentStep (no parent task call)
 pub(super) struct PlainStepCell {
     pub(super) summary: String,
     pub(super) is_done: bool,
-    /// 多 subagent 并发时显示来源名称，如 "[reviewer]"
+    /// Shows the source name when multiple subagents run concurrently, e.g. "[reviewer]"
     pub(super) agent: Option<String>,
 }
 
@@ -176,7 +176,7 @@ impl HistoryCell for PlainStepCell {
     }
 }
 
-/// 连续只读工具调用合并展示（模仿 Codex Exploring/Explored）
+/// Merged display of consecutive read-only tool calls (mimics Codex Exploring/Explored)
 pub(crate) struct ExploringCell {
     pub items: Vec<ExploreItem>,
     pub all_done: bool,
@@ -255,7 +255,7 @@ impl HistoryCell for ExploringCell {
     }
 }
 
-/// 判断是否为只读工具（可合并为 Exploring）
+/// Whether the tool is read-only (mergeable into Exploring)
 pub(super) fn is_readonly_tool(name: &str) -> bool {
     matches!(
         ToolCategory::from_name(name),
@@ -263,7 +263,7 @@ pub(super) fn is_readonly_tool(name: &str) -> bool {
     )
 }
 
-/// 从只读工具参数中提取 Exploring 子项标签和摘要
+/// Extract the Exploring sub-item label and summary from read-only tool arguments
 pub(super) fn explore_item_from(name: &str, arguments: &str, result: Option<&str>) -> ExploreItem {
     let cat = ToolCategory::from_name(name);
     let label = cat.verb_done();

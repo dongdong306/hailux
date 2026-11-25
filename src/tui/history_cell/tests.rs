@@ -30,7 +30,7 @@ fn task_cell_running_single_agent_shows_recent_steps() {
             },
             TaskStep {
                 agent: Some("general".into()),
-                summary: "Bash build".into(),
+                summary: "Shell build".into(),
                 is_done: false,
                 index: Some(0),
             },
@@ -42,7 +42,7 @@ fn task_cell_running_single_agent_shows_recent_steps() {
     assert!(texts[0].contains("general"));
     assert!(texts[1].contains("├ ✓ Read a.rs"));
     assert!(texts[2].contains("├ ✓ Grep x"));
-    assert!(texts[3].contains("└ ● Bash build"));
+    assert!(texts[3].contains("└ ● Shell build"));
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn task_cell_running_multi_agent_latest_action_per_agent() {
             },
             TaskStep {
                 agent: Some("general".into()),
-                summary: "Bash build".into(),
+                summary: "Shell build".into(),
                 is_done: false,
                 index: Some(0),
             },
@@ -74,8 +74,8 @@ fn task_cell_running_multi_agent_latest_action_per_agent() {
     let texts: Vec<String> = cell.display_lines(100).iter().map(spans_text).collect();
     assert_eq!(texts.len(), 3);
     assert!(texts[1].contains("general"));
-    assert!(texts[1].contains("Bash build"));
-    // reviewer 无步骤 → 显示 description
+    assert!(texts[1].contains("Shell build"));
+    // reviewer has no steps → shows description
     assert!(texts[2].contains("reviewer"));
     assert!(texts[2].contains("r"));
 }
@@ -92,9 +92,9 @@ fn subagent_step_summary_includes_verb_prefix() {
         super::subagent_step_summary("grep", &grep_args),
         "Searched \"TODO\" in src"
     );
-    let bash_args = serde_json::json!({"command_string": "cargo build"}).to_string();
+    let shell_args = serde_json::json!({"command_string": "cargo build"}).to_string();
     assert_eq!(
-        super::subagent_step_summary("bash", &bash_args),
+        super::subagent_step_summary("shell", &shell_args),
         "Ran cargo build"
     );
 }
@@ -186,7 +186,7 @@ fn renders_hunk_format_diff() {
             .iter()
             .any(|t| t.contains("main.rs") && t.contains("(+1 -1)"))
     );
-    // 行号从 old_start/new_start=2 起步连续推进：
+    // Line numbers advance consecutively starting from old_start/new_start=2:
     // context(a)=2 → delete(b)=old 3 → insert(B)=new 3 → context(c)=new 4
     assert!(texts.iter().any(|t| t.contains("-b")));
     assert!(texts.iter().any(|t| t.contains("+B")));
@@ -216,7 +216,7 @@ fn renders_hunk_format_new_file() {
     let lines = render_diff_from_json(&json, 100);
     let texts = line_texts(&lines);
     assert!(texts.iter().any(|t| t.contains("(+3 new file)")));
-    // 新文件行：无旧行号，行号从 new_start=1 推进
+    // New-file lines: no old line numbers, numbering advances from new_start=1
     let first = texts.iter().find(|t| t.contains("+x")).unwrap();
     assert!(
         first.contains("1"),
@@ -226,7 +226,7 @@ fn renders_hunk_format_new_file() {
 
 #[test]
 fn renders_hunk_format_display_cap() {
-    // 存储不限制，但渲染最多显示 MAX_DISPLAY_DIFF_LINES 行
+    // Storage is unlimited, but rendering shows at most MAX_DISPLAY_DIFF_LINES lines
     let changes: Vec<serde_json::Value> = (0..60)
         .map(|i| serde_json::json!(["+", format!("line{i}")]))
         .collect();
@@ -250,7 +250,8 @@ fn renders_hunk_format_display_cap() {
 
 #[test]
 fn renders_legacy_format_diff() {
-    // 旧格式（无 format 字段）：存量数据仍走 old/new 全文 + 现场 TextDiff
+    // Legacy format (no format field): existing data still goes through full old/new
+    // text + on-the-fly TextDiff
     let json = serde_json::json!({
         "old": "a\nb\nc\n",
         "new": "a\nB\nc\n",
@@ -286,7 +287,7 @@ fn format_seconds_large() {
 
 #[test]
 fn parse_ask_user_pairs_escape_roundtrip() {
-    // ask_escape 转义（`\` 与 `"`）→ parse_ask_user_pairs 无损还原
+    // ask_escape escaping (`\` and `"`) → parse_ask_user_pairs restores losslessly
     let cases = [
         ("简单问题", "D:\\project\\hailux"),
         ("含引号 \" 和反斜杠 \\", "尾部反斜杠\\"),
@@ -309,7 +310,7 @@ fn parse_ask_user_pairs_escape_roundtrip() {
 
 #[test]
 fn parse_ask_user_pairs_multiple_and_legacy() {
-    // 多对逗号连接 + 旧格式（仅 \" 转义）兼容
+    // Multiple pairs joined by commas + legacy format (only \" escaping) compat
     let s = "\"q1\"=\"a1\", \"q2\"=\"Unanswered\", \"say \\\"hi\\\"\"=\"ok\"";
     assert_eq!(
         parse_ask_user_pairs(s),

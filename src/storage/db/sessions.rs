@@ -43,7 +43,7 @@ impl ChatStorage {
         Ok(id)
     }
 
-    /// 获取 session 级权限规则（JSON 字符串）。
+    /// Get the session-level permission rules (JSON string).
     pub async fn get_session_permission(&self, session_id: &str) -> Result<Option<String>> {
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT permission FROM sessions WHERE id = ?")
@@ -53,7 +53,7 @@ impl ChatStorage {
         Ok(row.and_then(|(s,)| s))
     }
 
-    /// 设置 session 级权限规则（JSON 字符串）。
+    /// Set the session-level permission rules (JSON string).
     pub async fn set_session_permission(
         &self,
         session_id: &str,
@@ -67,10 +67,12 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 列出指定工作目录下的顶层 session（排除 subagent 子会话），按更新时间倒序。
+    /// List top-level sessions under the given work dir (excluding subagent
+    /// subsessions), ordered by updated_at DESC.
     ///
-    /// work_dir 做变体匹配：兼容 TUI 写入的 `\\?\` verbatim 前缀
-    /// 与 Web 写入的剥离形式（历史数据与两进程写入并存）。
+    /// work_dir is matched by variants: tolerates the `\\?\` verbatim prefix
+    /// written by TUI and the stripped form written by Web (historical data
+    /// and writes from both processes coexist).
     pub async fn list_top_level_sessions(&self, work_dir: &str) -> Result<Vec<SessionSummary>> {
         let variants = work_dir_variants(work_dir);
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
@@ -93,7 +95,8 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 列出所有工作目录下的顶层 session（排除 subagent 子会话），带 work_dir，按更新时间倒序。
+    /// List top-level sessions across all work dirs (excluding subagent
+    /// subsessions), with work_dir, ordered by updated_at DESC.
     pub async fn list_all_top_level_sessions(&self) -> Result<Vec<(SessionSummary, String)>> {
         let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
             "SELECT id, title, model, updated_at, work_dir FROM sessions WHERE parent_id IS NULL ORDER BY updated_at DESC",
@@ -117,7 +120,7 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 查询某 session 的标题；不存在返回 None。
+    /// Get a session's title; returns None if not found.
     pub async fn get_session_title(&self, session_id: &str) -> Result<Option<String>> {
         let row: Option<(String,)> = sqlx::query_as("SELECT title FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -126,7 +129,8 @@ impl ChatStorage {
         Ok(row.map(|(title,)| title))
     }
 
-    /// 按 ID 查询单个 session 的元信息（标题/模型/更新时间）；不存在返回 None。
+    /// Get a single session's metadata by ID (title/model/updated_at);
+    /// returns None if not found.
     pub async fn get_session_info(&self, session_id: &str) -> Result<Option<SessionSummary>> {
         let row: Option<(String, String, String, String)> =
             sqlx::query_as("SELECT id, title, model, updated_at FROM sessions WHERE id = ?")
@@ -152,8 +156,9 @@ impl ChatStorage {
         Ok(())
     }
 
-    /// 列出历史会话中出现过的全部工作目录（DISTINCT，按最近使用倒序），
-    /// 附带会话数与最近活跃时间（供项目选择器展示）。
+    /// List every work dir seen in session history (DISTINCT, most recently
+    /// used first), with session counts and last-active times (for the
+    /// project picker).
     pub async fn list_work_dirs(&self) -> Result<Vec<WorkDirInfo>> {
         let rows = sqlx::query_as::<_, (String, i64, String)>(
             "SELECT work_dir, COUNT(*), COALESCE(MAX(updated_at), '') \
@@ -172,7 +177,7 @@ impl ChatStorage {
             .collect())
     }
 
-    /// 查询会话归属的工作目录
+    /// Get the work dir a session belongs to
     pub async fn get_session_work_dir(&self, session_id: &str) -> Result<Option<String>> {
         let row: Option<(String,)> = sqlx::query_as("SELECT work_dir FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -217,7 +222,7 @@ impl ChatStorage {
         Ok(row)
     }
 
-    /// 查询某 session 的所有子 session（subagent 执行记录），按创建时间升序。
+    /// List all subsessions of a session (subagent runs), ordered by created_at ASC.
     pub async fn list_subsessions(&self, parent_id: &str) -> Result<Vec<SubsessionSummary>> {
         let rows: Vec<(String, String, String, String, String, i64, i64)> = sqlx::query_as(
             "SELECT id, model, title, created_at, updated_at, prompt_tokens, completion_tokens \
@@ -247,7 +252,7 @@ impl ChatStorage {
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        // 级联删除 subagent 子会话及其消息，避免残留孤儿行
+        // Cascade-delete subagent subsessions and their messages to avoid orphan rows
         sqlx::query(
             "DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE parent_id = ?)",
         )

@@ -24,8 +24,9 @@ pub use models::{
 #[derive(Debug, Clone)]
 pub struct ChatStorage {
     pub(super) pool: SqlitePool,
-    /// 启动时迁移失败的原因（如校验和不符、缺列）。失败不阻塞启动，
-    /// 由 UI 提示用户用 /rebuild-db 重建数据库。
+    /// Reason the startup migration failed (e.g. checksum mismatch, missing
+    /// column). Failure does not block startup; the UI prompts the user to
+    /// rebuild the database with /rebuild-db.
     migration_error: Option<String>,
 }
 
@@ -55,30 +56,34 @@ impl ChatStorage {
             pool,
             migration_error: None,
         };
-        // 迁移失败不阻塞启动：schema 大概率已就绪，真正缺列会在后续查询中
-        // 报明确错误；错误原因保存下来，由 UI 提示用户 /rebuild-db 重建。
+        // A failed migration does not block startup: the schema is most
+        // likely already in place, and a truly missing column surfaces a
+        // clear error in later queries. The cause is stored so the UI can
+        // prompt the user to rebuild with /rebuild-db.
         if let Err(e) = storage.run_migration().await {
             storage.migration_error = Some(e.to_string());
         }
         Ok(storage)
     }
 
-    /// 启动时迁移失败的原因（无则 None）。
+    /// Reason the startup migration failed (None if it succeeded).
     pub fn migration_error(&self) -> Option<&str> {
         self.migration_error.as_deref()
     }
 
-    /// 重建数据库：先把旧库文件备份为独立文件，再清空全部表并重新执行迁移。
-    /// 所有持有同一连接池的 ChatStorage 副本共享 pool，重建后立即生效，
-    /// 无需替换任何引用。旧数据保留在备份文件中（测试环境返回 None，不备份）。
+    /// Rebuild the database: back up the old DB file to a standalone file,
+    /// then drop all tables and re-run migrations. Every ChatStorage copy
+    /// sharing the same pool sees the rebuild immediately — no references
+    /// need replacing. Old data stays in the backup file (tests return
+    /// None: no backup).
     pub async fn rebuild(&mut self) -> Result<Option<PathBuf>> {
-        // 1. 备份数据库文件（尽力而为，失败不阻塞重建）
+        // 1. Back up the DB file (best effort; failure does not block the rebuild)
         #[cfg(not(test))]
         let backup_path = self.backup_db_file().await.ok();
         #[cfg(test)]
         let backup_path = None;
 
-        // 2. 清空全部表（会话/消息/迁移记录）
+        // 2. Drop all tables (sessions/messages/migration records)
         let mut tx = self.pool.begin().await?;
         sqlx::query("DROP TABLE IF EXISTS _sqlx_migrations")
             .execute(&mut *tx)
@@ -91,7 +96,7 @@ impl ChatStorage {
             .await?;
         tx.commit().await?;
 
-        // 3. 重新执行迁移，重建 schema
+        // 3. Re-run migrations to rebuild the schema
         self.run_migration().await?;
         self.migration_error = None;
         Ok(backup_path)
@@ -126,8 +131,9 @@ impl ChatStorage {
     }
 
     pub(super) async fn run_migration(&self) -> Result<()> {
-        // 版本化迁移（pre-0.4.0 旧库的引导升级已移除：此类库会在迁移中报错，
-        // 由 new()/rebuild() 捕获后提示用户 /rebuild-db 重建）。
+        // Versioned migrations (bootstrap upgrade of pre-0.4.0 legacy DBs
+        // was removed: such DBs error during migration; new()/rebuild()
+        // catch it and prompt the user to rebuild with /rebuild-db).
         sqlx::migrate!("./migrations").run(&self.pool).await?;
         Ok(())
     }
@@ -142,11 +148,14 @@ impl ChatStorage {
     }
 }
 
-/// work_dir 的统一存储形式：Windows 盘符绝对路径补 `\\?\` verbatim 前缀。
-/// 常规链路（session 层 canonicalize、TUI current_work_dir）已产出 verbatim，
-/// 此处兜底归一绕过 canonicalize 的调用点，避免同一目录在
-/// GROUP BY work_dir 的聚合/项目列表中拆成两行。
-/// Unix 路径、UNC（`\\server\...`）、盘符相对路径（`C:foo`）与已带前缀的原样返回。
+/// Canonical stored form of work_dir: Windows drive-letter absolute paths
+/// get a `\\?\` verbatim prefix. The regular paths (session-level
+/// canonicalize, TUI current_work_dir) already produce verbatim; this
+/// fallback normalizes call sites that bypass canonicalize so the same
+/// directory does not split into two rows in GROUP BY work_dir
+/// aggregations/project lists. Unix paths, UNC (`\\server\...`),
+/// drive-relative paths (`C:foo`), and already-prefixed paths are returned
+/// as-is.
 pub(super) fn ensure_verbatim(dir: &str) -> std::borrow::Cow<'_, str> {
     let b = dir.as_bytes();
     if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
@@ -156,9 +165,11 @@ pub(super) fn ensure_verbatim(dir: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// work_dir 的 DB 匹配变体：原样 + Windows verbatim 前缀形式（去重后至多两个）。
-/// 兼容历史数据中 TUI（带 `\\?\` 前缀）与 Web（剥离前缀）两种写入写法。
-/// 仅 Windows 存在两种写法（见 `ensure_verbatim`）；其他平台原样重复占位。
+/// DB matching variants of work_dir: as-is + the Windows verbatim-prefixed
+/// form (at most two after dedup). Tolerates both historical write styles:
+/// TUI (with the `\\?\` prefix) and Web (prefix stripped). Only Windows has
+/// the two forms (see `ensure_verbatim`); other platforms duplicate the
+/// path as a placeholder.
 #[cfg(windows)]
 pub(super) fn work_dir_variants(dir: &str) -> [String; 2] {
     let verbatim = if dir.starts_with(r"\\?\") {

@@ -1,5 +1,6 @@
-// 技能管理面板：内联双栏视图（左列表 + 右详情/编辑器），替换聊天区渲染。
-// 支持新建/编辑/删除/搜索/作用域过滤；删除二次确认用小弹窗。
+// Skills panel: inline two-pane view (left list + right detail/editor) that
+// replaces the chat area rendering.
+// Supports create/edit/delete/search/scope filtering; delete uses a small confirm dialog.
 import { useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
@@ -49,7 +50,7 @@ function ScopeBadge({ scope }: { scope: "global" | "project" }) {
   );
 }
 
-/* ── 新建 / 编辑表单 ────────────────────────────────────────── */
+/* ── Create / edit form ────────────────────────────────────── */
 function SkillForm({
   editor,
   onDone,
@@ -233,20 +234,20 @@ function SkillForm({
   );
 }
 
-/* ── 技能详情 ───────────────────────────────────────────────── */
-/** 文件大小格式化（B / KB / MB） */
+/* ── Skill detail ──────────────────────────────────────────── */
+/** Format a file size (B / KB / MB) */
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** 文件树节点：文件夹（可折叠）或文件 */
+/** File tree node: a folder (collapsible) or a file */
 type TreeNode =
   | { kind: "dir"; name: string; path: string; children: Map<string, TreeNode> }
   | { kind: "file"; name: string; path: string; size: number };
 
-/** 由扁平相对路径列表构建目录树 */
+/** Build a directory tree from a flat list of relative paths */
 function buildTree(files: SkillFileEntry[]): Map<string, TreeNode> {
   const root = new Map<string, TreeNode>();
   for (const f of files) {
@@ -271,7 +272,7 @@ function buildTree(files: SkillFileEntry[]): Map<string, TreeNode> {
   return root;
 }
 
-/** 目录内文件总数（含子目录，用于文件夹行显示） */
+/** Total file count inside a directory (incl. subdirectories, shown on the folder row) */
 function countFiles(node: TreeNode): number {
   if (node.kind === "file") return 1;
   let n = 0;
@@ -279,7 +280,7 @@ function countFiles(node: TreeNode): number {
   return n;
 }
 
-/** 递归渲染文件树 */
+/** Render the file tree recursively */
 function TreeView({
   children,
   depth,
@@ -295,7 +296,7 @@ function TreeView({
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
 }) {
-  // 文件夹在前、各自按名称排序
+  // Folders first, each group sorted by name
   const nodes = [...children.values()].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
     return a.name.localeCompare(b.name);
@@ -372,14 +373,14 @@ function SkillDetail({
   onDelete: () => void;
 }) {
   const workDir = useApp((s) => s.workDir);
-  // null = SKILL.md 正文；其他值为技能目录内相对路径
+  // null = SKILL.md content; any other value is a path relative to the skill directory
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState("");
   const [fileError, setFileError] = useState("");
   const [fileLoading, setFileLoading] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
-  // 切换技能时重置文件视图
+  // Reset the file view when switching skills
   useEffect(() => {
     setActiveFile(null);
     setFileContent("");
@@ -469,14 +470,14 @@ function SkillDetail({
         </span>
       </div>
 
-      {/* 主体：无附属文件时直接展示 SKILL.md 正文；有则左文件树 + 右内容 */}
+      {/* Main area: SKILL.md content directly when no sidecar files, else tree + content */}
       {!hasTree ? (
         <pre className="hlx-input-scroll min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/50 p-3 text-xs leading-relaxed">
           {skill.content || "（无正文）"}
         </pre>
       ) : (
         <div className="flex min-h-0 flex-1 gap-2">
-          {/* 左：文件树（文件夹可折叠） */}
+          {/* Left: file tree (folders collapsible) */}
           <div className="hlx-input-scroll w-56 shrink-0 overflow-y-auto rounded-lg border border-border/50 p-1.5">
             <button
               type="button"
@@ -501,7 +502,7 @@ function SkillDetail({
             />
           </div>
 
-          {/* 右：文件内容 */}
+          {/* Right: file content */}
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="mb-1 flex shrink-0 items-center justify-between rounded-lg bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground/70">
               <span className="truncate font-mono">
@@ -536,7 +537,7 @@ function SkillDetail({
   );
 }
 
-/* ── 主面板 ─────────────────────────────────────────────────── */
+/* ── Main panel ────────────────────────────────────────────── */
 export function SkillsManager() {
   const skills = useApp((s) => s.skills);
   const skillsError = useApp((s) => s.skillsError);
@@ -561,12 +562,12 @@ export function SkillsManager() {
     setPendingSelect(null);
   };
 
-  // Esc：编辑/删除中先退出当前子状态，否则回到聊天视图
+  // Esc: while editing/deleting, exit the sub-state first, otherwise return to the chat view
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
-      if (deleting) return; // 删除确认弹窗自行处理
+      if (anyDialogOpen()) return; // Global dialogs win: Esc closes the dialog, not the view
+      if (deleting) return; // Handled by the delete confirm dialog itself
       if (editor) setEditor(null);
       else close();
     };
@@ -575,7 +576,7 @@ export function SkillsManager() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, deleting]);
 
-  // 保存后按名称选中新建/编辑的技能（创建时 location 尚不可知）
+  // After saving, select the created/edited skill by name (location unknown at create time)
   useEffect(() => {
     if (!pendingSelect) return;
     const hit = skills.find((s) => s.name === pendingSelect);
@@ -619,12 +620,12 @@ export function SkillsManager() {
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
-      {/* 顶栏 */}
+      {/* Top bar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/40 px-4 py-3">
         <Sparkles className="size-4.5 shrink-0 text-primary" />
         <h2 className="mr-2 text-[15px] font-semibold">技能管理</h2>
 
-        {/* 搜索 */}
+        {/* Search */}
         <div className="relative ml-auto min-w-40">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/50" />
           <input
@@ -644,7 +645,7 @@ export function SkillsManager() {
           )}
         </div>
 
-        {/* 作用域过滤 */}
+        {/* Scope filter */}
         <div className="flex overflow-hidden rounded-lg border border-border text-xs">
           {(
             [
@@ -695,9 +696,9 @@ export function SkillsManager() {
         </button>
       </div>
 
-      {/* 双栏主体 */}
+      {/* Two-column main area */}
       <div className="flex min-h-0 flex-1">
-        {/* 左：技能列表 */}
+        {/* Left: skill list */}
         <div className="hlx-input-scroll w-64 shrink-0 space-y-0.5 overflow-y-auto border-r border-border/40 p-2">
           {skillsError ? (
             <div className="flex flex-col items-center gap-2.5 px-3 py-10 text-center">
@@ -761,7 +762,7 @@ export function SkillsManager() {
           )}
         </div>
 
-        {/* 右：详情 / 编辑器 */}
+        {/* Right: detail / editor */}
         <div className="min-w-0 flex-1 p-5">
           {editor ? (
             <SkillForm
@@ -798,7 +799,7 @@ export function SkillsManager() {
         </div>
       </div>
 
-      {/* 删除二次确认 */}
+      {/* Delete confirmation */}
       {deleting && (
         <Overlay onClose={() => !deletingBusy && setDeleting(null)}>
           <div className="mb-3 flex items-center gap-2.5">

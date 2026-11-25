@@ -1,11 +1,11 @@
-pub mod bash_arity;
-pub mod bash_readonly;
-pub mod bash_scan;
+pub mod shell_arity;
+pub mod shell_readonly;
+pub mod shell_scan;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// 权限动作
+/// Permission action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
     Allow,
@@ -24,12 +24,12 @@ impl PermissionAction {
     }
 }
 
-/// 权限模式
+/// Permission mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
-    /// 默认模式：危险操作需要用户确认
+    /// Default mode: dangerous operations require user confirmation
     Normal,
-    /// YOLO 模式：跳过所有权限检查
+    /// YOLO mode: skips all permission checks
     Yolo,
 }
 
@@ -43,7 +43,7 @@ impl PermissionMode {
     }
 }
 
-/// 单条权限规则
+/// A single permission rule
 #[derive(Debug, Clone)]
 pub struct PermissionRule {
     pub permission: String,
@@ -51,7 +51,7 @@ pub struct PermissionRule {
     pub action: PermissionAction,
 }
 
-/// JSON 序列化用的规则结构
+/// Rule struct used for JSON serialization
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SerializableRule {
     permission: String,
@@ -76,43 +76,45 @@ impl<'de> serde::Deserialize<'de> for PermissionAction {
     }
 }
 
-/// 权限评估结果
+/// Permission evaluation result
 #[derive(Debug, Clone)]
 pub enum PermissionResult {
-    /// 允许执行
+    /// Execution allowed
     Allowed,
-    /// 拒绝（附带原因）
+    /// Denied (with a reason)
     Denied(String),
-    /// 需要询问用户
+    /// The user needs to be asked
     NeedsAsk(PermissionRequest),
 }
 
-/// 权限请求（传递给 TUI 弹窗）
+/// Permission request (passed to the TUI dialog)
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
-    /// 权限类别: "bash", "read", "edit", "write", "mcp", "external_directory"
+    /// Permission category: "shell", "read", "edit", "write", "mcp", "external_directory"
     pub permission: String,
-    /// 匹配的 patterns（用于规则匹配）
+    /// Matched patterns (used for rule matching)
     pub patterns: Vec<String>,
-    /// 选择 "always" 时持久化的 patterns
+    /// Patterns persisted when the user picks "always"
     pub always_patterns: Vec<String>,
-    /// 给用户看的简短描述
+    /// Short description shown to the user
     pub description: String,
-    /// 内置默认规则不豁免：仅 session/config 显式规则可放行或拒绝，
-    /// 无显式命中时回落为 ask。用于 bash 执行原语（sudo/sh/python 等
-    /// 无法静态判定文件访问范围的命令）——全局 `* allow` 是低打扰默认，
-    /// 不应被当作对任意代码执行的显式授权。
+    /// Builtin default rules do not waive this: only explicit session/config
+    /// rules may allow or deny; with no explicit hit it falls back to ask.
+    /// Used for shell executors (sudo/sh/python etc. — commands whose file
+    /// access range cannot be statically determined) — the global `* allow`
+    /// is a low-interruption default and must not count as explicit
+    /// authorization of arbitrary code execution.
     pub force_ask: bool,
 }
 
-/// 用户对权限请求的回复
+/// The user's reply to a permission request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionReply {
-    /// 允许这一次
+    /// Allow this once
     Once,
-    /// 始终允许（本会话内同类操作不再询问）
+    /// Always allow (similar operations are not asked again this session)
     Always,
-    /// 拒绝
+    /// Deny
     Deny,
 }
 
@@ -120,16 +122,17 @@ struct PermissionInner {
     mode: PermissionMode,
     config_rules: Vec<PermissionRule>,
     session_rules: Vec<PermissionRule>,
-    /// 当前会话 ID（用于 DB 持久化）
+    /// Current session ID (for DB persistence)
     session_id: Option<String>,
-    /// 存储句柄（用于持久化 session 级规则）
+    /// Storage handle (for persisting session-level rules)
     storage: Option<crate::storage::ChatStorage>,
-    /// 无交互策略：需要询问（ask）的操作自动拒绝，而不是发弹窗。
-    /// 供非交互模式使用（无 TUI 应答，避免工具调用挂起）。
+    /// Non-interactive policy: operations that would ask are auto-denied
+    /// instead of raising a dialog.
+    /// Used in non-interactive mode (no TUI to answer, avoiding hung tool calls).
     auto_deny: bool,
 }
 
-/// 线程安全的权限管理器
+/// Thread-safe permission manager
 #[derive(Clone)]
 pub struct PermissionManager {
     inner: Arc<Mutex<PermissionInner>>,
@@ -177,7 +180,7 @@ impl PermissionManager {
         }
     }
 
-    /// 绑定存储句柄（&self 版本，用于构造后绑定）
+    /// Binds the storage handle (&self variant, for binding after construction)
     pub fn with_storage_ref(&self, storage: crate::storage::ChatStorage) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.storage = Some(storage);
@@ -197,7 +200,8 @@ impl PermissionManager {
         }
     }
 
-    /// 设置无交互策略：开启后需要询问的操作自动拒绝（不弹窗）。
+    /// Sets the non-interactive policy: when enabled, operations that would
+    /// ask are auto-denied (no dialog).
     pub fn set_auto_deny(&self, auto_deny: bool) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.auto_deny = auto_deny;
@@ -287,7 +291,8 @@ impl PermissionManager {
             .unwrap_or_default()
     }
 
-    /// 清除当前会话的内存规则和 session_id（新建会话 / 无会话时调用）
+    /// Clears the current session's in-memory rules and session_id
+    /// (called when a new session starts / when there is no session)
     pub fn clear_session(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.session_id = None;
@@ -348,8 +353,9 @@ impl PermissionManager {
             .collect();
 
         if let Ok(mut inner) = self.inner.lock() {
-            // 按 (permission, pattern) 去重：同一规则重复添加（如批量放行
-            // 时 TUI 端与 agent 端各 add 一次）不应累积重复项
+            // Dedup by (permission, pattern): adding the same rule twice
+            // (e.g. batch allow adds once from the TUI side and once from the
+            // agent side) must not accumulate duplicates
             for rule in new_rules {
                 let dup = inner
                     .session_rules
@@ -377,10 +383,12 @@ impl PermissionManager {
             .unwrap_or_default()
     }
 
-    /// 判断工具是否应被禁用（config 规则中该 permission 的最后一条匹配规则为 `*` + deny）。
-    /// 用于工具注册层过滤：被禁用的工具对模型完全不可见，无法被会话级 always 绕过。
-    /// 语义：只有「最后匹配规则是 * deny」才禁用，
-    /// 若存在更具体的规则（如 `git * allow`）则不整体禁用。
+    /// Whether a tool should be disabled (in the config rules, the last
+    /// matching rule for this permission is `*` + deny).
+    /// Used for filtering at tool-registration time: a disabled tool is fully
+    /// invisible to the model and cannot be bypassed by a session-level always.
+    /// Semantics: disable only when "the last matching rule is * deny";
+    /// if a more specific rule exists (e.g. `git * allow`), do not disable wholesale.
     pub fn is_disabled(&self, permission: Option<&str>) -> bool {
         let Some(permission) = permission else {
             return false;
@@ -397,9 +405,11 @@ impl PermissionManager {
             .unwrap_or(false)
     }
 
-    /// 仅凭现有规则（session + config）判断所有 patterns 是否全部放行。
-    /// 不触发弹窗；任一 pattern 未命中 allow 规则则返回 false。
-    /// 用于批量放行：用户选择 always 后，检查队列中其他请求是否已被新规则覆盖。
+    /// Decides from existing rules only (session + config) whether all
+    /// patterns are allowed.
+    /// Never raises a dialog; returns false if any pattern misses an allow rule.
+    /// Used for batch allow: after the user picks "always", checks whether
+    /// other queued requests are already covered by the new rules.
     pub fn rules_allow(&self, permission: &str, patterns: &[String]) -> bool {
         let (config_rules, session_rules) = {
             let inner = match self.inner.lock() {
@@ -413,8 +423,9 @@ impl PermissionManager {
         })
     }
 
-    /// 评估权限：YOLO 模式直接返回 Allow；否则查规则表。
-    /// plan_mode 优先级高于 YOLO，开启时强制走权限检查。
+    /// Evaluates permission: YOLO mode returns Allow directly; otherwise the
+    /// rule tables are consulted.
+    /// plan_mode outranks YOLO: when enabled, permission checks are enforced.
     pub fn check(&self, request: &PermissionRequest, plan_mode: bool) -> PermissionResult {
         let mode = self.mode();
         if mode == PermissionMode::Yolo && !plan_mode {
@@ -431,9 +442,10 @@ impl PermissionManager {
         let defaults = default_rules();
 
         for pattern in &request.patterns {
-            // force_ask：内置默认规则不参与评估（`* allow` 是低打扰默认而非
-            // 显式授权），仅 session/config 显式规则可放行/拒绝；
-            // 无显式命中时 evaluate 回落为 Ask。
+            // force_ask: builtin default rules are excluded from evaluation
+            // (`* allow` is a low-interruption default, not explicit
+            // authorization); only explicit session/config rules may allow or
+            // deny; with no explicit hit, evaluate falls back to Ask.
             let action = if request.force_ask {
                 evaluate(
                     &request.permission,
@@ -471,8 +483,9 @@ impl PermissionManager {
     }
 }
 
-/// 词法规范化路径（解析 `.` 与 `..`），不做文件系统访问。
-/// 用于 canonicalize 失败（文件不存在）时仍能正确判断「工作目录内」。
+/// Lexically normalizes a path (resolves `.` and `..`) without filesystem access.
+/// Used when canonicalize fails (file missing) so that "inside the work dir"
+/// can still be judged correctly.
 pub(crate) fn normalize_lexical(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -488,8 +501,9 @@ pub(crate) fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// 去掉 Windows canonicalize 返回的 `\\?\` 扩展路径前缀，
-/// 保证 canonicalize 与词法回退路径都能用 `starts_with` 正确比较。
+/// Strips the `\\?\` extended path prefix returned by Windows canonicalize so
+/// that both canonicalized and lexical fallback paths compare correctly
+/// with `starts_with`.
 #[cfg(windows)]
 fn strip_extended_prefix(path: PathBuf) -> PathBuf {
     let s = path.to_string_lossy();
@@ -504,10 +518,12 @@ fn strip_extended_prefix(path: PathBuf) -> PathBuf {
     path
 }
 
-/// 解析权限检查用的路径。
-/// 相对路径先按 work_dir 拼接并做词法规范化（解析 ..），再尝试 canonicalize
-/// （解析符号链接等）；文件不存在时回退到规范化后的拼接路径。
-/// 注意不能直接 canonicalize 相对路径——它会相对进程 cwd 而非 work_dir 解析。
+/// Resolves a path for permission checks.
+/// Relative paths are first joined against work_dir and lexically normalized
+/// (resolving ..), then canonicalize is attempted (resolving symlinks etc.);
+/// if the file does not exist, the normalized joined path is the fallback.
+/// Note: relative paths must not be canonicalized directly — they would
+/// resolve against the process cwd instead of work_dir.
 pub(crate) fn resolve_permission_path(path: &str, work_dir: &str) -> PathBuf {
     let p = Path::new(path);
     let joined = if p.is_absolute() {
@@ -518,9 +534,10 @@ pub(crate) fn resolve_permission_path(path: &str, work_dir: &str) -> PathBuf {
     match std::fs::canonicalize(&joined) {
         Ok(c) => strip_extended_prefix(c),
         Err(_) => {
-            // 文件不存在时，逐级向上找到第一个存在的祖先目录并 canonicalize，
-            // 再把不存在的部分拼回去。这解决了 Windows 短路径名（如 RUNNER~1）
-            // 与 canonicalize 结果不一致导致 starts_with 匹配失败的问题。
+            // If the file does not exist, walk up to the first existing
+            // ancestor directory, canonicalize it, then append the missing
+            // parts back. This fixes starts_with mismatches caused by Windows
+            // short path names (e.g. RUNNER~1) disagreeing with canonicalize output.
             let mut existing = joined.clone();
             let mut missing: Vec<std::ffi::OsString> = Vec::new();
             while !existing.as_os_str().is_empty() {
@@ -547,12 +564,16 @@ pub(crate) fn resolve_permission_path(path: &str, work_dir: &str) -> PathBuf {
     }
 }
 
-/// 内置默认规则（最低优先级，仅在没有命中 session/config 规则时生效）。
-/// 工作目录内的操作默认放行，高危场景默认询问：
-/// - 全局 `* allow`：放行默认（bash 只读/写命令、目录内 read/edit/write/grep/glob 等）
-/// - `external_directory ask`：操作非工作目录内容时询问
-/// - `read *.env ask`：读取 .env / .env.local 等敏感文件时询问（.env.example 除外）
-/// - `mcp ask`：MCP 工具保持询问（安全敏感，不随全局默认放行）
+/// Builtin default rules (lowest priority, effective only when no session or
+/// config rule matches). In-workdir operations are allowed by default; risky
+/// scenarios ask:
+/// - Global `* allow`: default allow (shell read/write commands, in-workdir
+///   read/edit/write/grep/glob, etc.)
+/// - `external_directory ask`: ask when touching content outside the work dir
+/// - `read *.env ask`: ask when reading sensitive files like .env / .env.local
+///   (.env.example exempt)
+/// - `mcp ask`: MCP tools keep asking (security-sensitive, never waived by
+///   the global default)
 pub fn default_rules() -> Vec<PermissionRule> {
     vec![
         PermissionRule {
@@ -588,16 +609,18 @@ pub fn default_rules() -> Vec<PermissionRule> {
     ]
 }
 
-/// 判断文件名是否属于 env 敏感文件（与内置 read 门禁规则同语义）：
-/// 命中 `*.env` / `*.env.*` 且不命中豁免规则 `*.env.example`。
-/// 供 grep 等批量读取内容的工具对齐 read 的 .env 询问门槛。
+/// Whether a file name is an env-sensitive file (same semantics as the
+/// builtin read gate rules): matches `*.env` / `*.env.*` but not the
+/// exemption rule `*.env.example`.
+/// Lets tools that bulk-read content (grep etc.) align with read's .env ask gate.
 pub fn is_env_gated_file_name(file_name: &str) -> bool {
     wildcard_match(file_name, "*.env")
         || (wildcard_match(file_name, "*.env.*") && !wildcard_match(file_name, "*.env.example"))
 }
 
-/// 从多个规则集中查找第一条匹配规则，无匹配时默认 Ask。
-/// rulesets 顺序即优先级：越靠前优先级越高。
+/// Finds the first matching rule across multiple rulesets, defaulting to Ask
+/// when nothing matches.
+/// Ruleset order is priority: earlier rulesets take precedence.
 fn evaluate(permission: &str, pattern: &str, rulesets: &[&[PermissionRule]]) -> PermissionAction {
     for ruleset in rulesets {
         for rule in ruleset.iter().rev() {
@@ -611,26 +634,28 @@ fn evaluate(permission: &str, pattern: &str, rulesets: &[&[PermissionRule]]) -> 
     PermissionAction::Ask
 }
 
-/// 简单通配符匹配：
-/// - `\` 统一归一化为 `/`（路径分隔符无关）
-/// - Windows 上大小写不敏感
-/// - `*` 匹配任意字符序列（含路径分隔符），`?` 匹配单个字符
-/// - 其余字符均为字面量（. + ^ $ { } ( ) | [ ] 等不做特殊解释）
-/// - 末尾 ` *` 可选（"git *" 同时匹配 "git" 与 "git commit"）
+/// Simple wildcard matching:
+/// - `\` is uniformly normalized to `/` (path-separator agnostic)
+/// - Case-insensitive on Windows
+/// - `*` matches any character sequence (including path separators); `?`
+///   matches a single character
+/// - All other characters are literals (. + ^ $ { } ( ) | [ ] etc. get no
+///   special treatment)
+/// - A trailing ` *` is optional ("git *" matches both "git" and "git commit")
 fn wildcard_match(text: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }
     let text = normalize_wildcard(text);
     let pattern = normalize_wildcard(pattern);
-    // "git *" / "ls *" 末尾的空格通配符：使其可选
+    // Trailing space wildcard of "git *" / "ls *": make it optional
     if let Some(core) = pattern.strip_suffix(" *") {
         return text == core || text.starts_with(&format!("{} ", core));
     }
     glob_like(&text, &pattern)
 }
 
-/// 匹配前的归一化：`\` → `/`；Windows 上统一小写。
+/// Normalization before matching: `\` → `/`; lowercased on Windows.
 fn normalize_wildcard(s: &str) -> String {
     #[cfg(windows)]
     {
@@ -642,8 +667,9 @@ fn normalize_wildcard(s: &str) -> String {
     }
 }
 
-/// 迭代式 glob 匹配：`*` 匹配任意字符序列（含路径分隔符），`?` 匹配单个字符，
-/// 其余字符字面量比较（等价于锚定的 `*` → `.*`、`?` → `.` 正则匹配）。
+/// Iterative glob match: `*` matches any character sequence (including path
+/// separators), `?` matches a single character, all other characters compare
+/// literally (equivalent to an anchored regex with `*` → `.*` and `?` → `.`).
 fn glob_like(text: &str, pattern: &str) -> bool {
     let t: Vec<char> = text.chars().collect();
     let p: Vec<char> = pattern.chars().collect();
@@ -671,7 +697,7 @@ fn glob_like(text: &str, pattern: &str) -> bool {
     pi == p.len()
 }
 
-/// 从 PermissionConfig (config.toml 中的 [permission.xxx] 表) 构建规则列表
+/// Builds a rule list from PermissionConfig (a [permission.xxx] table in config.toml)
 pub fn rules_from_config_table(
     permission_name: &str,
     table: &std::collections::BTreeMap<String, String>,
@@ -704,7 +730,8 @@ mod tests {
     use super::*;
 
     fn make_req() -> PermissionRequest {
-        // mcp 权限默认询问（不受全局默认放行影响），适合作为"需要询问"的基准请求
+        // The mcp permission asks by default (unaffected by the global default
+        // allow), a good baseline request for "needs ask"
         PermissionRequest {
             permission: "mcp".into(),
             patterns: vec!["example-server".into()],
@@ -745,30 +772,30 @@ mod tests {
     #[test]
     fn test_config_allow_rule() {
         let rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "git *".into(),
             action: PermissionAction::Allow,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        let req = test_req("bash", &["git *"]);
+        let req = test_req("shell", &["git *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
 
     #[test]
     fn test_config_deny_rule() {
         let rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "rm *".into(),
             action: PermissionAction::Deny,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        let req = test_req("bash", &["rm *"]);
+        let req = test_req("shell", &["rm *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
     }
 
     #[test]
     fn test_default_ask() {
-        // mcp 默认询问（内置默认规则，不随全局放行）
+        // mcp asks by default (builtin default rule, not waived by the global allow)
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
         assert!(matches!(
             pm.check(&make_req(), false),
@@ -777,8 +804,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_allow_bash() {
-        // 全局默认放行：工作目录内的 bash 命令（含写操作）默认允许
+    fn test_default_allow_shell() {
+        // Global default allow: in-workdir shell commands (incl. writes) allowed by default
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
         for cmd in [
             "git status *",
@@ -786,7 +813,7 @@ mod tests {
             "rm -rf ./target *",
             "npm install *",
         ] {
-            let req = test_req("bash", &[cmd]);
+            let req = test_req("shell", &[cmd]);
             assert!(
                 matches!(pm.check(&req, false), PermissionResult::Allowed),
                 "expected default allow for {}",
@@ -816,7 +843,7 @@ mod tests {
     fn test_default_read_env_ask() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
         let req = |path: &str| test_req("read", &[path]);
-        // .env / .env.local 默认询问
+        // .env / .env.local ask by default
         assert!(matches!(
             pm.check(&req("C:\\proj\\.env"), false),
             PermissionResult::NeedsAsk(_)
@@ -829,12 +856,12 @@ mod tests {
             pm.check(&req("C:\\proj\\config\\.env.test"), false),
             PermissionResult::NeedsAsk(_)
         ));
-        // .env.example 默认放行
+        // .env.example is allowed by default
         assert!(matches!(
             pm.check(&req("C:\\proj\\.env.example"), false),
             PermissionResult::Allowed
         ));
-        // 普通文件默认放行
+        // Ordinary files are allowed by default
         assert!(matches!(
             pm.check(&req("C:\\proj\\src\\main.rs"), false),
             PermissionResult::Allowed
@@ -843,7 +870,8 @@ mod tests {
 
     #[test]
     fn test_env_gated_file_name() {
-        // 与内置 read 规则同语义：*.env / *.env.* 命中，.env.example 豁免
+        // Same semantics as the builtin read rules: *.env / *.env.* hit,
+        // .env.example exempt
         assert!(is_env_gated_file_name(".env"));
         assert!(is_env_gated_file_name("k.env"));
         assert!(is_env_gated_file_name(".env.local"));
@@ -856,55 +884,57 @@ mod tests {
 
     #[test]
     fn test_config_deny_overrides_default_allow() {
-        // 配置规则优先于内置默认放行
+        // Config rules take precedence over the builtin default allow
         let rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "rm *".into(),
             action: PermissionAction::Deny,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        let req = test_req("bash", &["rm -rf ./target *"]);
+        let req = test_req("shell", &["rm -rf ./target *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Denied(_)));
     }
 
     #[test]
     fn test_session_rule_after_always() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        pm.add_session_rules("bash", &["git *".to_string()]);
-        let req = test_req("bash", &["git *"]);
+        pm.add_session_rules("shell", &["git *".to_string()]);
+        let req = test_req("shell", &["git *"]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
 
     #[test]
     fn test_force_ask_ignores_builtin_defaults() {
-        // 全局默认 `* allow` 不豁免 force_ask 请求：无任何显式规则 → ask
+        // The global default `* allow` does not waive force_ask requests:
+        // no explicit rule → ask
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        let mut req = test_req("bash", &["sudo *"]);
+        let mut req = test_req("shell", &["sudo *"]);
         req.force_ask = true;
         assert!(matches!(
             pm.check(&req, false),
             PermissionResult::NeedsAsk(_)
         ));
-        // 用户选 always 后（session 显式规则）→ 放行，不再打扰
-        pm.add_session_rules("bash", &["sudo *".to_string()]);
+        // After the user picks "always" (explicit session rule) → allowed,
+        // no more nagging
+        pm.add_session_rules("shell", &["sudo *".to_string()]);
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
 
     #[test]
     fn test_force_ask_respects_config_rules() {
-        let mut req = test_req("bash", &["sudo *"]);
+        let mut req = test_req("shell", &["sudo *"]);
         req.force_ask = true;
-        // config 显式 allow：放行
+        // Explicit config allow: permitted
         let allow_rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "sudo *".into(),
             action: PermissionAction::Allow,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, allow_rules);
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
-        // config 显式 deny：拒绝优先
+        // Explicit config deny: denial takes precedence
         let deny_rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "sudo *".into(),
             action: PermissionAction::Deny,
         }];
@@ -914,9 +944,9 @@ mod tests {
 
     #[test]
     fn test_force_ask_still_allowed_in_yolo() {
-        // YOLO 语义 = 跳过所有权限确认，force_ask 不例外
+        // YOLO semantics = skip all permission confirmations; force_ask is no exception
         let pm = PermissionManager::new(PermissionMode::Yolo, vec![]);
-        let mut req = test_req("bash", &["sudo *"]);
+        let mut req = test_req("shell", &["sudo *"]);
         req.force_ask = true;
         assert!(matches!(pm.check(&req, false), PermissionResult::Allowed));
     }
@@ -927,26 +957,26 @@ mod tests {
         assert!(wildcard_match("anything", "*"));
         assert!(wildcard_match("cargo build", "cargo build"));
         assert!(!wildcard_match("npm install", "git *"));
-        // *.env 规则跨路径分隔符匹配
+        // *.env rules match across path separators
         assert!(wildcard_match("C:\\proj\\.env", "*.env"));
         assert!(wildcard_match("/home/user/proj/.env.local", "*.env.*"));
         assert!(!wildcard_match("C:\\proj\\.env", "*.env.*"));
         assert!(wildcard_match("C:\\proj\\.env.example", "*.env.example"));
         assert!(!wildcard_match("C:\\proj\\src\\main.rs", "*.env"));
-        // 分隔符无关：\ 与 / 等价
+        // Separator agnostic: \ and / are equivalent
         assert!(wildcard_match("C:/proj/file.rs", "C:\\proj\\*"));
-        // 正则特殊字符按字面量处理
+        // Regex special characters are treated as literals
         assert!(wildcard_match("a.b", "a.b"));
         assert!(!wildcard_match("axb", "a.b"));
         assert!(wildcard_match("file[1].txt", "file[1]*"));
-        // 末尾 " *" 可选
+        // Trailing " *" is optional
         assert!(wildcard_match("git", "git *"));
     }
 
     #[cfg(windows)]
     #[test]
     fn test_wildcard_match_case_insensitive_on_windows() {
-        // Windows 上大小写不敏感
+        // Case-insensitive on Windows
         assert!(wildcard_match("C:\\PROJ\\.ENV", "*.env"));
         assert!(wildcard_match("Git Status *", "git *"));
     }
@@ -954,54 +984,55 @@ mod tests {
     #[test]
     fn test_is_disabled_star_deny() {
         let rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "*".into(),
             action: PermissionAction::Deny,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        assert!(pm.is_disabled(Some("bash")));
+        assert!(pm.is_disabled(Some("shell")));
         assert!(!pm.is_disabled(Some("edit")));
         assert!(!pm.is_disabled(None));
     }
 
     #[test]
     fn test_is_disabled_specific_rule_keeps_tool() {
-        // 有更具体的 allow 规则时不整体禁用
+        // Not disabled wholesale when a more specific allow rule exists
         let rules = vec![
             PermissionRule {
-                permission: "bash".into(),
+                permission: "shell".into(),
                 pattern: "*".into(),
                 action: PermissionAction::Deny,
             },
             PermissionRule {
-                permission: "bash".into(),
+                permission: "shell".into(),
                 pattern: "git *".into(),
                 action: PermissionAction::Allow,
             },
         ];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        assert!(!pm.is_disabled(Some("bash")));
+        assert!(!pm.is_disabled(Some("shell")));
     }
 
     #[test]
     fn test_rules_allow() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        assert!(!pm.rules_allow("bash", &["git *".to_string()]));
-        pm.add_session_rules("bash", &["git *".to_string()]);
-        assert!(pm.rules_allow("bash", &["git commit".to_string()]));
-        assert!(!pm.rules_allow("bash", &["rm -rf /".to_string()]));
+        assert!(!pm.rules_allow("shell", &["git *".to_string()]));
+        pm.add_session_rules("shell", &["git *".to_string()]);
+        assert!(pm.rules_allow("shell", &["git commit".to_string()]));
+        assert!(!pm.rules_allow("shell", &["rm -rf /".to_string()]));
     }
 
     #[test]
     fn test_rules_allow_requires_all_patterns() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        pm.add_session_rules("bash", &["git *".to_string()]);
-        assert!(!pm.rules_allow("bash", &["git commit".to_string(), "rm -rf /".to_string()]));
+        pm.add_session_rules("shell", &["git *".to_string()]);
+        assert!(!pm.rules_allow("shell", &["git commit".to_string(), "rm -rf /".to_string()]));
     }
 
     #[test]
     fn test_always_flow_auto_approves_same_pattern() {
-        // 模拟批量放行语义：请求1 询问 → 用户选 always → 同模式的请求2 自动放行
+        // Simulates batch-allow semantics: request 1 asks → user picks
+        // "always" → request 2 with the same pattern is auto-allowed
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
         let req = |patterns: Vec<&str>| PermissionRequest {
             permission: "external_directory".into(),
@@ -1025,23 +1056,23 @@ mod tests {
 
     #[test]
     fn test_batch_allow_does_not_override_config_deny() {
-        // 批量放行判定（rules_allow）不能放行命中 config deny 的请求
+        // Batch-allow decision (rules_allow) must not allow requests hitting a config deny
         let rules = vec![PermissionRule {
-            permission: "bash".into(),
+            permission: "shell".into(),
             pattern: "rm *".into(),
             action: PermissionAction::Deny,
         }];
         let pm = PermissionManager::new(PermissionMode::Normal, rules);
-        pm.add_session_rules("bash", &["git *".to_string()]);
-        assert!(pm.rules_allow("bash", &["git status *".to_string()]));
-        assert!(!pm.rules_allow("bash", &["rm -rf /".to_string()]));
+        pm.add_session_rules("shell", &["git *".to_string()]);
+        assert!(pm.rules_allow("shell", &["git status *".to_string()]));
+        assert!(!pm.rules_allow("shell", &["rm -rf /".to_string()]));
     }
 
     #[test]
     fn test_add_session_rules_deduplicates() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        pm.add_session_rules("bash", &["git *".to_string()]);
-        pm.add_session_rules("bash", &["git *".to_string()]);
+        pm.add_session_rules("shell", &["git *".to_string()]);
+        pm.add_session_rules("shell", &["git *".to_string()]);
         let len = {
             let inner = pm.inner.lock().unwrap();
             inner.session_rules.len()
@@ -1052,18 +1083,18 @@ mod tests {
     #[test]
     fn test_auto_deny_rejects_ask_instead_of_dialog() {
         let pm = PermissionManager::new(PermissionMode::Normal, vec![]);
-        // 默认：需要询问
+        // Default: needs ask
         assert!(matches!(
             pm.check(&make_req(), false),
             PermissionResult::NeedsAsk(_)
         ));
-        // 开启无交互策略：直接拒绝
+        // Non-interactive policy enabled: denied directly
         pm.set_auto_deny(true);
         assert!(matches!(
             pm.check(&make_req(), false),
             PermissionResult::Denied(_)
         ));
-        // 已允许的规则不受影响
+        // Already-allowed rules are unaffected
         pm.add_session_rules("mcp", &["example-server".to_string()]);
         assert!(matches!(
             pm.check(&make_req(), false),
@@ -1075,7 +1106,7 @@ mod tests {
     fn test_auto_deny_yolo_priority() {
         let pm = PermissionManager::new(PermissionMode::Yolo, vec![]);
         pm.set_auto_deny(true);
-        // YOLO 优先于 auto_deny：全部放行
+        // YOLO outranks auto_deny: everything allowed
         assert!(matches!(
             pm.check(&make_req(), false),
             PermissionResult::Allowed

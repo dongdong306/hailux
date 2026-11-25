@@ -20,14 +20,14 @@ fn parses_simple_frontmatter() {
 
 #[test]
 fn parses_tools_and_model() {
-    let raw = "---\nname: explorer\ndescription: explore code\ntools: [bash, read, grep, glob]\nmodel: deepseek/deepseek-chat\n---\nExplore.";
+    let raw = "---\nname: explorer\ndescription: explore code\ntools: [shell, read, grep, glob]\nmodel: deepseek/deepseek-chat\n---\nExplore.";
     let info = parse_agent_md(raw).unwrap();
     assert_eq!(info.name, "explorer");
     assert_eq!(info.description, "explore code");
     assert_eq!(
         info.tools,
         Some(vec![
-            "bash".into(),
+            "shell".into(),
             "read".into(),
             "grep".into(),
             "glob".into()

@@ -32,7 +32,7 @@ impl Tool for GrepTool {
         let path = argument_str(arguments, "path").unwrap_or_else(|| ".".to_string());
         let canonical = resolve_permission_path(&path, work_dir);
 
-        // 搜索路径在工作目录之外 → external_directory 询问
+        // Search path outside the working directory → external_directory ask
         if let Some(dir) = external_dir_of(&path, work_dir) {
             return vec![external_dir_request(
                 &[dir],
@@ -40,7 +40,8 @@ impl Tool for GrepTool {
             )];
         }
 
-        // 工作目录内 → grep 请求（默认放行，配置规则仍可 deny）
+        // Inside the working directory → grep request (allowed by default;
+        // config rules may still deny)
         let mut requests = vec![PermissionRequest {
             permission: "grep".to_string(),
             patterns: vec![canonical.display().to_string()],
@@ -49,8 +50,9 @@ impl Tool for GrepTool {
             force_ask: false,
         }];
 
-        // path 显式指向 env 敏感文件 → 追加 read 请求，命中内置 *.env 询问
-        // 门槛（目录级搜索的 env 文件由执行层跳过，见 execute）
+        // path explicitly points to an env-sensitive file → append a read
+        // request hitting the built-in *.env ask gate (env files in
+        // directory-level searches are skipped by the executor, see execute)
         let file_name = Path::new(&canonical)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -59,7 +61,8 @@ impl Tool for GrepTool {
             requests.push(PermissionRequest {
                 permission: "read".to_string(),
                 patterns: vec![canonical.display().to_string()],
-                // Always 只授权该具体文件（read 类别），不整体放开 env 读取
+                // Always authorizes only this specific file (read category),
+                // not env reads in general
                 always_patterns: vec![canonical.display().to_string()],
                 description: format!("Search env file: {}", path),
                 force_ask: false,
@@ -120,8 +123,10 @@ impl Tool for GrepTool {
                 .map_or_else(|| work_dir.to_string(), |p| resolve_tool_path(p, work_dir));
             let include = args["include"].as_str().map(str::to_string);
 
-            // 遍历 + 文件扫描是纯阻塞 I/O，放 blocking 线程池执行：不占用 reactor
-            // worker，且 agent.rs 的 cancel select 分支能在下方 await 挂起期间被 poll
+            // Traversal + file scanning is pure blocking I/O; run on the
+            // blocking thread pool: it does not occupy a reactor worker, and the
+            // cancel select branch in agent.rs can be polled while the await
+            // below is suspended
             let task = tokio::task::spawn_blocking(move || -> Result<String, ToolExecuteError> {
                 let matcher = RegexMatcher::new(&pattern).map_err(|err| ToolExecuteError {
                     message: format!("Invalid regex: {}", err),
@@ -152,7 +157,8 @@ impl Tool for GrepTool {
                 const MAX_MATCHES: u64 = 100;
 
                 for entry in walk_builder.build() {
-                    // sink 返回 false 只能停当前文件，这里终止整树遍历
+                    // A sink returning false only stops the current file; end
+                    // the whole tree walk here
                     if match_count >= MAX_MATCHES {
                         break;
                     }
@@ -163,9 +169,10 @@ impl Tool for GrepTool {
                         continue;
                     }
 
-                    // env 敏感文件与 read 门禁对齐：目录级搜索跳过；遍历根
-                    // 本身是显式目标（extract_permission 已补发 read 询问），
-                    // depth == 0 不跳过
+                    // env-sensitive files align with the read gate: skipped in
+                    // directory-level searches; the traversal root itself is an
+                    // explicit target (extract_permission already issued the
+                    // read ask), so depth == 0 is not skipped
                     if entry.depth() > 0
                         && is_env_gated_file_name(&entry.file_name().to_string_lossy())
                     {

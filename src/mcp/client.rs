@@ -20,32 +20,35 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 
-/// 单个 MCP 服务器的连接句柄类型（stdio 与 http 均使用 ClientInfo 处理器，故类型统一）。
+/// Connection handle type for a single MCP server (both stdio and http use
+/// a `ClientInfo` handler, so the type is unified).
 pub type McpClient = RunningService<RoleClient, ClientInfo>;
 
-/// MCP 服务器连接成功后的状态快照（供 UI 渲染，不含连接句柄）。
+/// Status snapshot after an MCP server connects successfully (for UI
+/// rendering; excludes the connection handle).
 #[derive(Debug, Clone)]
 pub struct McpServerStatus {
-    /// 配置文件中的服务器名称（key）
+    /// Server name (key) from the config file
     pub name: String,
     pub connected: bool,
-    /// 服务器自报名称
+    /// Self-reported server name
     pub server_name: String,
     pub server_version: String,
-    /// "stdio" 或 "http"
+    /// "stdio" or "http"
     pub transport: String,
     pub error: Option<String>,
-    /// 工具名列表
+    /// List of tool names
     pub tools: Vec<String>,
     pub resource_count: usize,
     pub prompt_count: usize,
-    /// 资源详情（URI + 描述），供详情页展示
+    /// Resource details (URI + description), for the detail page
     pub resources: Vec<(String, String)>,
-    /// 提示词详情（名称 + 描述），供详情页展示
+    /// Prompt details (name + description), for the detail page
     pub prompts: Vec<(String, String)>,
 }
 
-/// 单台服务器的连接结果：状态 + （成功时）连接句柄与工具定义。
+/// Connection result for a single server: status plus, on success, the
+/// connection handle and tool definitions.
 #[derive(Debug)]
 pub struct McpConnection {
     pub status: McpServerStatus,
@@ -53,8 +56,8 @@ pub struct McpConnection {
     pub tools: Vec<McpToolDef>,
 }
 
-/// MCP 工具后端：服务器名称 + 连接句柄 + 工具定义列表，
-/// 供 subagent 共享 MCP 工具使用。
+/// MCP tool backend: server name + connection handle + tool definition list,
+/// shared with subagents for MCP tool use.
 #[derive(Debug, Clone)]
 pub struct McpToolBackend {
     pub server_name: String,
@@ -62,13 +65,15 @@ pub struct McpToolBackend {
     pub tools: Vec<McpToolDef>,
 }
 
-/// 共享 MCP 后端列表，使用 Arc<Mutex> 包装以在主 agent 和 subagent 间共享。
+/// Shared list of MCP backends, wrapped in Arc<Mutex> for sharing between
+/// the main agent and subagents.
 pub type SharedMcpBackends = Arc<std::sync::Mutex<Vec<McpToolBackend>>>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 根据配置生成初始占位状态（全部标记为"连接中..."），
-/// 用于 UI 先行渲染，避免等待实际连接。
+/// Builds initial placeholder statuses from the config (all marked as
+/// "connecting...") so the UI can render immediately without waiting for
+/// actual connections.
 pub fn create_placeholder_statuses(config: &McpConfig) -> Vec<McpServerStatus> {
     config
         .mcp_servers
@@ -92,8 +97,9 @@ pub fn create_placeholder_statuses(config: &McpConfig) -> Vec<McpServerStatus> {
         .collect()
 }
 
-/// 遍历配置中的所有 MCP 服务器，并发尝试连接（带超时与容错）。
-/// 单台失败不影响其他服务器，失败信息记录在 `status.error` 中。
+/// Iterates over all MCP servers in the config and attempts to connect
+/// concurrently (with timeout and fault tolerance). One failure does not
+/// affect other servers; the error is recorded in `status.error`.
 pub async fn connect_mcp_servers(config: &McpConfig) -> Vec<McpConnection> {
     use futures_util::future::join_all;
 
@@ -155,7 +161,8 @@ pub async fn connect_mcp_servers(config: &McpConfig) -> Vec<McpConnection> {
     join_all(futs).await
 }
 
-/// 连接单台服务器并收集 tools/resources/prompts 与服务器信息。
+/// Connects to a single server and collects tools/resources/prompts plus
+/// server info.
 async fn connect_and_gather(
     config: &ServerConfig,
 ) -> Result<
@@ -227,7 +234,8 @@ async fn connect_and_gather(
         .map_err(|_| format!("连接超时（超过 {} 秒）", CONNECT_TIMEOUT.as_secs()))?
 }
 
-/// 根据传输类型建立连接，完成 MCP 初始化握手。
+/// Establishes a connection based on the transport type and completes the
+/// MCP initialization handshake.
 async fn connect_one(config: &ServerConfig) -> Result<McpClient, String> {
     let client_info = build_client_info();
     match config {
@@ -243,7 +251,8 @@ async fn connect_one(config: &ServerConfig) -> Result<McpClient, String> {
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| format!("启动子进程失败: {e}"))?;
-            // 在后台读取 stderr 以防止管道缓冲区满导致子进程阻塞
+            // Drain stderr in the background so a full pipe buffer cannot
+            // block the child process
             if let Some(stderr) = stderr_opt {
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
@@ -272,14 +281,16 @@ async fn connect_one(config: &ServerConfig) -> Result<McpClient, String> {
     }
 }
 
-/// 解析可执行程序路径。
+/// Resolves the path of an executable program.
 ///
-/// Windows 下裸命令（如 `npx`）对应的是 `.cmd`/`.bat` 脚本，
-/// 而 `CreateProcess` 不会自动加后缀，导致 "program not found"。
-/// 这里手动遍历 `PATH` + `PATHEXT` 找到真实文件路径；
-/// 一旦解析到 `.cmd`/`.bat`，Rust std 会自动识别并用 `cmd.exe` 运行。
+/// On Windows, a bare command (e.g. `npx`) maps to a `.cmd`/`.bat` script,
+/// while `CreateProcess` does not append extensions automatically, leading
+/// to "program not found". This manually walks `PATH` + `PATHEXT` to locate
+/// the real file path; once resolved to a `.cmd`/`.bat`, Rust std recognizes
+/// it and runs it via `cmd.exe`.
 ///
-/// **安全**：仅搜索 `PATH`，不检查当前目录，以防止二进制植入攻击。
+/// **Security**: searches only `PATH`, never the current directory, to
+/// prevent binary planting attacks.
 #[cfg(windows)]
 fn resolve_program(command: &str) -> String {
     let p = std::path::Path::new(command);
@@ -293,7 +304,8 @@ fn resolve_program(command: &str) -> String {
     for ext in std::env::split_paths(&pathext) {
         let ext_str = ext.to_string_lossy();
         let with_ext = format!("{command}{ext_str}");
-        // 仅搜索 PATH，不检查当前目录，以防止二进制植入
+        // Search only PATH, never the current directory, to prevent binary
+        // planting
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join(&with_ext);
             if candidate.is_file() {
@@ -309,7 +321,8 @@ fn resolve_program(command: &str) -> String {
     if std::path::Path::new(command).is_absolute() {
         return command.to_string();
     }
-    // 仅搜索 PATH，不检查当前目录，以防止二进制植入
+    // Search only PATH, never the current directory, to prevent binary
+    // planting
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join(command);
@@ -327,8 +340,9 @@ fn build_client_info() -> ClientInfo {
     ClientInfo::new(ClientCapabilities::default(), implementation)
 }
 
-/// 将配置中的 header 名/值映射转为 http 类型。
-/// 失败（非法 header 名或含非法字节的值）时返回可读错误。
+/// Converts the config's header name/value map into http types.
+/// On failure (invalid header name or value containing illegal bytes),
+/// returns a readable error.
 fn build_header_map(
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Result<HashMap<HeaderName, HeaderValue>, String> {
@@ -343,10 +357,10 @@ fn build_header_map(
     Ok(map)
 }
 
-/// 将 MCP 服务器的工具适配为 hailux 的异步 `Tool` trait。
+/// Adapts an MCP server tool to hailux's async `Tool` trait.
 ///
-/// 工具调用是异步的（走传输层），`execute_async` 直接 await
-/// `McpClient::call_tool` 完成调用。
+/// Tool invocation is asynchronous (via the transport layer); `execute_async`
+/// directly awaits `McpClient::call_tool` to complete the call.
 pub struct McpTool {
     registered_name: String,
     tool_name: String,
@@ -426,7 +440,8 @@ impl Tool for McpTool {
     }
 }
 
-/// 将 `CallToolResult` 的内容序列转为纯文本；`is_error` 为真时转为错误。
+/// Converts the content sequence of a `CallToolResult` into plain text;
+/// converts it to an error when `is_error` is true.
 fn convert_call_tool_result(result: CallToolResult) -> Result<String, ToolExecuteError> {
     let mut out = String::new();
     for block in result.content {

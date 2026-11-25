@@ -10,9 +10,9 @@ pub struct PermissionConfig {
     /// "ask" (Normal) or "yolo" (Yolo)
     #[serde(default)]
     pub mode: String,
-    /// bash permission rules: pattern -> action ("allow"/"deny"/"ask")
+    /// shell permission rules: pattern -> action ("allow"/"deny"/"ask")
     #[serde(default)]
-    pub bash: BTreeMap<String, String>,
+    pub shell: BTreeMap<String, String>,
     /// read permission rules
     #[serde(default)]
     pub read: BTreeMap<String, String>,

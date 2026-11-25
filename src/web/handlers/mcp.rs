@@ -11,8 +11,9 @@ use super::super::protocol::{
 use super::super::state::WebServerState;
 use super::err500;
 
-/// MCP 服务器名约束：字母数字开头，仅含字母数字 / `-` / `_` / `.`，≤ 64 字符。
-/// 名称作为 toml key 与 `mcp__<name>__<tool>` 注册名的一部分，需严格白名单。
+/// MCP server name constraint: starts alphanumeric; contains only alphanumerics /
+/// `-` / `_` / `.`, at most 64 chars. The name doubles as the toml key and part of the
+/// `mcp__<name>__<tool>` registration name, so it needs a strict whitelist.
 fn valid_mcp_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -25,7 +26,7 @@ fn valid_mcp_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-/// 由请求字段构造 ServerConfig；transport 与必填字段不匹配时返回错误。
+/// Build a ServerConfig from request fields; errors when transport and required fields do not match.
 fn build_server_config(
     transport: &str,
     command: Option<String>,
@@ -51,9 +52,10 @@ fn build_server_config(
     }
 }
 
-/// 重连全部 MCP 服务器并替换共享 backends，随后使会话缓存失效
-/// （下次请求时按新 backends 重新注册 MCP 工具）。
-/// 运行中的请求持有旧连接的 Arc 不受影响；被移除的旧 stdio 子进程随 Arc 释放自动终止。
+/// Reconnect all MCP servers, replace the shared backends, then invalidate the session
+/// cache (MCP tools re-register against the new backends on the next request).
+/// In-flight requests holding Arcs of the old connections are unaffected; removed old
+/// stdio child processes terminate automatically as their Arcs are dropped.
 fn schedule_mcp_reconnect(state: &Arc<WebServerState>) {
     let backends = state.manager.mcp_backends().clone();
     let state = state.clone();
@@ -76,7 +78,8 @@ fn schedule_mcp_reconnect(state: &Arc<WebServerState>) {
     });
 }
 
-/// 合并配置文件（权威来源）与运行时连接状态为前端展示结构。
+/// Merge the config file (authoritative source) with runtime connection state into the
+/// frontend display structure.
 fn merge_mcp_status(
     config: &crate::mcp::config::McpConfig,
     backends: &crate::mcp::SharedMcpBackends,
@@ -86,7 +89,7 @@ fn merge_mcp_status(
         .mcp_servers
         .iter()
         .map(|(name, server_config)| {
-            // 名称匹配（backends 记录的是配置 key，连接失败的服务器不在其中）
+            // Match by name (backends record config keys; failed servers are not in there)
             let backend = guard
                 .as_ref()
                 .and_then(|g| g.iter().find(|b| b.server_name == *name));
@@ -191,7 +194,7 @@ pub(super) async fn create_mcp_server(
                 .into_iter()
                 .find(|s| s.name == req.name)
                 .map(|mut s| {
-                    // 重连在后台进行，此时连接状态尚未就绪
+                    // Reconnection runs in the background, so connection state is not ready yet
                     s.connected = false;
                     s.tools = 0;
                     s.tool_details = Vec::new();
@@ -241,7 +244,8 @@ pub(super) async fn update_mcp_server(
     };
     let target = new_name.unwrap_or_else(|| req.name.clone());
     if target != req.name && config.mcp_servers.contains_key(&target) {
-        // 改名冲突：本地副本尚未保存，直接报错即可（磁盘配置不变）
+        // Rename conflict: the local copy is not saved yet, so erroring out directly is
+        // fine (disk config stays untouched)
         return (
             StatusCode::CONFLICT,
             format!("MCP 服务器 \"{target}\" 已存在"),

@@ -1,17 +1,20 @@
-//! plan 模式下的 bash 只读命令判定。
+//! Read-only command determination for plan mode.
 //!
-//! 语义为 **fail-closed**：无法明确判定为只读的命令一律视为写操作。
-//! 判定分三层：
-//! 1. 输出重定向（`>` / `>>`，fd 合并 `2>&1` 与 `/dev/null` 等目标除外）→ 写
-//! 2. 按 `;` `&&` `||` `|` `&` 换行拆段，每段都必须只读
-//! 3. 每段按命令名查只读白名单，并细化子命令 / 标志位（git、cargo、sed、find、sort 等）
+//! Semantics are **fail-closed**: a command that cannot be proven read-only
+//! is treated as a write. Three layers of checks:
+//! 1. Output redirection (`>` / `>>`, except fd merges like `2>&1` and
+//!    targets like `/dev/null`) → write
+//! 2. Split into segments by `;` `&&` `||` `|` `&` and newlines; every
+//!    segment must be read-only
+//! 3. Each segment is matched against a read-only whitelist by command name,
+//!    refined by subcommand / flags (git, cargo, sed, find, sort, ...)
 
-/// 只读命令修饰符前缀（消耗后继续判定真正的命令名）。
+/// Read-only command modifier prefixes (consumed before evaluating the real command name).
 const MODIFIERS: &[&str] = &["sudo", "time", "command", "nohup"];
 
-/// 通用只读命令白名单（大小写不敏感）。
+/// General read-only command whitelist (case-insensitive).
 const READ_ONLY_COMMANDS: &[&str] = &[
-    // 目录 / 系统信息
+    // Directory / system info
     "ls",
     "dir",
     "pwd",
@@ -32,7 +35,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "tput",
     "clear",
     "cls",
-    // 进程 / 帮助
+    // Processes / help
     "ps",
     "top",
     "htop",
@@ -50,7 +53,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "whatis",
     "apropos",
     "whereis",
-    // 文件读取
+    // File reading
     "cat",
     "head",
     "tail",
@@ -77,7 +80,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "iconv",
     "expand",
     "unexpand",
-    // 文本搜索 / 处理（无输出重定向时为只读）
+    // Text search / processing (read-only without output redirection)
     "grep",
     "rg",
     "find",
@@ -105,7 +108,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "test",
     "true",
     "false",
-    // PowerShell 只读 cmdlet / 别名
+    // PowerShell read-only cmdlets / aliases
     "get-childitem",
     "get-content",
     "get-item",
@@ -137,8 +140,8 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "findstr",
 ];
 
-/// 剔除引号包裹的内容（替换为等长空格），
-/// 避免 `--grep="a>b"`、`echo "a|b"` 等被误判为重定向 / 分隔符。
+/// Strips quoted content (replaced with same-length spaces) so that
+/// `--grep="a>b"`, `echo "a|b"` etc. are not mistaken for redirection / separators.
 fn strip_quoted(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut quote: Option<char> = None;
@@ -163,9 +166,10 @@ fn strip_quoted(input: &str) -> String {
     out
 }
 
-/// 将 fd 合并 token（`2>&1`、`1>&2`、`>&1` 等）整体剔除，
-/// 避免其中的 `&` 被误判为命令分隔符、`>` 被误判为输出重定向。
-/// 后续逻辑均重新分词，位置信息无关紧要。
+/// Removes fd-merge tokens (`2>&1`, `1>&2`, `>&1`, ...) entirely so that the
+/// `&` inside them is not mistaken for a command separator nor the `>` for an
+/// output redirection. Later logic re-tokenizes anyway, so positions do not
+/// matter.
 fn mask_fd_merges(stripped: &str) -> String {
     stripped
         .split_whitespace()
@@ -174,15 +178,15 @@ fn mask_fd_merges(stripped: &str) -> String {
         .join(" ")
 }
 
-/// 判断是否存在「写入文件」的输出重定向。
-/// - `2>&1` / `1>&2` / `>&1` 等 fd 合并 → 放行（已由 `mask_fd_merges` 剔除）
-/// - 目标为 `/dev/null`、`NUL`、`$null` → 放行（丢弃输出不算写）
-/// - 其余 `>` / `>>` / `2>` 等 → 写
+/// Checks whether an output redirection that writes to a file exists.
+/// - fd merges like `2>&1` / `1>&2` / `>&1` → allowed (already removed by `mask_fd_merges`)
+/// - Target is `/dev/null`, `NUL`, `$null` → allowed (discarding output is not a write)
+/// - Any other `>` / `>>` / `2>` etc. → write
 fn has_output_redirect(stripped: &str) -> bool {
     let tokens: Vec<&str> = stripped.split_whitespace().collect();
     for (i, token) in tokens.iter().enumerate() {
         let Some(gt) = token.find('>') else { continue };
-        // 目标：`>` 之后的部分（如 `>file`、`>>log`），或下一个 token（如 `> file`）
+        // Target: the part after `>` (e.g. `>file`, `>>log`), or the next token (e.g. `> file`)
         let mut target = token[gt + 1..].trim_start_matches('>').to_string();
         if target.is_empty()
             && let Some(next) = tokens.get(i + 1)
@@ -197,7 +201,8 @@ fn has_output_redirect(stripped: &str) -> bool {
     false
 }
 
-/// 按命令链分隔符拆段。引号内容已由 `strip_quoted` 打平，不会误拆。
+/// Splits into segments by command-chain separators. Quoted content has
+/// already been flattened by `strip_quoted`, so it cannot be mis-split.
 fn split_segments(stripped: &str) -> Vec<&str> {
     stripped
         .split([';', '&', '|', '\n'])
@@ -206,14 +211,14 @@ fn split_segments(stripped: &str) -> Vec<&str> {
         .collect()
 }
 
-/// 形如 `FOO=bar` 的环境变量赋值前缀。
+/// Environment variable assignment prefix of the form `FOO=bar`.
 fn is_assignment(token: &str) -> bool {
     !token.starts_with('-') && token.contains('=')
 }
 
 fn git_is_read_only(rest: &[&str]) -> bool {
     let Some(sub) = rest.first() else {
-        return true; // 裸 `git` → 帮助 / 版本 → 只读
+        return true; // bare `git` → help / version → read-only
     };
     let sub = sub.to_ascii_lowercase();
     let args = &rest[1..];
@@ -223,7 +228,8 @@ fn git_is_read_only(rest: &[&str]) -> bool {
         | "name-rev" | "merge-base" | "cherry" | "whatchanged" | "diff-tree" | "verify-pack" => {
             true
         }
-        // 分支：裸 / 只读列表标志；带分支名参数（创建/删除/改名/强制）→ 写
+        // Branch: bare / read-only listing flags; branch-name arguments
+        // (create/delete/rename/force) → write
         "branch" => {
             args.is_empty()
                 || args.iter().all(|t| {
@@ -234,7 +240,8 @@ fn git_is_read_only(rest: &[&str]) -> bool {
                     )
                 })
         }
-        // 标签：裸 / `-l`/`--list`（可带 pattern）→ 只读；其余（-a/-s/-d/-f/-m 及裸名创建）→ 写
+        // Tag: bare / `-l`/`--list` (optional pattern) → read-only;
+        // anything else (-a/-s/-d/-f/-m and bare-name creation) → write
         "tag" => {
             args.is_empty()
                 || (args.iter().all(|t| {
@@ -248,14 +255,14 @@ fn git_is_read_only(rest: &[&str]) -> bool {
                     matches!(t.as_str(), "-l" | "--list")
                 }) || args.iter().all(|t| t.starts_with('-'))))
         }
-        // stash：仅 list / show
+        // stash: only list / show
         "stash" => {
             args.is_empty()
                 || args
                     .first()
                     .is_some_and(|t| matches!(t.to_ascii_lowercase().as_str(), "list" | "show"))
         }
-        // remote：仅 -v / show / get-url
+        // remote: only -v / show / get-url
         "remote" => {
             args.is_empty()
                 || args.first().is_some_and(|t| {
@@ -263,7 +270,7 @@ fn git_is_read_only(rest: &[&str]) -> bool {
                     matches!(t.as_str(), "-v" | "show" | "get-url")
                 })
         }
-        // config：仅查询形式（--get/--list 系列，或单个 key 无值）
+        // config: query forms only (--get/--list family, or a single key with no value)
         "config" => {
             if args.iter().any(|t| {
                 let t = t.to_ascii_lowercase();
@@ -296,7 +303,7 @@ fn git_is_read_only(rest: &[&str]) -> bool {
 
 fn cargo_is_read_only(rest: &[&str]) -> bool {
     let Some(sub) = rest.first() else {
-        return true; // 裸 `cargo` → 帮助 → 只读
+        return true; // bare `cargo` → help → read-only
     };
     let sub = sub.to_ascii_lowercase();
     if matches!(
@@ -305,7 +312,7 @@ fn cargo_is_read_only(rest: &[&str]) -> bool {
     ) {
         return true;
     }
-    // `cargo --version` / `cargo --list` 等纯标志形式
+    // Pure-flag forms like `cargo --version` / `cargo --list`
     sub.starts_with('-') && rest.iter().all(|t| t.starts_with('-'))
 }
 
@@ -314,45 +321,45 @@ fn segment_is_read_only(segment: &str) -> bool {
     if tokens.is_empty() {
         return true;
     }
-    // 跳过环境变量赋值前缀（`FOO=bar cmd`）
+    // Skip environment variable assignment prefixes (`FOO=bar cmd`)
     let mut i = 0;
     while i < tokens.len() && is_assignment(tokens[i]) {
         i += 1;
     }
-    // 跳过只读修饰符前缀（`sudo git status`）
+    // Skip read-only modifier prefixes (`sudo git status`)
     while i < tokens.len() && MODIFIERS.contains(&tokens[i].to_ascii_lowercase().as_str()) {
         i += 1;
     }
     let Some(cmd) = tokens.get(i) else {
-        return false; // 只有赋值 / 修饰符，没有实际命令 → fail-closed
+        return false; // assignments / modifiers only, no actual command → fail-closed
     };
     let cmd = cmd.to_ascii_lowercase();
     let rest = &tokens[i + 1..];
     match cmd.as_str() {
         "git" => git_is_read_only(rest),
         "cargo" => cargo_is_read_only(rest),
-        // sed 带 -i / --in-place 直接改文件 → 写
+        // sed with -i / --in-place modifies the file directly → write
         "sed" => !rest.iter().any(|t| {
             let t = t.to_ascii_lowercase();
             t == "-i" || t == "--in-place" || (t.starts_with("-i") && t.len() > 2)
         }),
-        // find 的 -delete / -exec / -execdir / -ok 会修改内容 → 写
+        // find's -delete / -exec / -execdir / -ok modify content → write
         "find" => !rest.iter().any(|t| {
             matches!(
                 t.to_ascii_lowercase().as_str(),
                 "-delete" | "-exec" | "-execdir" | "-ok"
             )
         }),
-        // sort / uniq 的 -o 输出到文件 → 写
+        // sort / uniq with -o write output to a file → write
         "sort" | "uniq" => !rest.contains(&"-o"),
         cmd if READ_ONLY_COMMANDS.contains(&cmd) => true,
         _ => false,
     }
 }
 
-/// plan 模式下判断 bash 命令是否为只读操作。
-/// fail-closed：无法明确判定为只读的命令返回 `false`。
-pub fn is_read_only_bash_command(command: &str) -> bool {
+/// Returns whether a shell command is read-only for plan mode.
+/// Fail-closed: a command that cannot be proven read-only returns `false`.
+pub fn is_read_only_shell_command(command: &str) -> bool {
     let stripped = strip_quoted(command);
     let masked = mask_fd_merges(&stripped);
     if has_output_redirect(&masked) {
@@ -414,7 +421,7 @@ mod tests {
             "Select-String foo file.txt",
             "git status; git diff",
         ] {
-            assert!(is_read_only_bash_command(cmd), "expected read-only: {cmd}");
+            assert!(is_read_only_shell_command(cmd), "expected read-only: {cmd}");
         }
     }
 
@@ -477,7 +484,7 @@ mod tests {
             "env FOO=bar rm x",
         ] {
             assert!(
-                !is_read_only_bash_command(cmd),
+                !is_read_only_shell_command(cmd),
                 "expected write-denied: {cmd}"
             );
         }
@@ -485,10 +492,10 @@ mod tests {
 
     #[test]
     fn edge_cases() {
-        assert!(is_read_only_bash_command(""));
-        assert!(is_read_only_bash_command("   "));
-        assert!(is_read_only_bash_command("2>&1 git log"));
-        assert!(!is_read_only_bash_command("echo a > out && echo b"));
-        assert!(!is_read_only_bash_command("git log > /tmp/out.txt"));
+        assert!(is_read_only_shell_command(""));
+        assert!(is_read_only_shell_command("   "));
+        assert!(is_read_only_shell_command("2>&1 git log"));
+        assert!(!is_read_only_shell_command("echo a > out && echo b"));
+        assert!(!is_read_only_shell_command("git log > /tmp/out.txt"));
     }
 }

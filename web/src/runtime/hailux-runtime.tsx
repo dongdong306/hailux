@@ -1,4 +1,4 @@
-// assistant-ui 运行时适配器：Zustand ChatItem[] → ThreadMessageLike[]
+// assistant-ui runtime adapter: Zustand ChatItem[] → ThreadMessageLike[]
 import { useMemo, type ReactNode } from "react";
 import {
   AssistantRuntimeProvider,
@@ -13,36 +13,41 @@ import {
   type TaskStepData,
 } from "./subagent-steps";
 
-/** 系统提示行（通知/错误/压缩标记），挂在 message.metadata.custom.row */
+/** System notice row (notice/error/compact marker), attached at
+ *  message.metadata.custom.row */
 export interface SystemRow {
   kind: "notice" | "error" | "compact";
   text: string;
   tone?: "info" | "warn" | "danger" | "success";
   detail?: string;
-  /** 压缩进行中（spinner 状态行，完成后替换为完成标记） */
+  /** Compaction in progress (spinner status row, replaced by the done marker
+   *  once finished) */
   spinning?: boolean;
 }
 
-/** 助手消息自定义元数据（思考分段计时 / 本轮结束信息） */
+/** Assistant message custom metadata (reasoning segment timing / end-of-turn
+ *  info) */
 export interface AssistantMeta {
   running?: boolean;
-  /** 思考分段计时：每个 reasoning 分段独立计时（对齐 TUI 每块 AgentThinking 自己的 think_ms） */
+  /** Reasoning segment timing: each reasoning segment is timed independently
+   *  (mirrors the TUI where each AgentThinking block has its own think_ms) */
   thinkSegments?: ThinkSegment[];
   model?: string;
   totalMs?: number;
   status?: string;
-  /** 本轮上下文占用（最后一次请求输入/输出 token） */
+  /** Context usage of this turn (input/output tokens of the last request) */
   ctxPromptTokens?: number;
   ctxCompletionTokens?: number;
 }
 
-/** 单个思考分段计时（按消息内 part 索引关联） */
+/** Timing of a single reasoning segment (keyed by part index within the
+ *  message) */
 export interface ThinkSegment {
-  /** 所属 reasoning part 在消息 parts 中的索引 */
+  /** Index of the owning reasoning part within the message parts */
   partIndex: number;
-  /** 已冻结的分段耗时（ms） */
+  /** Frozen segment duration (ms) */
   ms?: number;
-  /** 进行中分段的起点（epoch ms） */
+  /** Start time of an in-progress segment (epoch ms) */
   startedAt?: number;
 }
 
@@ -53,7 +58,7 @@ type AssistantPart =
       type: "tool-call";
       toolCallId: string;
       toolName: string;
-      // eslint 无配置，any 用于匹配 ReadonlyJSONObject
+      // No eslint config; `any` is used to match ReadonlyJSONObject
       args: Record<string, any>;
       argsText: string;
       result?: { output: string; display?: string };
@@ -64,7 +69,7 @@ interface Accum {
   parts: AssistantPart[];
   running: boolean;
   thinkSegments: ThinkSegment[];
-  /** 本轮结束信息（AgentComplete），底部操作栏展示 */
+  /** End-of-turn info (AgentComplete), shown in the bottom action bar */
   model?: string;
   totalMs?: number;
   status?: string;
@@ -84,10 +89,13 @@ function parseArgs(raw: string | undefined): Record<string, any> {
   }
 }
 
-/** 折叠分类（toThreadMessages / lastAssistantMessageId 共用的单源规则）：
- *  part（建立/复用助手 acc，push 新 part）· backfill（回填既有 acc，不新建 part）
- *  · boundary（结束当前 acc，产出一条非助手消息）。
- *  switch 穷尽 ChatItem["kind"] —— 新增 kind 未分类会编译报错，强制两侧同步 */
+/** Fold categories (single-source rules shared by toThreadMessages /
+ *  lastAssistantMessageId):
+ *  part (create/reuse the assistant acc, push a new part) · backfill (fill an
+ *  existing acc, no new part)
+ *  · boundary (end the current acc, emit one non-assistant message).
+ *  switch exhaustively covers ChatItem["kind"] — an unclassified new kind
+ *  fails to compile, forcing both sides to stay in sync */
 function foldKind(kind: ChatItem["kind"]): "part" | "backfill" | "boundary" {
   switch (kind) {
     case "assistant":
@@ -108,7 +116,7 @@ function foldKind(kind: ChatItem["kind"]): "part" | "backfill" | "boundary" {
   }
 }
 
-/** 把扁平 ChatItem 流折叠为 assistant-ui 消息序列 */
+/** Fold the flat ChatItem stream into an assistant-ui message sequence */
 export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
   const messages: ThreadMessageLike[] = [];
   let acc: Accum | null = null;
@@ -116,8 +124,10 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
 
   const flush = () => {
     if (!acc || acc.parts.length === 0) return;
-    // 镜像 fromThreadMessageLike 的空 part 过滤规则（空 text/reasoning 会被丢弃），
-    // 先过滤再重编 thinkSegments 的 partIndex，保证与运行时 parts 索引一致
+    // Mirror fromThreadMessageLike's empty-part filtering rule (empty
+    // text/reasoning parts get dropped);
+    // filter first, then renumber thinkSegments' partIndex so indices stay
+    // consistent with the runtime parts
     const kept: { part: AssistantPart; oldIndex: number }[] = [];
     acc.parts.forEach((part, oldIndex) => {
       if (
@@ -189,8 +199,9 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
   };
 
   for (const item of items) {
-    // subagent 步骤（带 subagent 标记的 tool-call/tool-result）：
-    // 并入最近一个未完成的 task part 作为实时进度（args._steps），不单独成卡
+    // subagent steps (tool-call/tool-result carrying a subagent marker):
+    // merged into the nearest unfinished task part as live progress
+    // (args._steps), not rendered as a separate card
     if (
       (item.kind === "tool-call" || item.kind === "tool-result") &&
       item.subagent
@@ -213,8 +224,10 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
       }
       if (taskPart) {
         const steps = (taskPart.args._steps ??= []) as TaskStepData[];
-        // 实例标识：tasks 数组下标（同名 subagent 并发时名称无法区分）；
-        // 无下标的历史/异常数据用 -1 占位，退化为按 agent 名匹配
+        // Instance identity: index into the tasks array (concurrent subagents
+        // with the same name cannot be told apart by name);
+        // historical/anomalous data without an index uses -1 as a placeholder,
+        // degrading to agent-name matching
         const idx = item.subagentIndex ?? -1;
         if (item.kind === "tool-call") {
           steps.push({
@@ -240,11 +253,13 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
         }
         continue;
       }
-      // 找不到归属 task part（异常顺序/历史数据）：回退为普通工具卡渲染
+      // No owning task part found (out-of-order/history data): fall back to
+      // plain tool-card rendering
     }
     switch (foldKind(item.kind)) {
       case "part": {
-        // 助手文本 / 思考 / 工具调用：建立或复用 acc 并 push part
+        // Assistant text / reasoning / tool call: create or reuse the acc and
+        // push a part
         if (item.kind === "tool-call") {
           const a = ensureAcc(false);
           const args = parseArgs(item.arguments);
@@ -261,8 +276,9 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
           item.kind === "reasoning-streaming"
         ) {
           const a = ensureAcc(item.kind === "reasoning-streaming");
-          // 每个思考 item 独立成 part（store 层已把同段文本 patch 进同一 item，
-          // 流式→冻结后新分段是全新 item，不跨 item 合并）
+          // Each reasoning item becomes its own part (the store already patches
+          // same-segment text into one item; a new segment after the streaming
+          // one freezes is a brand-new item, never merged across items)
           a.parts.push({ type: "reasoning", text: item.text ?? "" });
           const partIndex = a.parts.length - 1;
           if (item.kind === "reasoning-streaming") {
@@ -271,7 +287,8 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
               startedAt: item.thinkStartedAt ?? Date.now(),
             });
           } else if (item.thinkMs !== undefined && item.thinkMs > 0) {
-            // 冻结（store 已算好耗时）或历史恢复（DB think_ms），各记各的
+            // Frozen (duration already computed by the store) or history
+            // restore (DB think_ms), each records its own
             a.thinkSegments.push({ partIndex, ms: item.thinkMs });
           }
         } else {
@@ -286,12 +303,14 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
         break;
       }
       case "backfill": {
-        // tool-result / done：回填既有 acc，不新建 part
-        // （acc 在闭包内赋值，TS 流分析收窄为 null，这里显式断言）
+        // tool-result / done: fill the existing acc, no new part
+        // (acc is assigned inside the closure, so TS flow analysis narrows it
+        // to null; an explicit assertion is needed here)
         const a = acc as Accum | null;
         if (!a) break;
         if (item.kind === "tool-result") {
-          // 协议不带 tool_call_id：回填到最近的“同名且无 result”的 tool-call
+          // The protocol carries no tool_call_id: fill the nearest tool-call
+          // with the "same name and no result yet"
           for (let j = a.parts.length - 1; j >= 0; j--) {
             const p = a.parts[j]!;
             if (
@@ -304,8 +323,8 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
             }
           }
         } else {
-          // done：完成信息（模型/耗时/状态/上下文占用）合并进当前助手消息，
-          // 由底部操作栏展示
+          // done: merge completion info (model/duration/status/context usage)
+          // into the current assistant message, shown in the bottom action bar
           a.running = false;
           a.model = item.model;
           a.totalMs = item.totalMs;
@@ -316,7 +335,8 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
         break;
       }
       case "boundary": {
-        // user / notice / error / compact-marker / compacting：结束当前 acc，各产出一条非助手消息
+        // user / notice / error / compact-marker / compacting: end the current
+        // acc, each emits one non-assistant message
         flush();
         if (item.kind === "user") {
           const content: Array<
@@ -362,16 +382,20 @@ export function toThreadMessages(items: ChatItem[]): ThreadMessageLike[] {
   return messages;
 }
 
-/** 轻量计算最后一条助手消息（非系统行）的 id —— 编号规则与 toThreadMessages 一致：
- *  分类共用 foldKind（单源）；acc 建立到 flush 之间不会产出其他消息，
- *  故 flush 时的编号等于 acc 创建时的 messages.length。
- *  避免调用方为取 id 而全量重建消息序列（流式期间 items 每个 chunk 都会变化） */
+/** Lightweight computation of the last assistant message (non-system-row) id
+ *  — numbering matches toThreadMessages exactly:
+ *  categories share foldKind (single source); no other message is produced
+ *  between acc creation and flush,
+ *  so the number at flush time equals messages.length when the acc was
+ *  created.
+ *  Avoids callers rebuilding the whole message sequence just to fetch the id
+ *  (items change on every chunk while streaming) */
 export function lastAssistantMessageId(items: ChatItem[]): string | null {
-  let count = 0; // 对齐 toThreadMessages 的 messages.length
+  let count = 0; // mirrors toThreadMessages' messages.length
   let accHasParts = false;
   let lastId: string | null = null;
 
-  // 与 flush() 对应：acc 有 part 才产出一条助手消息
+  // Mirrors flush(): an assistant message is emitted only when the acc has parts
   const flush = () => {
     if (!accHasParts) return;
     lastId = `a-${count}`;
@@ -382,12 +406,12 @@ export function lastAssistantMessageId(items: ChatItem[]): string | null {
   for (const item of items) {
     const cls = foldKind(item.kind);
     if (cls === "part") {
-      accHasParts = true; // part 均会建立/复用 acc
+      accHasParts = true; // parts always create/reuse the acc
     } else if (cls === "boundary") {
       flush();
-      count++; // user 消息 / 系统行（s-*），非助手消息
+      count++; // user message / system row (s-*), non-assistant message
     }
-    // backfill（tool-result/done）：回填既有 acc，不影响编号
+    // backfill (tool-result/done): fills the existing acc, does not affect numbering
   }
   flush();
   return lastId;

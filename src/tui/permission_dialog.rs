@@ -9,7 +9,7 @@ use crate::permission::PermissionRequest;
 
 const OPTIONS: &[&str] = &["Allow once", "Allow always (this session)", "Deny"];
 
-/// 处理权限对话框键盘事件，返回是否完成（true = 已回复）
+/// Handle permission dialog key events; returns whether it's finished (true = replied)
 pub(crate) fn handle_key(key: crossterm::event::KeyEvent, selected: &mut usize) -> bool {
     use crossterm::event::KeyCode;
     match key.code {
@@ -43,7 +43,7 @@ pub(crate) fn handle_key(key: crossterm::event::KeyEvent, selected: &mut usize) 
     }
 }
 
-/// 根据当前选中项构造权限回复
+/// Build the permission reply from the current selection
 pub(crate) fn reply_from_selected(selected: usize) -> crate::permission::PermissionReply {
     match selected {
         0 => crate::permission::PermissionReply::Once,
@@ -52,12 +52,14 @@ pub(crate) fn reply_from_selected(selected: usize) -> crate::permission::Permiss
     }
 }
 
-/// 弹窗固定开销（行数）：desc 下空行 + 选项 + 上下边框 + 帮助区 2 行。
-/// 假设每个选项渲染只占 1 行：最长选项 27 字符 < 最小内宽 46（宽下限 50 - 边框 4）
+/// Fixed dialog overhead (lines): blank under desc + options + borders + 2 help lines.
+/// Assumes each option renders on one line: longest option is 27 chars < min inner width 46
+/// (width floor 50 - borders 4)
 const FIXED_LINES: usize = 1 + OPTIONS.len() + 4;
 
-/// 按终端高度预算描述行：超出可显示行数时保留前 N-1 行，
-/// 末尾追加一行省略提示（计数为实际隐藏的内容行数）
+/// Budget description lines by terminal height: when over the displayable count, keep the
+/// first N-1 lines and append an ellipsis notice at the end (the count is the actual
+/// number of hidden content lines)
 fn budget_desc_lines<'a>(all: Vec<Cow<'a, str>>, area_height: u16) -> Vec<Cow<'a, str>> {
     let max_desc_lines = (area_height as usize).saturating_sub(FIXED_LINES);
     let shown_count = max_desc_lines.min(all.len());
@@ -81,15 +83,16 @@ pub(crate) fn render_permission_dialog(
     let dialog_width = (area.width as usize).clamp(50, 80);
     let inner_w = dialog_width.saturating_sub(4);
 
-    // 标题：subagent 请求时带上名称
+    // Title: include the subagent name when the request comes from a subagent
     let title = if let Some(name) = subagent_name {
         format!(" Permission Required [{name}] ")
     } else {
         " Permission Required ".to_string()
     };
 
-    // 计算高度：命令可能非常长，换行后行数无上限，
-    // 弹窗高度必须以终端高度为上限，否则底部选项会被切出屏幕
+    // Compute height: commands can be very long and wrap into an unbounded line count,
+    // so the dialog height must be capped by the terminal height, or the bottom options
+    // would be cut off screen
     let perm_line = format!("[{}] {}", request.permission, request.description);
     let all_desc_lines = wrap(&perm_line, inner_w);
     let desc_lines = budget_desc_lines(all_desc_lines, area.height);
@@ -126,7 +129,7 @@ pub(crate) fn render_permission_dialog(
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // 描述行
+    // description lines
     for line in &desc_lines {
         lines.push(Line::from(Span::styled(
             line.to_string(),
@@ -135,7 +138,7 @@ pub(crate) fn render_permission_dialog(
     }
     lines.push(Line::from(""));
 
-    // 选项
+    // options
     for (i, opt) in OPTIONS.iter().enumerate() {
         let active = i == selected;
         let selector = if active { "▸ " } else { "  " };
@@ -196,7 +199,7 @@ mod tests {
 
     #[test]
     fn truncates_and_counts_hidden_lines() {
-        // 终端 30 行 → 预算 22 行：显示前 21 行 + 1 行省略提示
+        // terminal 30 lines → budget 22 lines: show first 21 lines + 1 ellipsis notice
         let out = budget_desc_lines(lines(60), (22 + FIXED_LINES) as u16);
         assert_eq!(out.len(), 22);
         assert_eq!(out[0], "line 0");
@@ -206,7 +209,7 @@ mod tests {
 
     #[test]
     fn very_short_terminal_keeps_only_notice() {
-        // 终端高度等于固定开销，描述预算为 0：只剩省略提示行
+        // terminal height == fixed overhead, desc budget 0: only the ellipsis notice remains
         let out = budget_desc_lines(lines(30), FIXED_LINES as u16);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], "… (+30 more lines)");

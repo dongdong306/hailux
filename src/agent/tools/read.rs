@@ -31,7 +31,7 @@ impl Tool for ReadTool {
         };
         let canonical = resolve_permission_path(&file_path, work_dir);
 
-        // 工作目录之外 → external_directory 询问
+        // Outside the working directory → external_directory ask
         if let Some(dir) = external_dir_of(&file_path, work_dir) {
             return vec![external_dir_request(
                 &[dir],
@@ -39,7 +39,8 @@ impl Tool for ReadTool {
             )];
         }
 
-        // 工作目录内 → read 请求（默认放行；*.env 命中内置默认询问规则）
+        // Inside the working directory → read request (allowed by default;
+        // *.env hits the built-in default ask rule)
         vec![PermissionRequest {
             permission: "read".to_string(),
             patterns: vec![canonical.display().to_string()],
@@ -155,10 +156,15 @@ impl Tool for ReadTool {
                 return Ok(ToolExecution::text(result));
             }
 
-            // 图片文件：魔数嗅探命中 → 文本只放确认说明，图片本体作为附件返回。
-            // 注意：此处不校验模型是否支持视觉，能力校验推迟到发送层。
-            // 先用前 12 字节嗅探魔数（PNG/JPEG/GIF/WebP 的魔数均在前 12 字节内）：
-            // 命中且超限时仅凭元数据拒绝，避免把超大文件整个读入内存后再丢弃
+            // Image file: when the magic-number sniff hits, the text output only
+            // carries a confirmation note and the image itself is returned as an
+            // attachment. Note: this does not check whether the model supports
+            // vision; capability validation is deferred to the sending layer.
+            // Sniff the magic number from the first 12 bytes first (the magic
+            // numbers of PNG/JPEG/GIF/WebP all fall within the first 12 bytes):
+            // on a hit that exceeds the size limit, reject based on metadata
+            // alone instead of reading the whole oversized file into memory
+            // only to discard it
             let mut prefix = Vec::with_capacity(12);
             {
                 use std::io::Read as _;
@@ -207,7 +213,7 @@ impl Tool for ReadTool {
                 });
             }
 
-            // 文本文件（非 UTF-8 二进制保持原有报错行为）
+            // Text file (non-UTF-8 binaries keep the existing error behavior)
             let content = String::from_utf8(bytes).map_err(|e| ToolExecuteError {
                 message: format!("Stream did not contain valid UTF-8: {e} (binary file?)"),
             })?;

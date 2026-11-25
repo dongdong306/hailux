@@ -582,7 +582,7 @@ mod tests {
             .lock()
             .await
             .permission_manager()
-            .add_session_rules_async("bash", &["git *".to_string()])
+            .add_session_rules_async("shell", &["git *".to_string()])
             .await;
         assert_eq!(
             entry
@@ -601,7 +601,7 @@ mod tests {
         assert!(
             rules
                 .iter()
-                .any(|r| r.permission == "bash" && r.pattern == "git *"),
+                .any(|r| r.permission == "shell" && r.pattern == "git *"),
             "rebuilt instance must restore the always rule from the DB, got: {rules:?}"
         );
     }

@@ -1,5 +1,7 @@
-// task 工具（subagent 委派）卡片：运行中实时进度 + 完成逐 agent 结果
-// （对齐 TUI TaskToolCell；步骤数据由 hailux-runtime 折叠进 args._steps）
+// task tool (subagent delegation) card: live progress while running +
+// per-agent results when done
+// (aligned with the TUI TaskToolCell; step data is folded into args._steps by
+// hailux-runtime)
 import { useState } from "react";
 import { Check, ChevronDown, Loader2, XCircle } from "lucide-react";
 import {
@@ -13,7 +15,8 @@ import {
 } from "../../runtime/subagent-steps";
 
 interface TaskItem {
-  /** tasks 数组下标（同名 subagent 并发时的实例标识） */
+  /** Index into the tasks array (instance identity for concurrent same-named
+   *  subagents) */
   index: number;
   subagent: string;
   description: string;
@@ -37,7 +40,7 @@ function formatDuration(ms: number) {
   return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
 }
 
-/** 步骤行：✓（完成）/ spinner（进行中）+ 摘要文本 */
+/** Step row: ✓ (done) / spinner (in progress) + summary text */
 function StepRow({ step }: { step: TaskStepData }) {
   return (
     <div className="flex items-start gap-2 py-0.5 text-sm leading-relaxed">
@@ -64,7 +67,8 @@ export const TaskToolCard: ToolCallMessagePartComponent = ({
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
 
-  // args 优先（含折叠注入的 _steps）；argsText 兜底（历史恢复）
+  // args first (includes fold-injected _steps); argsText as fallback (history
+  // restore)
   const source =
     args && typeof args === "object" ? args : (() => {
       try {
@@ -88,7 +92,8 @@ export const TaskToolCard: ToolCallMessagePartComponent = ({
 
   const HeaderIcon = isRunning ? Loader2 : failCount > 0 ? XCircle : Check;
 
-  /** 按任务下标取最近步骤（同名 subagent 并发时名称无法区分实例） */
+  /** Latest step by task index (concurrent same-named subagents cannot be
+   *  told apart by name) */
   const latestStepOf = (index: number): TaskStepData | undefined => {
     for (let i = steps.length - 1; i >= 0; i--) {
       if (steps[i]!.index === index) return steps[i];
@@ -98,7 +103,7 @@ export const TaskToolCard: ToolCallMessagePartComponent = ({
 
   return (
     <div className="border-border bg-muted/30 my-2 w-full rounded-lg border px-3 py-2">
-      {/* 头部：状态图标 + 标题 + 计数/耗时 + 展开箭头 */}
+      {/* Header: status icon + title + count/duration + expand chevron */}
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -139,7 +144,8 @@ export const TaskToolCard: ToolCallMessagePartComponent = ({
         />
       </button>
 
-      {/* 概览区（始终可见）：运行中 = 实时进度；完成 = 逐 agent 结果首行 */}
+      {/* Overview area (always visible): running = live progress; done =
+          first line of each agent's result */}
       <div className="flex flex-col gap-0.5 ps-5 pt-0.5">
         {isRunning
           ? multi
@@ -158,7 +164,8 @@ export const TaskToolCard: ToolCallMessagePartComponent = ({
                   </div>
                 );
               })
-            : // 单 agent：最近 3 条步骤（零步骤时显示任务描述）
+            : // Single agent: last 3 steps (task description shown when there
+              // are no steps)
               (steps.length > 0
                 ? steps.slice(-3).map((step, i) => <StepRow key={i} step={step} />)
                 : items[0]?.description && (
@@ -201,14 +208,17 @@ export const TaskToolCard: ToolCallMessagePartComponent = ({
               )}
       </div>
 
-      {/* 展开区：运行中 = 完整步骤日志（按 agent 分组）；完成 = 逐 agent 完整结果 */}
+      {/* Expanded area: running = full step log (grouped by agent); done =
+          each agent's full result */}
       {open && (
         <div className="mt-2 flex max-h-[60vh] flex-col gap-3 overflow-y-auto border-t border-border/70 ps-5 pt-2">
           {isRunning ? (
             multi ? (
               items.map(({ index, subagent }) => {
-                // 步骤归属按下标过滤（同名 subagent 并发时互不混淆）；
-                // 无下标的历史数据（index=-1）回退按 agent 名匹配
+                // Step ownership filtered by index (concurrent same-named
+                // subagents do not get mixed up);
+                // historical data without an index (index=-1) falls back to
+                // agent-name matching
                 const own = steps.filter(
                   (s) => (index >= 0 ? s.index === index : s.agent === subagent),
                 );

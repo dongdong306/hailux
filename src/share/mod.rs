@@ -1,22 +1,29 @@
-//! 聊天记录导出：把 SQLite 中的会话渲染为自包含单文件 HTML。
+//! Chat history export: renders a SQLite-backed session as a self-contained
+//! single-file HTML document.
 //!
-//! 供 TUI（`/share` 命令）与 Web（`GET /api/sessions/{id}/export`）复用，
-//! 不依赖任何 UI feature。设计要点：
+//! Shared by the TUI (`/share` command) and Web (`GET /api/sessions/{id}/export`);
+//! no dependency on any UI feature. Design notes:
 //!
-//! - **视觉对齐 Web 聊天 UI**：令牌/布局/组件样式对齐
-//!   `web/src/styles/globals.css` 与 `web/src/components/assistant-ui/*`
-//!   （用户右对齐 muted 气泡、助手无气泡正文、工具/思考圆角边框卡片、
-//!   完成行 `model · 4.3s · 状态` 纯文本、压缩分隔线两侧细线、markdown
-//!   组件样式与代码块语言头）。亮色为默认，暗色跟随系统偏好。
-//! - **全量历史**：compacted 消息照常渲染，压缩边界插入分隔线（对齐
-//!   `session_ops::load_session_messages` 的重建算法，但不做活跃区间过滤）。
-//! - **悬挂 tool_call 容忍**：`repair_orphaned_tool_calls` 只覆盖活跃区间
-//!   （compacted 区间的悬挂按设计永不修复），因此配对 map 未命中时
-//!   工具调用块照常渲染、仅不显示结果段。
-//! - **XSS 防护**：markdown 原文经 pulldown-cmark 解析后，`Html`/`InlineHtml`
-//!   事件降级为纯文本（push_html 输出时自动转义）；其余文本全部经
-//!   [`escape_html`] 后入模板；图片仅接受 `image/*` 的 data URL。
-//! - **单文件**：CSS 内嵌、图片 base64 内嵌、图标为内联 SVG，不引外部资源。
+//! - **Visually aligned with the Web chat UI**: tokens/layout/component styles
+//!   mirror `web/src/styles/globals.css` and `web/src/components/assistant-ui/*`
+//!   (right-aligned muted bubble for the user, bubble-less body for the
+//!   assistant, rounded-border cards for tool calls/reasoning, plain-text done
+//!   row `model · 4.3s · status`, thin rules on both sides of the compact
+//!   divider, markdown component styles and code block language header). Light
+//!   is the default; dark follows the system preference.
+//! - **Full history**: compacted messages render as usual, with a divider
+//!   inserted at the compaction boundary (mirrors the rebuild algorithm of
+//!   `session_ops::load_session_messages`, but without active-range filtering).
+//! - **Dangling tool_call tolerance**: `repair_orphaned_tool_calls` only covers
+//!   the active range (dangling calls in compacted ranges are never repaired by
+//!   design), so when the pairing map misses, the tool call block still
+//!   renders, just without its result section.
+//! - **XSS protection**: after pulldown-cmark parses the raw markdown,
+//!   `Html`/`InlineHtml` events are downgraded to plain text (push_html escapes
+//!   them on output); all other text goes through [`escape_html`] before
+//!   templating; images only accept `image/*` data URLs.
+//! - **Single file**: CSS inlined, images base64-inlined, icons as inline SVG;
+//!   no external resources.
 
 use color_eyre::Result;
 use pulldown_cmark::{Event, Options, Parser};
@@ -26,17 +33,17 @@ use crate::storage::{ChatStorage, MessageRole, StoredMessage};
 
 static TEMPLATE: &str = include_str!("template.html");
 
-/// 导出结果：原始标题、文件名安全 slug 与完整 HTML 文档。
+/// Export result: raw title, filename-safe slug and the full HTML document.
 pub struct ShareExport {
-    /// 会话原始标题（空会话为 "未命名会话"）
+    /// Raw session title (empty sessions become "未命名会话")
     pub title: String,
-    /// 文件名安全的标题 slug（无扩展名），本地文件命名用
+    /// Filename-safe title slug (no extension), used for local file naming
     pub slug: String,
-    /// 完整 HTML 文档
+    /// Full HTML document
     pub html: String,
 }
 
-/// 导出整个会话（含 compacted 历史）为单文件 HTML。
+/// Exports an entire session (including compacted history) as single-file HTML.
 pub async fn export_session_html(storage: &ChatStorage, session_id: &str) -> Result<ShareExport> {
     let info = storage
         .get_session_info(session_id)
@@ -100,51 +107,52 @@ pub async fn export_session_html(storage: &ChatStorage, session_id: &str) -> Res
     Ok(ShareExport { title, slug, html })
 }
 
-// ── 中间表示 ─────────────────────────────────────────────────
+// ── Intermediate representation ──────────────────────────────
 
-/// 工具调用的展示数据（对齐 web ToolFallback 标题结构：动词小号 + 宾语主体）
+/// Display data of a tool call (mirrors web ToolFallback title layout: small verb + object body)
 #[derive(Debug, Clone)]
 struct ToolCallItem {
     verb: String,
     object: String,
-    /// 搜索范围等次要信息（grep/glob 的 path/include）
+    /// Secondary info such as search scope (grep/glob path/include)
     suffix: Option<String>,
-    /// 原始入参 JSON（展开后展示，对齐 web argsText pre）
+    /// Raw arguments JSON (shown expanded, mirrors web argsText pre)
     args: String,
-    /// None = 悬挂调用（活跃区间修复刻意不覆盖 compacted 区间）
+    /// None = dangling call (active-range repair deliberately skips compacted ranges)
     result: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 enum ShareBlock {
-    /// 用户消息（文本 + Plan 标记 + 图片 data URL）
+    /// User message (text + Plan badge + image data URLs)
     User {
         text: String,
         plan_mode: bool,
         images: Vec<String>,
     },
-    /// Assistant 正文（已渲染的 markdown HTML 片段）
+    /// Assistant body (rendered markdown HTML fragment)
     Assistant { html: String },
-    /// 思考过程（折叠卡片）
+    /// Reasoning process (collapsible card)
     Reasoning { text: String, think_ms: Option<i64> },
-    /// 单个工具调用（折叠卡片）
+    /// Single tool call (collapsible card)
     ToolCall(ToolCallItem),
-    /// 连续工具调用合并卡（对齐 web ToolGroup：≥2 次合并，内部折叠行）
+    /// Merged card for consecutive tool calls (mirrors web ToolGroup: merged
+    /// at ≥2 calls, collapsible rows inside)
     ToolGroup(Vec<ToolCallItem>),
-    /// todo_write 卡片（对齐 web TodoView，不展示入参/出参原文）
+    /// todo_write card (mirrors web TodoView; raw args/result not shown)
     Todo { items: Vec<TodoItem> },
-    /// ask_user 问答卡（对齐 web AskUserView）
+    /// question Q&A card (mirrors web AskUserView)
     AskUser {
         cancelled: bool,
         pairs: Vec<(String, String)>,
     },
-    /// 一次 LLM 请求的完成标记行（model · 4.3s · 状态）
+    /// Done marker row for one LLM request (model · 4.3s · status)
     Done {
         model: String,
         total_ms: Option<u64>,
         status: &'static str,
     },
-    /// 上下文压缩分隔线
+    /// Context compaction divider
     CompactDivider { count: usize },
 }
 
@@ -154,9 +162,11 @@ struct TodoItem {
     status: String,
 }
 
-/// 由全量消息构建展示块。算法对齐 `session_ops::load_session_messages`
-/// 与 `session-history.ts::rebuildSessionItems`，但不做活跃区间过滤：
-/// compacted 消息照常渲染，仅在压缩边界插入分隔线。
+/// Builds display blocks from the full message list. The algorithm mirrors
+/// `session_ops::load_session_messages` and
+/// `session-history.ts::rebuildSessionItems`, but without active-range
+/// filtering: compacted messages render as usual, with a divider inserted only
+/// at the compaction boundary.
 fn build_blocks(
     messages: &[StoredMessage],
     has_summary: bool,
@@ -164,7 +174,7 @@ fn build_blocks(
 ) -> Vec<ShareBlock> {
     let mut blocks = Vec::new();
 
-    // 预扫：tool_call_id -> result，first-wins（对齐 TUI or_insert）
+    // Pre-scan: tool_call_id -> result, first-wins (mirrors TUI or_insert)
     let mut tool_results: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for msg in messages {
@@ -191,8 +201,9 @@ fn build_blocks(
 
         match msg.role {
             MessageRole::User => {
-                // 工具图片合成消息（read 读取图片等，为注入模型上下文生成）：
-                // runtime_meta 带 {"format":"tool-attachment"} 标记，跳过渲染
+                // Synthetic tool-image message (read on images etc., generated
+                // to inject model context): runtime_meta carries the
+                // {"format":"tool-attachment"} marker, skip rendering
                 if is_tool_attachment(msg) {
                     continue;
                 }
@@ -243,8 +254,10 @@ fn build_blocks(
                             })
                             .unwrap_or_default();
                         let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        // 空 id 的残缺条目（流式中途取消的半成品，永远无法被
-                        // 应答）整体跳过，对齐 ensure_tool_call_parity 的剔除语义
+                        // Malformed entries with an empty id (half-built calls
+                        // cancelled mid-stream, never answerable) are skipped
+                        // entirely, mirroring the drop semantics of
+                        // ensure_tool_call_parity
                         if call_id.is_empty() {
                             continue;
                         }
@@ -279,12 +292,12 @@ fn build_blocks(
                     });
                 }
             }
-            // Tool 已在配对 map 中消费；System 为内部提示词，不对外展示
+            // Tool already consumed via the pairing map; System is an internal prompt, not exported
             MessageRole::Tool | MessageRole::System => {}
         }
     }
 
-    // 全部消息已压缩（压缩后未再对话）：末尾补插分隔线
+    // All messages compacted (no conversation after compaction): append a tail divider
     if !compact_divider_inserted
         && has_summary
         && !messages.is_empty()
@@ -298,8 +311,8 @@ fn build_blocks(
     merge_tool_groups(blocks)
 }
 
-/// 连续 ≥2 个工具调用合并为 ToolGroup 卡（对齐 web groupBy + ToolGroup：
-/// 单次调用退化为独立卡片）
+/// Merges ≥2 consecutive tool calls into a ToolGroup card (mirrors the web
+/// groupBy + ToolGroup: a single call degrades to a standalone card)
 fn merge_tool_groups(blocks: Vec<ShareBlock>) -> Vec<ShareBlock> {
     let mut merged: Vec<ShareBlock> = Vec::with_capacity(blocks.len());
     let mut pending: Vec<ToolCallItem> = Vec::new();
@@ -326,9 +339,9 @@ fn flush_tool_group(pending: &mut Vec<ToolCallItem>, merged: &mut Vec<ShareBlock
     }
 }
 
-// ── 渲染 ─────────────────────────────────────────────────────
+// ── Rendering ────────────────────────────────────────────────
 
-/// lucide 图标（v1.31.0，ISC）——路径取自 lucide-react，与 Web UI 完全同源
+/// lucide icons (v1.31.0, ISC) — paths taken from lucide-react, identical to the Web UI
 const ICON_CHECK: &str = "M20 6 9 17l-5-5";
 const ICON_CHEVRON: &str = "m6 9 6 6 6-6";
 const ICON_BRAIN: &[&str] = &[
@@ -460,7 +473,7 @@ fn render_body(blocks: &[ShareBlock]) -> String {
     out
 }
 
-/// 渲染单个工具调用：独立卡片，或合并卡内的边框行（in_group）
+/// Renders a single tool call: standalone card, or bordered row inside a merged card (in_group)
 fn render_tool_card(item: &ToolCallItem, in_group: bool) -> String {
     let mut summary = String::new();
     summary.push_str(&icon_svg(&[ICON_CHECK], ""));
@@ -514,8 +527,9 @@ fn render_tool_card(item: &ToolCallItem, in_group: bool) -> String {
     }
 }
 
-/// todo 卡片（对齐 web TodoView：• Updated plan N/M + checkbox 列表）。
-/// 导出为静态历史快照，任务不存在运行态，头部恒为 "Updated plan"。
+/// Todo card (mirrors web TodoView: • Updated todo N/M + checkbox list).
+/// The export is a static history snapshot; todos have no runtime state and
+/// the header is always "Updated todo".
 fn render_todo_card(items: &[TodoItem]) -> String {
     let done = items
         .iter()
@@ -524,7 +538,7 @@ fn render_todo_card(items: &[TodoItem]) -> String {
     let all_done = !items.is_empty() && done == items.len();
     let mut out = format!(
         "<div class=\"card\"><div class=\"card-head\"><span class=\"todo-icon {}\">•</span>\
-         <span class=\"card-title\">Updated plan</span><span class=\"todo-count\">{done}/{}</span></div>\
+         <span class=\"card-title\">Updated todo</span><span class=\"todo-count\">{done}/{}</span></div>\
          <div class=\"todo-items\">",
         if all_done { "done" } else { "doing" },
         items.len(),
@@ -546,7 +560,7 @@ fn render_todo_card(items: &[TodoItem]) -> String {
     out
 }
 
-/// ask_user 问答卡（对齐 web AskUserView：cancelled 灰显 / Q&A 列表）
+/// question Q&A card (mirrors web AskUserView: cancelled greyed out / Q&A list)
 fn render_ask_card(cancelled: bool, pairs: &[(String, String)]) -> String {
     let mut out = format!(
         "<div class=\"card\"><div class=\"card-head\">{}<span class=\"card-title\">已提问</span></div>",
@@ -571,11 +585,12 @@ fn render_ask_card(cancelled: bool, pairs: &[(String, String)]) -> String {
     out
 }
 
-// ── Markdown → HTML（XSS 安全）──────────────────────────────
+// ── Markdown → HTML (XSS safe) ──────────────────────────────
 
-/// 渲染 markdown 为 HTML 片段。原始 HTML 事件（`Event::Html`/`InlineHtml`）
-/// 降级为纯文本：push_html 输出 Text 时会转义，注入内容只会显示为源码。
-/// 代码块内容不经实体预处理，显示保持原样。
+/// Renders markdown into an HTML fragment. Raw HTML events
+/// (`Event::Html`/`InlineHtml`) are downgraded to plain text: push_html escapes
+/// them when emitting Text, so injected content only shows up as source.
+/// Code block content is not entity-preprocessed and displays verbatim.
 fn markdown_to_html(text: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -590,9 +605,10 @@ fn markdown_to_html(text: &str) -> String {
     decorate_code_blocks(&out)
 }
 
-/// 给带语言标注的代码块补语言头（对齐 web CodeHeader：rounded-t-xl 语言条 +
-/// rounded-b-xl 代码体）。pulldown 输出形如
-/// `<pre><code class="language-ts">…</code></pre>`，在此包裹为 codeblock 结构。
+/// Adds a language header to tagged code blocks (mirrors web CodeHeader:
+/// rounded-t-xl language bar + rounded-b-xl code body). pulldown output looks
+/// like `<pre><code class="language-ts">…</code></pre>` and is wrapped into
+/// the codeblock structure here.
 fn decorate_code_blocks(html: &str) -> String {
     let mut out = String::with_capacity(html.len() + 256);
     let mut rest = html;
@@ -637,7 +653,8 @@ fn decorate_code_blocks(html: &str) -> String {
         };
         let close_end = close_rel + CLOSE.len();
         if is_lang {
-            // 语言名 = class 属性中 language- 后到引号前的转义文本
+            // Language name = escaped text between `language-` and the
+            // closing quote of the class attribute
             let lang = &after[OPEN_LANG.len()..body_start - 2];
             out.push_str(&format!(
                         "<div class=\"codeblock\"><div class=\"code-header\"><span class=\"code-lang\">{lang}</span></div>{}&nbsp;</div>",
@@ -653,7 +670,7 @@ fn decorate_code_blocks(html: &str) -> String {
     }
 }
 
-/// HTML 文本节点转义。
+/// Escapes HTML text nodes.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -662,19 +679,21 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// 占位符中和：插入值中的 `{{`/`}}` 实体化为字面花括号（渲染无损），
-/// 防止内容里的 `{{BODY}}` 等被后续 replace 误当模板占位符二次展开。
+/// Placeholder neutralization: `{{`/`}}` inside inserted values are
+/// entity-encoded into literal braces (lossless rendering), preventing
+/// content like `{{BODY}}` from being re-expanded as template placeholders
+/// by later replace calls.
 fn neutralize_placeholders(s: String) -> String {
     s.replace("{{", "&#123;&#123;")
         .replace("}}", "&#125;&#125;")
 }
 
-/// HTML 属性值转义（当前与 escape_html 等价，独立命名以表达意图）。
+/// Escapes HTML attribute values (currently same as escape_html; named separately for intent).
 fn escape_attr(s: &str) -> String {
     escape_html(s)
 }
 
-// ── 消息解析辅助 ─────────────────────────────────────────────
+// ── Message parsing helpers ──────────────────────────────────
 
 fn runtime_meta_value(msg: &StoredMessage) -> Option<Value> {
     msg.runtime_meta
@@ -690,8 +709,9 @@ fn is_tool_attachment(msg: &StoredMessage) -> bool {
         == Some("tool-attachment")
 }
 
-/// 解析用户消息的图片附件：仅接受 image/* 的 data URL（防非图片
-/// MIME 借 img 标签输出异常内容），解析失败静默忽略。
+/// Parses image attachments of a user message: only image/* data URLs are
+/// accepted (prevents non-image MIME from emitting odd content via img tags);
+/// parse failures are silently ignored.
 fn parse_image_attachments(msg: &StoredMessage) -> Vec<String> {
     let Some(json) = msg.attachments.as_deref() else {
         return Vec::new();
@@ -714,15 +734,16 @@ fn parse_image_attachments(msg: &StoredMessage) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 剥离 Windows verbatim 前缀（与 web handlers::strip_verbatim 同语义）
+/// Strips the Windows verbatim prefix (same semantics as web handlers::strip_verbatim)
 fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\")
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.to_string())
 }
 
-/// 文件展示名：工作目录内 → 相对路径；目录外 → 全路径。
-/// 对齐 web tool-fallback.tsx::displayPath（`\`→`/` 归一 + 大小写不敏感前缀比较）
+/// Display name for a file: inside the work dir → relative path; outside → full path.
+/// Mirrors web tool-fallback.tsx::displayPath (`\`→`/` normalization +
+/// case-insensitive prefix comparison)
 fn display_path(path: &str, work_dir: Option<&str>) -> String {
     let Some(wd) = work_dir else {
         return path.to_string();
@@ -734,9 +755,10 @@ fn display_path(path: &str, work_dir: Option<&str>) -> String {
         return path.to_string();
     }
     let p = norm(path);
-    // 切片边界必须精确落在 wd 后的分隔符上：个别字符大小写转换会改变
-    // UTF-8 字节长度（如 U+212A KELVIN SIGN），仅凭 to_lowercase 前缀命中
-    // 就按字节长度切片可能切进字符中间（panic）或错位（错误相对路径）。
+    // The slice boundary must land exactly on the separator after wd: case
+    // conversion of some characters changes the UTF-8 byte length (e.g. U+212A
+    // KELVIN SIGN), so slicing at byte length based only on a to_lowercase
+    // prefix hit may cut mid-character (panic) or misalign (wrong relative path).
     if let Some(tail) = p.get(wd.len()..)
         && tail.starts_with('/')
         && p.to_lowercase()
@@ -753,9 +775,9 @@ fn display_path(path: &str, work_dir: Option<&str>) -> String {
     }
 }
 
-// ── 工具调用解析（对齐 web ToolFallback 的标题字段优先级）────
+// ── Tool call parsing (mirrors web ToolFallback title field priority) ──
 
-/// 按工具名构造展示块：todo_write/ask_user 有专属卡片，其余走通用工具卡
+/// Builds the display block by tool name: todo_write/question get dedicated cards, everything else uses the generic tool card
 fn build_tool_block(
     name: &str,
     arguments: &str,
@@ -764,7 +786,7 @@ fn build_tool_block(
 ) -> ShareBlock {
     let args: Value = serde_json::from_str(arguments).unwrap_or_default();
 
-    // todo_write：checkbox 风格列表（不展示入参/出参原文，对齐 web TodoView）
+    // todo_write: checkbox-style list (raw args/result not shown, mirrors web TodoView)
     if name == "todo_write" {
         let items = args["todos"]
             .as_array()
@@ -780,8 +802,8 @@ fn build_tool_block(
         return ShareBlock::Todo { items };
     }
 
-    // ask_user：Q&A 配对（对齐 web AskUserView + TUI parse_ask_user_pairs）
-    if name == "ask_user" {
+    // question: Q&A pairing (mirrors web AskUserView + TUI parse_ask_user_pairs)
+    if name == "question" {
         let cancelled = result
             .as_deref()
             .is_some_and(|r| r.contains("[User Cancelled]"));
@@ -802,10 +824,10 @@ fn build_tool_block(
     })
 }
 
-/// 标题三元组（动词/宾语/范围），字段优先级对齐 web ToolFallback：
-/// 文件工具展示相对路径；grep/glob 展示 pattern + 范围；skill 为
-/// "Load skill {name}"；bash/web_fetch/task 按显式字段取摘要；
-/// 未知工具（含 MCP）为 "使用工具 {tool_name}"
+/// Title triple (verb/object/scope), field priority mirrors web ToolFallback:
+/// file tools show the relative path; grep/glob show pattern + scope; skill
+/// shows "Load skill {name}"; shell/web_fetch/task take an explicit-field
+/// summary; unknown tools (incl. MCP) show "使用工具 {tool_name}"
 fn tool_call_title(
     name: &str,
     args: &Value,
@@ -841,7 +863,7 @@ fn tool_call_title(
             };
             (name.to_string(), pattern, scope)
         }
-        "bash" => (
+        "shell" => (
             name.to_string(),
             truncate_str(args["command_string"].as_str().unwrap_or(""), 80),
             None,
@@ -867,14 +889,15 @@ fn tool_call_title(
     }
 }
 
-/// ask_user 结果解析："question"="answer" 配对（引号扫描 + `\\`/`\"`
-/// 转义还原），对齐 TUI parse_ask_user_pairs 与 web parseAskUserPairs
+/// question result parsing: "question"="answer" pairs (quote scanning with
+/// `\\`/`\"` unescaping), mirroring TUI parse_ask_user_pairs and web
+/// parseAskUserPairs
 fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
     let chars: Vec<char> = result.chars().collect();
     let mut pairs = Vec::new();
     let mut i = 0usize;
 
-    // 读取一个带引号字符串；返回 (值, 消耗后的新下标)
+    // Reads one quoted string; returns (value, next index after consumption)
     fn read_quoted(chars: &[char], start: usize) -> Option<(String, usize)> {
         if chars.get(start) != Some(&'"') {
             return None;
@@ -911,7 +934,7 @@ fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
                 break;
             };
             i = next;
-            // 跳过空白找 =
+            // Skip whitespace looking for =
             while i < chars.len() && chars[i] == ' ' {
                 i += 1;
             }
@@ -942,7 +965,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
-// ── 展示格式化 ───────────────────────────────────────────────
+// ── Display formatting ───────────────────────────────────────
 
 fn fmt_tokens(n: i64) -> String {
     if n >= 1_000_000 {
@@ -966,11 +989,12 @@ fn fmt_tokens_line(prompt: i64, completion: i64, cached: i64) -> String {
     }
 }
 
-/// 会话标题 → 文件名安全 slug：Windows 非法字符与控制字符替换为 `-`，
-/// 空白折叠，截断到 30 字符（字符级，中文友好），去首尾 `-`/`.`/空白。
+/// Session title → filename-safe slug: Windows-illegal and control characters
+/// are replaced with `-`, whitespace collapses, truncated to 30 chars
+/// (character-level, CJK friendly), leading/trailing `-`/`.`/whitespace trimmed.
 pub fn slugify_title(title: &str) -> String {
     let mut slug = String::with_capacity(title.len());
-    let mut prev_dash = true; // 抑制开头连字符
+    let mut prev_dash = true; // suppress a leading hyphen
     for ch in title.chars() {
         let c = if matches!(ch, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
             || ch.is_control()
@@ -1001,7 +1025,7 @@ pub fn slugify_title(title: &str) -> String {
     }
 }
 
-// ── 测试 ─────────────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1038,7 +1062,7 @@ mod tests {
         m
     }
 
-    // ── XSS 防护 ─────────────────────────────────────────────
+    // ── XSS protection ──────────────────────────────────────────
 
     #[test]
     fn markdown_raw_html_is_neutralized() {
@@ -1077,7 +1101,7 @@ mod tests {
         );
     }
 
-    // ── 代码块语言头 ─────────────────────────────────────────
+    // ── Code block language header ──────────────────────────────
 
     #[test]
     fn fenced_code_block_gets_language_header() {
@@ -1105,7 +1129,7 @@ mod tests {
         assert!(html.contains("<code>ls -la</code>"), "{html}");
     }
 
-    // ── 消息遍历与配对 ────────────────────────────────────────
+    // ── Message traversal and pairing ───────────────────────────
 
     #[test]
     fn tool_calls_pair_with_results() {
@@ -1126,14 +1150,15 @@ mod tests {
         assert_eq!(item.result.as_deref(), Some("1: fn main() {}"));
     }
 
-    /// compacted 区间的悬挂 tool_calls 永不修复（活跃区间修复的刻意收窄），
-    /// 导出必须容忍配对失败：块照常渲染，result 为 None。
+    /// Dangling tool_calls in compacted ranges are never repaired (a
+    /// deliberate narrowing of active-range repair); the export must tolerate
+    /// failed pairing: the block renders as usual with result = None.
     #[test]
     fn dangling_tool_call_renders_without_result() {
-        let calls = r#"[{"id":"call_x","function":{"name":"bash","arguments":"{\"command_string\":\"cargo build\"}"}}]"#;
+        let calls = r#"[{"id":"call_x","function":{"name":"shell","arguments":"{\"command_string\":\"cargo build\"}"}}]"#;
         let messages = vec![
             msg(MessageRole::User, "build"),
-            assistant_with_calls(calls), // 无对应 tool result
+            assistant_with_calls(calls), // no matching tool result
             msg(MessageRole::User, "继续"),
         ];
         let blocks = build_blocks(&messages, false, None);
@@ -1150,7 +1175,7 @@ mod tests {
 
     #[test]
     fn empty_id_tool_call_is_skipped() {
-        let calls = r#"[{"id":"","function":{"name":"bash","arguments":"{}"}}]"#;
+        let calls = r#"[{"id":"","function":{"name":"shell","arguments":"{}"}}]"#;
         let messages = vec![assistant_with_calls(calls)];
         let blocks = build_blocks(&messages, false, None);
         assert!(
@@ -1245,7 +1270,7 @@ mod tests {
         assert_eq!(*status, "completed");
     }
 
-    // ── 工具专属卡片 ─────────────────────────────────────────
+    // ── Tool-specific cards ─────────────────────────────────────
 
     #[test]
     fn todo_write_renders_todo_card() {
@@ -1259,13 +1284,13 @@ mod tests {
         };
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].status, "completed");
-        assert!(render_body(&blocks).contains("Updated plan"));
+        assert!(render_body(&blocks).contains("Updated todo"));
     }
 
     #[test]
-    fn ask_user_renders_pairs_and_cancelled() {
-        // 对齐 TUI ask_escape 的转义形态："问题"="答案"
-        let calls = r#"[{"id":"c1","function":{"name":"ask_user","arguments":"{\"questions\":[{\"question\":\"继续吗\"}]}"}}]"#;
+    fn question_renders_pairs_and_cancelled() {
+        // Mirrors the escaping form of TUI ask_escape: "question"="answer"
+        let calls = r#"[{"id":"c1","function":{"name":"question","arguments":"{\"questions\":[{\"question\":\"继续吗\"}]}"}}]"#;
         let messages = vec![
             assistant_with_calls(calls),
             tool_result("c1", r#""继续吗"="继续""#),
@@ -1317,10 +1342,10 @@ mod tests {
         });
         let items = group.expect("expected merged group");
         assert_eq!(items.len(), 3);
-        // grep 的 scope 进入 suffix（对齐 web）
+        // grep scope goes into the suffix (mirrors web)
         assert_eq!(items[1].suffix.as_deref(), Some("src"));
 
-        // 单个调用不合并
+        // A single call is not merged
         let single = build_blocks(
             &[assistant_with_calls(
                 r#"[{"id":"c1","function":{"name":"read","arguments":"{}"}}]"#,
@@ -1331,7 +1356,7 @@ mod tests {
         assert!(matches!(single[0], ShareBlock::ToolCall(_)));
     }
 
-    // ── 路径相对化与转义 ─────────────────────────────────────
+    // ── Path relativization and escaping ────────────────────────
 
     #[test]
     fn display_path_relativizes_workdir() {
@@ -1347,8 +1372,9 @@ mod tests {
         assert_eq!(display_path("x.rs", None), "x.rs");
     }
 
-    /// U+212A（KELVIN SIGN，3 字节）小写为 1 字节 'k'：wd 与路径的小写
-    /// 形式相同但字节长度不同时，字节偏移切片不得 panic 也不得错切。
+    /// U+212A (KELVIN SIGN, 3 bytes) lowercases to the 1-byte 'k': when the
+    /// lowercase forms of wd and the path match but byte lengths differ,
+    /// byte-offset slicing must neither panic nor cut at the wrong offset.
     #[test]
     fn display_path_unicode_case_length_mismatch_is_safe() {
         let wd = "D:/2\u{212A}";
@@ -1364,7 +1390,7 @@ mod tests {
         assert_eq!(object, "mcp_foo_bar");
     }
 
-    // ── 端到端：完整 HTML 文档 ────────────────────────────────
+    // ── End-to-end: full HTML document ──────────────────────────
 
     #[tokio::test]
     async fn export_session_html_end_to_end() {
@@ -1413,8 +1439,9 @@ mod tests {
         assert!(export_session_html(&storage, "nope").await.is_err());
     }
 
-    /// 标题/正文里的 `{{BODY}}`、`{{EXPORTED}}` 等字面占位符不得被
-    /// 模板替换二次展开，实体化后按字面花括号渲染。
+    /// Literal placeholders such as `{{BODY}}`/`{{EXPORTED}}` in titles/bodies
+    /// must not be re-expanded by template replacement; they are entity-encoded
+    /// and rendered as literal braces.
     #[tokio::test]
     async fn placeholder_text_in_content_not_expanded() {
         let storage = ChatStorage::new_in_memory().await.unwrap();

@@ -15,10 +15,10 @@ use crate::agent::tools::{Tool, ToolExecuteError};
 use crate::mcp::SharedMcpBackends;
 use crate::storage::ChatStorage;
 
-/// 单次 task 调用允许并发启动的 subagent 数量上限
+/// Maximum number of subagents a single task call may launch concurrently
 pub(super) const MAX_PARALLEL_TASKS: usize = 8;
 
-/// tasks 数组中单个任务的解析结果
+/// Parse result of a single task in the tasks array
 #[derive(Debug, Clone)]
 pub(super) struct TaskSpec {
     pub(super) subagent: String,
@@ -92,8 +92,9 @@ pub(super) fn parse_task_specs(args: &Value) -> Result<Vec<TaskSpec>, String> {
     Ok(specs)
 }
 
-/// 启动前的预校验：数量上限、subagent 名称存在、task_id 不重复；
-/// 校验通过则返回每个任务对应的 subagent 配置（顺序与 specs 一致）
+/// Pre-launch validation: task count limit, subagent name existence, and
+/// task_id uniqueness. On success, returns each task's subagent config
+/// (order matches specs)
 pub(super) fn resolve_task_specs<'a>(
     specs: &[TaskSpec],
     subagents: &'a [SubagentConfig],

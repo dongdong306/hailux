@@ -1,4 +1,4 @@
-Execute PowerShell commands and return the output
+Execute shell commands and return the output
 
 The current OS is Windows, commands are executed using {SHELL_DESC}. All commands run in the current working directory by default. To run a command in another directory, use the workdir parameter instead of using cd in the command.
 
@@ -12,7 +12,7 @@ This tool is for terminal operations (such as git, cargo, npm, etc.), not for fi
 Usage notes:
 - Always use double quotes around file paths containing spaces (e.g. mkdir "C:\Users\name\My Documents")
 - When issuing multiple commands:
-  - If commands are independent and can run in parallel, call the Bash tool multiple times in a single message (e.g. git status and git diff).
+  - If commands are independent and can run in parallel, call the shell tool multiple times in a single message (e.g. git status and git diff).
   - Use ; only when you need to run commands sequentially and don't care if earlier commands fail
   - Do not use newlines to separate commands (newlines can be used within quoted strings)
 - You can set a command timeout via the timeout parameter (in seconds). After timeout, the process will be terminated and a timeout message will be returned

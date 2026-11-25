@@ -1,10 +1,11 @@
-/// 每个变更组保留的上下文行数
+/// Number of context lines kept around each change group
 const DIFF_CONTEXT_LINES: usize = 3;
 
-/// 序列化 edit/write 的 diff 展示数据。
+/// Serializes the diff display data for edit/write.
 ///
-/// 只存储预计算的 hunk（变更行 + 上下文行），不存储文件全文，
-/// 避免大文件多次编辑导致 runtime_meta 落库膨胀。
+/// Only precomputed hunks (changed lines + context lines) are stored, not the
+/// full file contents, avoiding runtime_meta storage bloat from repeated edits
+/// of large files.
 pub(super) fn serialize_diff_data(old: Option<&str>, new: &str, file_path: &str) -> String {
     use similar::{ChangeTag, TextDiff};
 

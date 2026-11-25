@@ -5,7 +5,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** 相对时间：ISO 字符串 → "3 分钟前" */
+/** Relative time: ISO string → "3 分钟前" */
 export function relativeTime(iso: string): string {
   if (!iso) return "";
   const t = Date.parse(iso);
@@ -21,7 +21,7 @@ export function relativeTime(iso: string): string {
   return new Date(t).toLocaleDateString();
 }
 
-/** 目录短显示：最后一段 */
+/** Short directory display: the last path segment */
 export function shortDir(dir: string): string {
   if (!dir) return "默认目录";
   const norm = dir.replace(/\\+/g, "/").replace(/\/+$/, "");
@@ -29,7 +29,7 @@ export function shortDir(dir: string): string {
   return parts[parts.length - 1] || norm;
 }
 
-/** 紧凑 token 单位：1.2M / 34.5k / 823 */
+/** Compact token units: 1.2M / 34.5k / 823 */
 export function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;

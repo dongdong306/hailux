@@ -6,7 +6,7 @@ use super::super::AppState;
 use crate::tui::event::AppEvent;
 
 impl App {
-    /// skill 查看器的事件处理：↑/↓ 移动选中，Esc 返回聊天。
+    /// Skill viewer event handling: ↑/↓ moves selection, Esc returns to chat.
     pub(in crate::tui::app) fn handle_skills_event(&mut self, event: AppEvent) -> Result<()> {
         let AppState::Skills { selected_index } = &mut self.state else {
             return Ok(());
@@ -40,7 +40,7 @@ impl App {
         Ok(())
     }
 
-    /// skill 详情面板的事件处理：Esc 返回列表。
+    /// Skill detail panel event handling: Esc returns to the list.
     pub(in crate::tui::app) fn handle_skill_detail_event(&mut self, event: AppEvent) -> Result<()> {
         let AppState::SkillDetail {
             skill_index,

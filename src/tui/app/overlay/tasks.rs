@@ -7,7 +7,7 @@ use crate::tui::event::AppEvent;
 use crate::tui::tasks_viewer::{TaskEntry, TaskRunStatus};
 
 impl App {
-    /// 合并内存 task_records 与数据库 subsession 记录，构建 TaskEntry 列表。
+    /// Merge in-memory task_records with database subsession records to build the TaskEntry list.
     pub(super) async fn build_task_entries(&self) -> Result<Vec<TaskEntry>> {
         let session_id = match &self.current_session_id {
             Some(id) => id,
@@ -16,7 +16,7 @@ impl App {
 
         let subsessions = self.storage.list_subsessions(session_id).await?;
 
-        // 以 task_records 为主，匹配 subsession
+        // task_records are the source of truth; match subsessions to them
         let mut entries: Vec<TaskEntry> = Vec::new();
 
         for record in &self.tasks.records {
@@ -33,14 +33,15 @@ impl App {
             });
         }
 
-        // 补充存在于数据库但不在内存 task_records 中的 subsession（如历史会话恢复后）
+        // Add subsessions that exist in the database but not in in-memory task_records
+        // (e.g. after restoring a historical session)
         for sub in &subsessions {
             let already = entries
                 .iter()
                 .any(|e| e.record.as_ref().is_some_and(|r| r.session_id == sub.id));
             if !already {
-                // 从 subsession 的 title 解析 subagent 名称和 description
-                // title 格式: "subagent_name|description" 或仅 "subagent_name"
+                // Parse the subagent name and description from the subsession title
+                // title format: "subagent_name|description" or just "subagent_name"
                 let (name, desc) = if sub.title.contains('|') {
                     let mut parts = sub.title.splitn(2, '|');
                     let n = parts.next().unwrap_or("subagent").to_string();
@@ -65,7 +66,7 @@ impl App {
         Ok(entries)
     }
 
-    /// Tasks 面板的事件处理：↑/↓ 移动选中，Enter 查看详情，Esc 返回聊天。
+    /// Tasks panel event handling: ↑/↓ moves selection, Enter shows details, Esc returns to chat.
     pub(in crate::tui::app) async fn handle_tasks_event(&mut self, event: AppEvent) -> Result<()> {
         let (selected_index, entries_len) = {
             let AppState::Tasks {
@@ -141,7 +142,7 @@ impl App {
         Ok(())
     }
 
-    /// Task 详情面板的事件处理：↑/↓/PgUp/PgDn 滚动，Esc 返回列表。
+    /// Task detail panel event handling: ↑/↓/PgUp/PgDn scroll, Esc returns to the list.
     pub(in crate::tui::app) async fn handle_task_detail_event(
         &mut self,
         event: AppEvent,
@@ -153,7 +154,7 @@ impl App {
             *task_index
         };
 
-        // 鼠标滚轮事件
+        // Mouse wheel events
         match event {
             AppEvent::ScrollUp => {
                 if let AppState::TaskDetail { scroll_offset, .. } = &mut self.state {

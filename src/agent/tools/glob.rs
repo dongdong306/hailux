@@ -27,7 +27,7 @@ impl Tool for GlobTool {
         let path = argument_str(arguments, "path").unwrap_or_else(|| ".".to_string());
         let canonical = resolve_permission_path(&path, work_dir);
 
-        // 搜索路径在工作目录之外 → external_directory 询问
+        // Search path outside the working directory → external_directory ask
         if let Some(dir) = external_dir_of(&path, work_dir) {
             return vec![external_dir_request(
                 &[dir],
@@ -35,7 +35,8 @@ impl Tool for GlobTool {
             )];
         }
 
-        // 工作目录内 → glob 请求（默认放行，配置规则仍可 deny）
+        // Inside the working directory → glob request (allowed by default;
+        // config rules may still deny)
         vec![PermissionRequest {
             permission: "glob".to_string(),
             patterns: vec![canonical.display().to_string()],
@@ -87,7 +88,7 @@ impl Tool for GlobTool {
                 .as_str()
                 .map_or_else(|| work_dir.to_string(), |p| resolve_tool_path(p, work_dir));
 
-            // 与 grep 同理：目录遍历是阻塞 I/O，放 blocking 线程池执行
+            // Same as grep: directory traversal is blocking I/O, run on the blocking thread pool
             let task = tokio::task::spawn_blocking(move || -> Result<String, ToolExecuteError> {
                 let mut walk_builder = WalkBuilder::new(&path);
                 walk_builder.sort_by_file_path(compare_mtime);
@@ -105,9 +106,12 @@ impl Tool for GlobTool {
 
                 const MAX_FILES: usize = 100;
 
-                // 双路匹配：pattern 既可匹配完整路径（绝对 pattern、`*.rs` 等
-                // 头部通配形态），也可匹配相对于遍历根的路径（`src/tui/*.rs`
-                // 等带相对目录前缀的形态——单匹配绝对路径时永远吃不掉前缀）。
+                // Dual matching: the pattern is checked against both the full
+                // path (absolute patterns and leading-wildcard forms like
+                // `*.rs`) and the path relative to the traversal root (forms
+                // with a relative directory prefix like `src/tui/*.rs` — a
+                // single match on the absolute path can never consume the
+                // prefix).
                 let root = std::path::PathBuf::from(&path);
 
                 let mut results = String::new();

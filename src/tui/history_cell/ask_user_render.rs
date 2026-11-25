@@ -2,9 +2,10 @@ use ratatui::prelude::*;
 
 use super::{truncate_str, wrap_text};
 
-/// 从 ask_user 工具结果中解析 "question"="answer" 对
+/// Parses "question"="answer" pairs from a question tool result
 pub(super) fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
-    /// 还原 ask_escape 的转义：`\\`→`\`、`\"`→`"`；孤立反斜杠（异常输入/旧数据）原样保留
+    /// Reverses ask_escape escaping: `\\`→`\`, `\"`→`"`; lone backslashes
+    /// (malformed input/legacy data) are kept as-is
     fn unescape(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         let mut chars = s.chars();
@@ -31,7 +32,7 @@ pub(super) fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'"' {
-            // 解析 key
+            // Parse the key
             let key_start = i + 1;
             let mut j = key_start;
             while j < bytes.len() {
@@ -49,7 +50,7 @@ pub(super) fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
             }
             let key = unescape(&result[key_start..j]);
 
-            // 寻找 =
+            // Look for =
             let mut k = j + 1;
             while k < bytes.len() && bytes[k] == b' ' {
                 k += 1;
@@ -67,7 +68,7 @@ pub(super) fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
                 continue;
             }
 
-            // 解析 value
+            // Parse the value
             let val_start = k + 1;
             let mut m = val_start;
             while m < bytes.len() {
@@ -94,7 +95,7 @@ pub(super) fn parse_ask_user_pairs(result: &str) -> Vec<(String, String)> {
     pairs
 }
 
-/// 渲染 ask_user 工具调用的 Q&A 结果
+/// Renders the Q&A result of a question tool call
 pub(super) fn render_ask_user_result(
     arguments: &str,
     result: &str,
@@ -130,7 +131,7 @@ pub(super) fn render_ask_user_result(
 
             let connector = if qi == total - 1 { "└" } else { "├" };
 
-            // Q 行
+            // Q line
             let q_label = "Q: ";
             let q_w = detail_w.saturating_sub(q_label.len());
             let q_wrapped = wrap_text(question, q_w.max(1) as u16);
@@ -146,7 +147,7 @@ pub(super) fn render_ask_user_result(
                 ]));
             }
 
-            // A 行
+            // A line
             let a_label = "A: ";
             let a_w = detail_w.saturating_sub(a_label.len());
             let a_wrapped = wrap_text(answer, a_w.max(1) as u16);
@@ -164,7 +165,7 @@ pub(super) fn render_ask_user_result(
             }
         }
     } else {
-        // 回退：无参数时直接显示原始键值对
+        // Fallback: when there are no arguments, show the raw key-value pairs directly
         let total = pairs.len();
         for (qi, (k, v)) in pairs.iter().enumerate() {
             let connector = if qi == total - 1 { "└" } else { "├" };

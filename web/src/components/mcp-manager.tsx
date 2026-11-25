@@ -1,5 +1,7 @@
-// MCP 服务器管理面板：内联双栏视图（左列表 + 右详情/编辑器），替换聊天区渲染。
-// 支持新建/编辑/删除/重连状态展示；保存后后台重连并自动注册工具。
+// MCP servers panel: inline two-pane view (left list + right detail/editor) that
+// replaces the chat area rendering.
+// Supports create/edit/delete/reconnect status; after saving it reconnects in the
+// background and auto-registers tools.
 import { useEffect, useState } from "react";
 import {
   Globe,
@@ -24,7 +26,7 @@ import { cn } from "../lib/utils";
 
 type Editor = { mode: "create" } | { mode: "edit"; server: McpServerEntry };
 
-/** 「KEY=VALUE / KEY: VALUE」多行文本 ↔ Record 互转 */
+/** Convert multi-line "KEY=VALUE / KEY: VALUE" text to/from a Record */
 function parseLines(text: string, sep: "=" | ":"): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
@@ -66,7 +68,7 @@ function TransportBadge({ transport }: { transport: string }) {
   );
 }
 
-/* ── 新建 / 编辑表单 ────────────────────────────────────────── */
+/* ── Create / edit form ────────────────────────────────────── */
 function McpForm({
   editor,
   onDone,
@@ -128,7 +130,7 @@ function McpForm({
       if (isCreate) {
         await createMcpServer(input);
       } else {
-        // input.name 与原名不同即改名（store 内转换为 new_name）
+        // A different input.name means a rename (converted to new_name in the store)
         await updateMcpServer(edit!.name, input);
       }
       onDone(input.name);
@@ -298,7 +300,7 @@ function McpForm({
   );
 }
 
-/** schema 节点的类型标记（array/items、enum 等展开为紧凑文本） */
+/** Type label for a schema node (array/items, enum, etc. expanded into compact text) */
 function schemaTypeLabel(node: JsonSchemaNode): string {
   if (node.type) {
     if (node.type === "array" && node.items?.type) {
@@ -311,7 +313,7 @@ function schemaTypeLabel(node: JsonSchemaNode): string {
   return "any";
 }
 
-/** 参数类型徽章 */
+/** Parameter type badge */
 function TypeBadge({ node }: { node: JsonSchemaNode }) {
   return (
     <span className="shrink-0 rounded bg-primary/[0.08] px-1.5 py-px font-mono text-[10px] leading-4 text-primary/90">
@@ -320,7 +322,7 @@ function TypeBadge({ node }: { node: JsonSchemaNode }) {
   );
 }
 
-/** 必填徽章 */
+/** Required badge */
 function RequiredBadge() {
   return (
     <span className="shrink-0 rounded bg-warning/10 px-1 py-px text-[10px] leading-4 font-medium text-warning">
@@ -329,9 +331,10 @@ function RequiredBadge() {
   );
 }
 
-/** 工具参数渲染：解析 JSON Schema 的 properties / required。
- *  三列 grid（名称 | 徽章 | 描述）跨行对齐；名称列 max-content
- *  自动取最长参数名实际宽度（max-w 截断超长名称）。 */
+/** Tool parameter rendering: parses a JSON Schema's properties / required.
+ *  Three-column grid (name | badges | description) aligned across rows; the name
+ *  column uses max-content to size to the longest parameter name (max-w
+ *  truncates over-long names). */
 function ToolParams({ schema }: { schema: JsonSchemaNode }) {
   const props = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
@@ -369,7 +372,7 @@ function ToolParams({ schema }: { schema: JsonSchemaNode }) {
   );
 }
 
-/* ── 服务器详情 ─────────────────────────────────────────────── */
+/* ── Server detail ─────────────────────────────────────────── */
 function McpDetail({
   server,
   onEdit,
@@ -421,7 +424,7 @@ function McpDetail({
         </div>
       </div>
 
-      {/* 配置概览 */}
+      {/* Config overview */}
       <div className="hlx-code my-3 text-xs leading-relaxed">
         {server.transport === "stdio" ? (
           <>
@@ -453,7 +456,7 @@ function McpDetail({
         )}
       </div>
 
-      {/* 工具列表：卡片式，名称 + 描述 + 参数分区 */}
+      {/* Tool list: card style, name + description + parameters section */}
       {server.tool_details.length > 0 ? (
         <>
           <p className="mb-1.5 text-xs font-medium text-muted-foreground">
@@ -490,7 +493,7 @@ function McpDetail({
   );
 }
 
-/* ── 主面板 ─────────────────────────────────────────────────── */
+/* ── Main panel ────────────────────────────────────────────── */
 export function McpManager() {
   const servers = useApp((s) => s.mcpServers);
   const mcpError = useApp((s) => s.mcpError);
@@ -511,12 +514,12 @@ export function McpManager() {
     setPendingSelect(null);
   };
 
-  // Esc：编辑/删除中先退出当前子状态，否则回到聊天视图
+  // Esc: while editing/deleting, exit the sub-state first, otherwise return to the chat view
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (anyDialogOpen()) return; // 全局弹窗优先：Esc 只关弹窗，不切视图
-      if (deleting) return; // 删除确认弹窗自行处理
+      if (anyDialogOpen()) return; // Global dialogs win: Esc closes the dialog, not the view
+      if (deleting) return; // Handled by the delete confirm dialog itself
       if (editor) setEditor(null);
       else close();
     };
@@ -525,7 +528,7 @@ export function McpManager() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, deleting]);
 
-  // 保存后按名称选中目标服务器
+  // After saving, select the target server by name
   useEffect(() => {
     if (!pendingSelect) return;
     const hit = servers.find((s) => s.name === pendingSelect);
@@ -558,7 +561,7 @@ export function McpManager() {
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
-      {/* 顶栏 */}
+      {/* Top bar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/40 px-4 py-3">
         <Plug className="size-4.5 shrink-0 text-primary" />
         <h2 className="mr-2 text-[15px] font-semibold">MCP 服务器</h2>
@@ -590,9 +593,9 @@ export function McpManager() {
         </button>
       </div>
 
-      {/* 双栏主体 */}
+      {/* Two-column main area */}
       <div className="flex min-h-0 flex-1">
-        {/* 左：服务器列表 */}
+        {/* Left: server list */}
         <div className="hlx-input-scroll w-64 shrink-0 space-y-0.5 overflow-y-auto border-r border-border/40 p-2">
           {mcpError ? (
             <div className="flex flex-col items-center gap-2.5 px-3 py-10 text-center">
@@ -662,7 +665,7 @@ export function McpManager() {
           )}
         </div>
 
-        {/* 右：详情 / 编辑器 */}
+        {/* Right: detail / editor */}
         <div className="min-w-0 flex-1 p-5">
           {editor ? (
             <McpForm
@@ -699,7 +702,7 @@ export function McpManager() {
         </div>
       </div>
 
-      {/* 删除二次确认 */}
+      {/* Delete confirmation */}
       {deleting && (
         <Overlay onClose={() => !deletingBusy && setDeleting(null)}>
           <div className="mb-3 flex items-center gap-2.5">

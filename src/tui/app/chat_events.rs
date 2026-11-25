@@ -394,10 +394,10 @@ impl App {
                 subagent_name,
                 subagent_index,
             } => {
-                // GUI programs in the bash subprocess tree may bypass pipes and write straight to the
-                // console screen (see the CREATE_NO_WINDOW comment in agent/tools.rs); once the run
+                // GUI programs in the shell subprocess tree may bypass pipes and write straight to the
+                // console screen (see the CREATE_NO_WINDOW comment in agent/tools/shell.rs); once the run
                 // finishes, force a full repaint to clear any leftover dirty screen regions
-                if name == "bash" {
+                if name == "shell" {
                     self.render.force_clear = true;
                 }
                 if subagent_name.is_some() {

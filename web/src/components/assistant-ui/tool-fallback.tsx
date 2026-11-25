@@ -1,4 +1,5 @@
-// 工具调用：assistant-ui 官方 base 样式（ToolFallback），适配 hailux result.output/display
+// Tool calls: assistant-ui official base styling (ToolFallback), adapted to
+// hailux result.output/display
 import { createContext, useContext, useState, type ReactNode } from "react";
 import {
   AlertCircle,
@@ -41,17 +42,18 @@ interface DiffDisplay {
   hunks: DiffHunk[];
 }
 
-/** diff 展示（对齐 TUI 渲染：行号 gutter + 符号配色 + hunk 头） */
+/** Diff view (aligned with TUI rendering: line-number gutter + sign colors +
+ *  hunk headers) */
 function DiffView({ display }: { display: string }) {
   let v: DiffDisplay | null = null;
   try {
     const p = JSON.parse(display) as DiffDisplay;
     if (p?.format === "diff" && Array.isArray(p.hunks)) v = p;
   } catch {
-    // 忽略解析失败
+    // Ignore parse failures
   }
 
-  // 数据异常（缺 hunks 字段等）：原样文本展示
+  // Malformed data (missing hunks field etc.): show the raw text
   if (!v) {
     return (
       <pre className="bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
@@ -83,7 +85,8 @@ function DiffView({ display }: { display: string }) {
         @@ -{h.old_start ?? 0},{oldLen} +{h.new_start ?? 0},{newLen} @@
       </div>,
     );
-    // 行号推进规则对齐 TUI：delete 走旧行号，insert/context 走新行号
+    // Line-number advance rule aligned with the TUI: deletes use old line
+    // numbers, insert/context use new ones
     let oc = h.old_start;
     let nc = h.new_start;
     for (let ci = 0; ci < h.changes.length; ci++) {
@@ -134,14 +137,15 @@ const TODO_ICONS: Record<string, { icon: string; className: string }> = {
   cancelled: { icon: "✗", className: "text-muted-foreground/60" },
 };
 
-/** todo_write 展示（对齐 TUI TodoCell：checkbox 风格列表，不展示入参/出参原文） */
+/** todo_write view (aligned with the TUI TodoCell: checkbox-style list, no
+ *  raw args/result shown) */
 function TodoView({ argsText, running }: { argsText: string; running: boolean }) {
   let todos: TodoItemData[] = [];
   try {
     const args = JSON.parse(argsText) as { todos?: TodoItemData[] };
     if (Array.isArray(args.todos)) todos = args.todos;
   } catch {
-    // 流式期间入参可能不完整，先按空列表渲染
+    // Args may be incomplete while streaming; render an empty list for now
   }
 
   const done = todos.filter(
@@ -162,7 +166,7 @@ function TodoView({ argsText, running }: { argsText: string; running: boolean })
           •
         </span>
         <span className="font-medium">
-          {running && !allDone ? "Updating" : "Updated"} plan
+          {running && !allDone ? "Updating" : "Updated"} todo
         </span>
         {todos.length > 0 && (
           <span className="text-muted-foreground/70 text-xs tabular-nums">
@@ -205,9 +209,9 @@ const statusIconMap = {
   "requires-action": AlertCircle,
 } as const;
 
-/** 内置工具集（src/agent/tools.rs）：标题不加"使用工具："前缀 */
+/** Builtin tool set (src/agent/tools): titles get no "使用工具：" prefix */
 const BUILTIN_TOOLS = new Set([
-  "bash",
+  "shell",
   "read",
   "edit",
   "write",
@@ -215,13 +219,15 @@ const BUILTIN_TOOLS = new Set([
   "glob",
   "web_fetch",
   "todo_write",
-  "ask_user",
+  "question",
   "skill",
   "task",
 ]);
 
-/** 文件展示名：工作目录内 → 相对路径；目录外 → 全路径。
- *  统一 `\`→`/` 后做大小写不敏感前缀比较（Windows），前缀去尾分隔符避免误匹配兄弟目录 */
+/** File display name: inside the work dir → relative path; outside → full
+ *  path.
+ *  Normalize `\`→`/` then do a case-insensitive prefix comparison (Windows);
+ *  the prefix has trailing separators stripped to avoid matching sibling dirs */
 function displayPath(filePath: string, workDir: string): string {
   const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
   const wd = norm(workDir);
@@ -233,8 +239,8 @@ function displayPath(filePath: string, workDir: string): string {
   return filePath;
 }
 
-/** 从 ask_user 结果解析 "question"="answer" 对（对齐 TUI parse_ask_user_pairs：
- *  引号扫描 + `\\`/`\"` 转义还原 + key=value 配对） */
+/** Parses "question"="answer" pairs from a question result (mirrors TUI
+ *  parse_ask_user_pairs: quote scanning + `\\`/`\"` unescaping + key=value pairs) */
 function parseAskUserPairs(result: string): [string, string][] {
   const pairs: [string, string][] = [];
   let i = 0;
@@ -244,7 +250,7 @@ function parseAskUserPairs(result: string): [string, string][] {
     let val = "";
     while (j < result.length) {
       if (result[j] === "\\") {
-        // `\\`→`\`、`\"`→`"`；孤立反斜杠（异常输入/旧数据）原样保留
+        // `\\`→`\`, `\"`→`"`; lone backslashes (bad input/old data) stay as-is
         const next = result[j + 1];
         if (next === "\\" || next === '"') {
           val += next;
@@ -264,7 +270,7 @@ function parseAskUserPairs(result: string): [string, string][] {
     if (result[i] === '"') {
       const key = readQuoted();
       if (key === null) break;
-      // 跳过空白找 =
+      // Skip whitespace looking for =
       while (i < result.length && result[i] === " ") i++;
       if (result[i] !== "=") continue;
       i++;
@@ -278,7 +284,7 @@ function parseAskUserPairs(result: string): [string, string][] {
   return pairs;
 }
 
-/** ask_user 结果展示（对齐 TUI render_ask_user_result：Q&A 列表 / cancelled 灰显） */
+/** question result view (mirrors TUI render_ask_user_result: Q&A list / cancelled greyed out) */
 function AskUserView({ result }: { result: string }) {
   if (result.includes("[User Cancelled]")) {
     return (
@@ -303,10 +309,12 @@ function AskUserView({ result }: { result: string }) {
   );
 }
 
-/** 连续工具调用合并卡片内的行渲染标记：嵌入模式去掉外层卡片边框 */
+/** Row-render marker inside the merged consecutive-tool-calls card: embedded
+ *  mode drops the outer card border */
 const ToolGroupContext = createContext(false);
 
-/** 连续工具调用合并卡片：头部展示调用次数，内部为各工具的折叠行 */
+/** Merged card for consecutive tool calls: the header shows the call count,
+ *  the body holds collapsible rows per tool */
 export function ToolGroup({
   count,
   running,
@@ -318,7 +326,8 @@ export function ToolGroup({
 }) {
   const [open, setOpen] = useState(false);
   const [userToggled, setUserToggled] = useState(false);
-  // 运行中默认展开，结束后收起；用户手动切换后尊重手动状态
+  // Expanded by default while running, collapsed once done; after the user
+  // toggles manually, respect that manual state
   const effectiveOpen = userToggled ? open : running;
   const Icon = running ? Loader2 : Check;
 
@@ -392,18 +401,17 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
   const inGroup = useContext(ToolGroupContext);
   const [open, setOpen] = useState(false);
   const elapsedMs = useToolCallElapsed();
-  // 订阅式读取（todo_write/ask_user 早退分支之前调用，保证 Hook 顺序稳定）
+  // Subscription read: called before the todo_write/question early returns, keeping hook order stable
   const workDir = useApp((s) => s.workDir);
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
 
-  // todo_write：不展示入参/出参，渲染为 checkbox 风格 todo 列表
+  // todo_write: no raw args/result shown, rendered as a checkbox-style todo list
   if (toolName === "todo_write") {
     return <TodoView argsText={argsText ?? ""} running={isRunning} />;
   }
 
-  // ask_user：运行中显示 Asking，完成后渲染 Q&A 列表（不展示原始入参/出参）
-  if (toolName === "ask_user") {
+  if (toolName === "question") {
     const text = (result as ToolOutput | undefined)?.output;
     return (
       <div
@@ -429,20 +437,21 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
 
   const Icon = statusIconMap[statusType as keyof typeof statusIconMap] ?? Check;
 
-  // 入参解析（流式期间可能不完整，容错为空）
+  // Arg parsing (may be incomplete while streaming; fall back to empty)
   let args: Record<string, any> = {};
   try {
     args = JSON.parse(argsText ?? "{}") as Record<string, any>;
   } catch {
-    // 流式期间入参可能不完整
+    // Args may be incomplete while streaming
   }
 
-  // 标题：内置工具不加"使用工具："前缀。结构 = 动词（小号）+ 宾语（主体）。
-  // 文件工具（edit/write/read）展示路径：工作目录内 → 相对路径，目录外 → 全路径；
-  // grep/glob 展示 pattern + 搜索范围（path/include）；
-  // skill 对齐 TUI 显示 "Load skill {name}"；其余内置工具按字段优先级取摘要
-  // （bash.command / web_fetch.url / task.description）；未知工具保留前缀。
-  // 宾语缺失（入参未流到/解析失败）时仅展示动词，避免与动词重复
+  // Title: builtin tools get no "使用工具：" prefix. Structure = verb (small) + object (main).
+  // File tools (edit/write/read) show the path: in-workdir → relative, outside → full;
+  // grep/glob show pattern + search scope (path/include);
+  // skill mirrors the TUI's "Load skill {name}"; other builtin tools take a
+  // summary by field priority (shell.command_string / web_fetch.url / task.description);
+  // unknown tools keep the prefix.
+  // Missing object (args not streamed yet / parse failure) shows the verb only.
   let verb: string;
   let object: string | null;
   let suffix: string | null = null;
@@ -456,7 +465,8 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
   } else if (toolName === "grep" || toolName === "glob") {
     verb = toolName;
     object = typeof args.pattern === "string" ? args.pattern : null;
-    // 搜索范围：path（grep/glob）或 include（grep 文件过滤），仅非默认时展示
+    // Search scope: path (grep/glob) or include (grep file filter), shown
+    // only when non-default
     const scope =
       typeof args.path === "string" && args.path && args.path !== "."
         ? args.path
@@ -465,10 +475,11 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
           : null;
     if (scope) suffix = scope;
   } else if (BUILTIN_TOOLS.has(toolName)) {
-    // 其余内置工具：显式字段优先级取摘要，不依赖 JSON 键序
+    // Other builtin tools: take a summary by explicit field priority, not
+    // JSON key order
     verb = toolName;
     object =
-      (typeof args.command === "string" && args.command) ||
+      (typeof args.command_string === "string" && args.command_string) ||
       (typeof args.url === "string" && args.url) ||
       (typeof args.description === "string" && args.description) ||
       null;
@@ -527,7 +538,8 @@ export const ToolFallback: ToolCallMessagePartComponent = ({
         />
       </button>
 
-      {/* 展开内容高度上限（长输出不撑爆页面），超出内部滚动 */}
+      {/* Expanded content height cap (long output must not blow up the page);
+          scroll internally beyond it */}
       {open && (
         <div className="flex max-h-[60vh] flex-col gap-2 overflow-y-auto ps-6 pt-1 pb-2">
           {argsText && (

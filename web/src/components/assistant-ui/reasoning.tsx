@@ -1,4 +1,5 @@
-// 思维过程：assistant-ui 官方 base 样式（Reasoning 折叠面板，Markdown 渲染）
+// Reasoning: assistant-ui official base styling (Reasoning collapsible panel,
+// Markdown rendering)
 import {
   useEffect,
   useLayoutEffect,
@@ -15,7 +16,9 @@ import {
 import { cn } from "../../lib/utils";
 import type { AssistantMeta } from "../../runtime/hailux-runtime";
 
-/** 思考计时：进行中实时跳动，结束后展示本分段自己的耗时（对齐 TUI：每块 AgentThinking 独立 think_ms） */
+/** Think timer: ticks live while in progress; when done, shows that segment's
+ *  own duration (aligned with the TUI: each AgentThinking block has its own
+ *  think_ms) */
 function ThinkTimer({
   live,
   startIndex,
@@ -75,12 +78,15 @@ function ReasoningRoot({
 }) {
   const [open, setOpen] = useState(false);
   const [userToggled, setUserToggled] = useState(false);
-  // 流式期间默认展开，结束后收起；用户手动切换后尊重手动状态
+  // Expanded by default while streaming, collapsed once done; after the user
+  // toggles manually, respect that manual state
   const effectiveOpen = userToggled ? open : streaming;
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 流式输出时内容更新后跟随滚动到底部（内层 max-h 容器高度不变，
-  // 外层聊天区感知不到尺寸变化）；用户向上翻超过阈值后停止跟随
+  // While streaming, follow-scroll to the bottom after content updates (the
+  // inner max-h container's height does not change, so the outer chat area
+  // perceives no size change); stop following once the user scrolls up past
+  // the threshold
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || !streaming) return;

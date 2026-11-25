@@ -1,7 +1,8 @@
-//! 用量统计全屏页面：汇总卡 + 每日条形图 + 按模型/项目聚合 + 最近请求明细。
-//! 数据来自 messages 表中带 usage 的 assistant 行（一次 LLM 请求一行）。
-//! 交互：↑↓/PgUp/PgDn/滚轮 移动明细选中，←→ 切时间窗口，Tab 快速切换全部/当前项目，
-//! p 打开项目选择器，r 刷新，Esc 返回。
+//! Usage statistics full-screen page: summary card + daily bar chart + per-model/project
+//! aggregates + recent request details.
+//! Data comes from assistant rows carrying usage in the messages table (one row per LLM request).
+//! Interaction: ↑↓/PgUp/PgDn/wheel move the details selection, ←→ switch the time window,
+//! Tab quickly toggles all/current project, p opens the project picker, r refreshes, Esc goes back.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -11,38 +12,38 @@ use crate::storage::{
     DailyUsage, ModelUsage, ProjectUsage, UsageRecord, UsageSummary, WorkDirInfo,
 };
 
-/// 可切换的时间窗口（天；0 = 全部）
+/// Switchable time windows (days; 0 = all)
 pub const STATS_WINDOWS: [u32; 4] = [7, 30, 90, 0];
 
-/// 页面数据快照（打开/刷新时一次性查询）
+/// Snapshot of the page data (queried in one shot on open/refresh)
 #[derive(Debug, Default, Clone)]
 pub struct StatsData {
-    /// 当前窗口 + 范围内的汇总
+    /// Summary for the current window + scope
     pub summary: UsageSummary,
-    /// 同范围的全量汇总（对比展示）
+    /// Full summary over the same scope (shown for comparison)
     pub total: UsageSummary,
     pub daily: Vec<DailyUsage>,
     pub by_model: Vec<ModelUsage>,
     pub by_project: Vec<ProjectUsage>,
     pub recent: Vec<UsageRecord>,
-    /// 统计窗口（天；0 = 全部）
+    /// Statistics window (days; 0 = all)
     pub days: u32,
 }
 
 pub struct StatsViewer<'a> {
     pub data: &'a StatsData,
     pub selected_index: usize,
-    /// 项目筛选；None = 全部项目
+    /// Project filter; None = all projects
     pub work_dir: Option<&'a str>,
-    /// 已知项目列表（选择器数据源）
+    /// Known project list (data source for the picker)
     pub projects: &'a [WorkDirInfo],
-    /// 选择器打开时的选中项
+    /// Selected entry while the picker is open
     pub picker_index: Option<usize>,
 }
 
 impl<'a> StatsViewer<'a> {
     pub fn render(self, area: Rect, buf: &mut Buffer) {
-        // 全屏布局：标题(1) 汇总(3) 中部双栏(flex) 最近请求(flex) 帮助(1)
+        // Full-screen layout: title(1) summary(3) middle 2 columns(flex) recent(flex) help(1)
         let [
             header_area,
             summary_area,
@@ -169,7 +170,8 @@ impl<'a> StatsViewer<'a> {
         self.render_side(side_area, buf);
     }
 
-    /// 每日条形图：每根柱分三段 —— ▓ 缓存命中(cyan) + ░ 未命中输入(green) + █ 输出(yellow)
+    /// Daily bar chart: each bar has three segments — ▓ cache hit (cyan) +
+    /// ░ uncached input (green) + █ output (yellow)
     fn render_daily(&self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(Span::styled(
@@ -198,7 +200,7 @@ impl<'a> StatsViewer<'a> {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
-            // 固定布局：日期(7) + 条形(BAR_W) + 总量(右对齐9) + 次数(右对齐8)
+            // Fixed layout: date(7) + bar(BAR_W) + total(right 9) + requests(right 8)
             let bar_width = (area.width as usize).saturating_sub(26).max(4);
             let max_total = tail
                 .iter()
@@ -238,7 +240,7 @@ impl<'a> StatsViewer<'a> {
         Paragraph::new(lines).render(area, buf);
     }
 
-    /// 右栏：按模型 + 按项目聚合
+    /// Right column: aggregates by model + by project
     fn render_side(&self, area: Rect, buf: &mut Buffer) {
         let height = area.height as usize;
         let mut lines: Vec<Line> = Vec::new();
@@ -246,7 +248,7 @@ impl<'a> StatsViewer<'a> {
             .fg(Color::Gray)
             .add_modifier(Modifier::BOLD);
 
-        // 按模型（预算：一半行数）
+        // By model (budget: half of the rows)
         lines.push(Line::from(Span::styled(" 按模型", section)));
         let model_budget = (height.saturating_sub(4) / 2).max(1);
         if self.data.by_model.is_empty() {
@@ -287,7 +289,7 @@ impl<'a> StatsViewer<'a> {
         }
 
         lines.push(Line::from(""));
-        // 按项目（剩余行数）
+        // By project (remaining rows)
         lines.push(Line::from(Span::styled(" 按项目", section)));
         let used = lines.len();
         let project_budget = height.saturating_sub(used + 1).max(1);
@@ -326,8 +328,8 @@ impl<'a> StatsViewer<'a> {
         Paragraph::new(lines).render(area, buf);
     }
 
-    /// 最近请求明细表：时间 / 模型 / 输入 / 命中 / 未命中 / 输出 / 项目
-    /// 表头与数据行用同一组 pad 函数构造，保证列严格对齐。
+    /// Recent request detail table: time / model / input / hit / miss / output / project.
+    /// Header and data rows are built with the same pad functions to keep columns strictly aligned.
     fn render_recent(&self, area: Rect, buf: &mut Buffer) {
         let dark = Style::default().fg(Color::DarkGray);
         let mut lines: Vec<Line> = Vec::new();
@@ -337,7 +339,7 @@ impl<'a> StatsViewer<'a> {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         )));
-        // 表头：与数据行同构 —— 选择符(2) + 时间(12+2) + 模型(18+2) + 四个数字列(8+2)
+        // Header: mirrors data rows — selector(2) + time(12+2) + model(18+2) + 4 numeric cols(8+2)
         lines.push(Line::from(vec![
             Span::styled("   ", dark),
             Span::styled(pad_right("时间", 12), dark),
@@ -427,7 +429,8 @@ impl<'a> StatsViewer<'a> {
         .render(area, buf);
     }
 
-    /// 项目选择器弹层：居中列表（全部项目 + 各项目名 + 会话数/最近活跃/路径）
+    /// Project picker overlay: centered list (all projects + each project's name +
+    /// session count / last active / path)
     fn render_picker(&self, area: Rect, buf: &mut Buffer) {
         let Some(selected) = self.picker_index else {
             return;
@@ -436,7 +439,7 @@ impl<'a> StatsViewer<'a> {
 
         let dialog_width = (area.width as usize).min(80);
         let list_rows = total.min(10);
-        // 标题(1) + 列表(list_rows) + 空行(1) + 帮助(1) + 边框(2)
+        // title(1) + list(list_rows) + blank line(1) + help(1) + borders(2)
         let dialog_height = (list_rows + 5).min(area.height as usize);
         let dialog_x = (area.width as usize).saturating_sub(dialog_width) / 2;
         let dialog_y = (area.height as usize).saturating_sub(dialog_height) / 2;
@@ -477,7 +480,7 @@ impl<'a> StatsViewer<'a> {
         let mut lines: Vec<Line> = Vec::new();
         for i in 0..total {
             if i < first_visible || lines.len() >= visible {
-                // 顶部/底部截断提示
+                // top/bottom truncation hint
                 if i == first_visible && first_visible > 0 && lines.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "  ↑ …",
@@ -558,8 +561,9 @@ impl<'a> StatsViewer<'a> {
     }
 }
 
-/// 按模型/项目行共享的“命中”列段：Some = `命中 xx.x%`，None = 等宽空串占位，
-/// 两行共用同一 format 模板，保证 out 列严格对齐。
+/// Shared "命中" (hit) column segment for the by-model/project rows: Some = `命中 xx.x%`, None =
+/// a same-width blank placeholder; both rows share one format template so the out column
+/// stays strictly aligned.
 fn hit_col(hit: Option<f64>) -> String {
     match hit {
         Some(h) => format!("命中 {:>5.1}%", h),
@@ -567,7 +571,7 @@ fn hit_col(hit: Option<f64>) -> String {
     }
 }
 
-/// 按显示宽度右对齐填充（数字列）
+/// Right-align padding by display width (numeric columns)
 fn pad_display(s: &str, width: usize) -> String {
     let w = UnicodeWidthStr::width(s);
     if w >= width {
@@ -577,7 +581,7 @@ fn pad_display(s: &str, width: usize) -> String {
     }
 }
 
-/// 按显示宽度左对齐填充（名称列）
+/// Left-align padding by display width (name columns)
 fn pad_right(s: &str, width: usize) -> String {
     let w = UnicodeWidthStr::width(s);
     if w >= width {
@@ -587,7 +591,7 @@ fn pad_right(s: &str, width: usize) -> String {
     }
 }
 
-/// 取路径最后一段作为项目名
+/// Take the last path segment as the project name
 fn tail_dir(path: &str) -> String {
     path.rsplit(['/', '\\'])
         .find(|s| !s.is_empty())
@@ -605,8 +609,9 @@ fn format_tokens(n: i64) -> String {
     }
 }
 
-/// 按显示宽度截断（CJK 占 2 列）：超出预算时截到 ≤ max_len-1 宽再补 `…`，
-/// 保证结果宽度 ≤ max_len，与 pad_right/pad_display 的宽度语义一致。
+/// Truncate by display width (CJK chars take 2 columns): when over budget, cut to a width
+/// ≤ max_len-1 and append `…`, guaranteeing the result width ≤ max_len, consistent with
+/// the width semantics of pad_right/pad_display.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_len {
         return s.to_string();
@@ -615,7 +620,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     let mut width = 0;
     for ch in s.chars() {
         let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        // 预留 1 列给省略号
+        // reserve 1 column for the ellipsis
         if width + w > max_len.saturating_sub(1) {
             break;
         }
@@ -642,25 +647,25 @@ mod tests {
 
     #[test]
     fn truncate_cjk_by_display_width() {
-        // 9 个 CJK 字符 = 18 显示宽 > 预算 18？恰好等于，不截断
+        // 9 CJK chars = 18 display width, budget 18: exactly equal, no truncation
         assert_eq!(truncate_str("一二三四五六七八九", 18), "一二三四五六七八九");
-        // 10 字符 = 20 宽 > 18：截 8 字符（16 宽）+ …（1）= 17 ≤ 18
+        // 10 chars = 20 width > 18: keep 8 chars (16 width) + … (1) = 17 ≤ 18
         assert_eq!(
             truncate_str("一二三四五六七八九十", 18),
             "一二三四五六七八…"
         );
-        // 奇数预算：截 8 字符 + … = 17
+        // odd budget: keep 8 chars + … = 17
         assert_eq!(
             truncate_str("一二三四五六七八九十", 17),
             "一二三四五六七八…"
         );
-        // 混合：ab(2) + 一(2) = 4 > 3，在 CJK 前断开
+        // mixed: ab(2) + 一(2) = 4 > 3, break before the CJK char
         assert_eq!(truncate_str("ab一二", 4), "ab…");
     }
 
     #[test]
     fn truncated_result_fits_pad_budget() {
-        // 截断结果宽度必须 ≤ 预算，pad_right 才能正确补齐对齐列
+        // truncated result width must be ≤ budget so pad_right fills the aligned column correctly
         let long = "项目名".repeat(10);
         let t = truncate_str(&long, 18);
         assert!(UnicodeWidthStr::width(t.as_str()) <= 18);

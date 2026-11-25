@@ -27,7 +27,7 @@ Identify the real entrypoints and the boundaries between major components. For e
 
 ## 3. Verify before asserting
 
-Use the `bash` tool for read-only checks of anything you plan to write down (for example, that the documented test command actually works). If a claim cannot be verified, omit it. When documentation contradicts executable behavior, trust the executable behavior.
+Use the `shell` tool for read-only checks of anything you plan to write down (for example, that the documented test command actually works). If a claim cannot be verified, omit it. When documentation contradicts executable behavior, trust the executable behavior.
 
 ## 4. Write or update the file
 

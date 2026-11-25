@@ -14,14 +14,17 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolExecuteError, external_dir_request, resolve_tool_path};
 use crate::permission::PermissionRequest;
-use crate::permission::bash_arity::extract_bash_pattern;
-use crate::permission::bash_scan;
 use crate::permission::resolve_permission_path;
+use crate::permission::shell_arity::extract_shell_pattern;
+use crate::permission::shell_scan;
 
-/// 智能解码子进程输出：中文 Windows 上 powershell.exe 重定向管道按系统 ANSI 代码页
-/// （GBK）编码输出，直接按 UTF-8 解码会产生乱码。策略：
-/// 1. 通过严格 UTF-8 校验 → 原样返回（纯 ASCII / UTF-8 输出零变化）；
-/// 2. 否则比较 UTF-8 lossy 与 GBK 两种解码结果中的 U+FFFD 数量，取更少者（平手取 UTF-8）。
+/// Smartly decodes subprocess output: on Chinese Windows, powershell.exe encodes
+/// redirected pipe output in the system ANSI code page (GBK); decoding it directly
+/// as UTF-8 produces mojibake. Strategy:
+/// 1. Passes strict UTF-8 validation → return as-is (pure ASCII / UTF-8 output
+///    is unchanged);
+/// 2. Otherwise compare the U+FFFD counts of the UTF-8 lossy and GBK decodings
+///    and take the one with fewer errors (ties go to UTF-8).
 pub(super) fn decode_output(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
@@ -46,50 +49,57 @@ fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
-/// 从 bash 工具参数中提取 `command_string`。
-pub(crate) fn bash_command_from_arguments(arguments: &str) -> Option<String> {
+/// Extracts `command_string` from shell tool arguments.
+pub(crate) fn shell_command_from_arguments(arguments: &str) -> Option<String> {
     let args: Value = serde_json::from_str(arguments).ok()?;
     args["command_string"].as_str().map(str::to_string)
 }
 
-/// 从 bash 工具参数中提取可选的 `workdir`。
-fn bash_workdir_from_arguments(arguments: &str) -> Option<String> {
+/// Extracts the optional `workdir` from shell tool arguments.
+fn shell_workdir_from_arguments(arguments: &str) -> Option<String> {
     let args: Value = serde_json::from_str(arguments).ok()?;
     args["workdir"].as_str().map(str::to_string)
 }
 
-/// plan 模式下的 bash 只读拦截：返回 `Some(拒绝原因)` 时禁止执行。
-/// 只读判定 fail-closed（无法明确判定为只读即拒绝）。
-pub(crate) fn plan_mode_bash_denial(arguments: &str) -> Option<String> {
-    let command = bash_command_from_arguments(arguments)?;
-    if crate::permission::bash_readonly::is_read_only_bash_command(&command) {
+/// Plan-mode read-only gate for shell: `Some(denial reason)` forbids execution.
+/// The read-only check is fail-closed (not provably read-only means denied).
+pub(crate) fn plan_mode_shell_denial(arguments: &str) -> Option<String> {
+    let command = shell_command_from_arguments(arguments)?;
+    if crate::permission::shell_readonly::is_read_only_shell_command(&command) {
         None
     } else {
         Some(format!(
-            "[Bash write operation blocked in plan mode: {command}. Plan mode is read-only; exit with /plan or Shift+Tab to execute.]"
+            "[Shell write operation blocked in plan mode: {command}. Plan mode is read-only; exit with /plan or Shift+Tab to execute.]"
         ))
     }
 }
 
-/// Windows CREATE_NO_WINDOW：让 shell 子进程获得一块隐藏的独立控制台。
-/// 若不加，pwsh 继承 hailux 的可见控制台，其启动的 GUI 子系统程序（浏览器等）
-/// 在自身没有有效 std 句柄时（如经 Start-Process/ShellExecute 启动）会走
-/// Chromium 式 AttachConsole(ATTACH_PARENT_PROCESS) + freopen("CONOUT$")，
-/// 把日志直接写进 hailux 所在控制台的当前屏幕缓冲区，污染备用屏幕上的 TUI
-/// （ratatui 是 diff 渲染，不会修复被外部写入的格子，脏区永久残留）。
-/// 隐藏控制台使这类写入不可见，管道捕获不受影响；配套 stdin 置空（见
-/// run_shell_command）防止子进程抢夺 TUI 键盘输入。
-/// 已知副作用：PowerShell 表格按隐藏控制台默认宽度（~120 列）排版；
-/// 实测在隐藏控制台内 resize 宽度行为不可靠（部分目标宽度直接失败，
-/// MaxWindowSize 与实际可设值自相矛盾），勿尝试在 prologue 中调整。
+/// Windows CREATE_NO_WINDOW: gives the shell subprocess a hidden console of its
+/// own. Without it, pwsh inherits hailux's visible console, and GUI-subsystem
+/// programs it launches (browsers etc.) that lack valid std handles of their own
+/// (e.g. when started via Start-Process/ShellExecute) take the Chromium-style
+/// AttachConsole(ATTACH_PARENT_PROCESS) + freopen("CONOUT$") route, writing logs
+/// straight into the current screen buffer of hailux's console and polluting the
+/// TUI on the alternate screen (ratatui renders by diff and will not repair cells
+/// written externally, so dirty areas stay permanently).
+/// The hidden console makes such writes invisible; pipe capture is unaffected.
+/// The paired stdin nulling (see run_shell_command) prevents the subprocess from
+/// stealing TUI keyboard input.
+/// Known side effect: PowerShell tables are laid out at the hidden console's
+/// default width (~120 columns); in practice resizing the width inside a hidden
+/// console is unreliable (some target widths fail outright, and MaxWindowSize
+/// contradicts the actually settable values), so do not try to adjust it in the
+/// prologue.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Windows shell 程序选择：优先 PowerShell 7+（pwsh.exe），未安装时回退
-/// powershell.exe。注意：pwsh 7 仅修复 PS→原生命令方向（$OutputEncoding 默认
-/// UTF-8）；native→PS 解码仍按 [Console]::OutputEncoding（默认系统 GBK），
-/// 因此两个版本都需要 WINDOWS_UTF8_PROLOGUE 强制双向 UTF-8。
-/// 探测结果进程内缓存，只查 PATH 中文件是否存在、不额外起进程。
+/// Windows shell program selection: prefer PowerShell 7+ (pwsh.exe), fall back
+/// to powershell.exe when it is not installed. Note: pwsh 7 only fixes the
+/// PS→native direction ($OutputEncoding defaults to UTF-8); native→PS decoding
+/// still follows [Console]::OutputEncoding (system GBK by default), so both
+/// versions need WINDOWS_UTF8_PROLOGUE to force UTF-8 in both directions.
+/// The probe result is cached in-process; it only checks for file existence on
+/// PATH, without spawning an extra process.
 #[cfg(windows)]
 pub(super) fn windows_shell_program() -> &'static str {
     static SHELL: OnceLock<&'static str> = OnceLock::new();
@@ -111,9 +121,10 @@ pub(super) fn windows_shell_program() -> &'static str {
     })
 }
 
-/// 探测当前 Windows shell 的版本描述（如 "PowerShell 7.4.6 (pwsh.exe)"），
-/// 注入 bash 工具提示词的 {SHELL_DESC} 占位符。进程内缓存、只探测一次；
-/// 启动进程失败时按 shell 程序名回退到主版本静态描述。
+/// Probes the current Windows shell's version description (e.g.
+/// "PowerShell 7.4.6 (pwsh.exe)") for the {SHELL_DESC} placeholder in the
+/// shell tool prompt. Cached in-process and probed only once; falls back to
+/// a static major-version description by program name when probing fails.
 #[cfg(windows)]
 fn windows_shell_description() -> String {
     let shell = windows_shell_program();
@@ -144,16 +155,23 @@ fn windows_shell_description() -> String {
     }
 }
 
-/// Windows 命令的 UTF-8 编码 prologue。powershell.exe 在中文 Windows 上按 GBK
-/// 解码原生命令的管道输出，再把自身管道输出重编码为 GBK —— 双重转码不可逆地
-/// 破坏非 GBK 字符（node/cargo 的 UTF-8 中文、✓ 等），事后任何解码启发式都无法还原。
-/// 从源头强制双向 UTF-8：
-/// - `[Console]::OutputEncoding`：PS 读取原生命令输出与自身输出均改按 UTF-8；
-/// - `$OutputEncoding`：修复反方向（PS 字符串传给原生命令，5.1 默认 ASCII 会把中文变 `?`）；
-/// - UTF8Encoding($false)：BOM-less，避免重定向输出头部多出 BOM 字节；
-/// - try/catch：个别宿主环境禁止修改控制台编码，失败不阻塞后续命令。
+/// UTF-8 encoding prologue for Windows commands. On Chinese Windows,
+/// powershell.exe decodes native commands' pipe output as GBK, then re-encodes
+/// its own pipe output as GBK — the double transcoding irreversibly corrupts
+/// non-GBK characters (node/cargo's UTF-8 Chinese text, ✓, etc.); no decoding
+/// heuristic afterwards can restore them. Forces UTF-8 in both directions at
+/// the source:
+/// - `[Console]::OutputEncoding`: switches both PS reading of native command
+///   output and PS's own output to UTF-8;
+/// - `$OutputEncoding`: fixes the reverse direction (PS strings passed to native
+///   commands; 5.1's ASCII default turns Chinese into `?`);
+/// - UTF8Encoding($false): BOM-less, avoiding extra BOM bytes at the head of
+///   redirected output;
+/// - try/catch: some host environments forbid changing the console encoding;
+///   failure must not block the subsequent commands.
 ///
-/// 注入发生在执行层：权限 / plan-mode / 展示仍基于原始命令，不受前缀污染。
+/// Injection happens at the execution layer: permissions / plan-mode / display
+/// remain based on the original command and are not polluted by the prefix.
 #[cfg(windows)]
 const WINDOWS_UTF8_PROLOGUE: &str = "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding } catch { }; ";
 
@@ -162,7 +180,8 @@ pub(super) fn wrap_windows_command(command: &str) -> String {
     format!("{WINDOWS_UTF8_PROLOGUE}{command}")
 }
 
-/// 组装 Windows shell 调用参数（含 UTF-8 prologue），执行与测试共用同一路径。
+/// Assembles the Windows shell invocation args (including the UTF-8 prologue);
+/// execution and tests share the same path.
 #[cfg(windows)]
 pub(super) fn windows_shell_command_args(command: &str) -> Vec<String> {
     vec![
@@ -174,35 +193,36 @@ pub(super) fn windows_shell_command_args(command: &str) -> Vec<String> {
     ]
 }
 
-/// 后台预热 shell 版本描述缓存，避免首次构建工具 schema 时
-/// 同步等待 shell 探测进程（约数百毫秒）。
+/// Prewarms the shell version description cache in the background, so the first
+/// tool-schema build does not synchronously wait on the shell probe process
+/// (several hundred milliseconds).
 #[cfg(windows)]
 pub fn prewarm_shell_description() {
     std::thread::spawn(|| {
-        let _ = BashTool.description();
+        let _ = ShellTool.description();
     });
 }
 
-pub struct BashTool;
+pub struct ShellTool;
 
-impl Tool for BashTool {
+impl Tool for ShellTool {
     fn name(&self) -> &str {
-        "bash"
+        "shell"
     }
 
     fn permission_category(&self) -> Option<&str> {
-        Some("bash")
+        Some("shell")
     }
 
     fn extract_permission(&self, arguments: &str, work_dir: &str) -> Vec<PermissionRequest> {
-        let Some(command) = bash_command_from_arguments(arguments) else {
+        let Some(command) = shell_command_from_arguments(arguments) else {
             return Vec::new();
         };
         if command.trim().is_empty() {
             return Vec::new();
         }
-        // 指定的 workdir 在项目目录之外 → 询问
-        if let Some(wd) = bash_workdir_from_arguments(arguments) {
+        // The given workdir is outside the project directory → ask
+        if let Some(wd) = shell_workdir_from_arguments(arguments) {
             let wd_canonical = resolve_permission_path(&wd, work_dir);
             let work_canonical = resolve_permission_path(work_dir, work_dir);
             if !wd_canonical.starts_with(&work_canonical) {
@@ -212,12 +232,14 @@ impl Tool for BashTool {
                 )];
             }
         }
-        let (pattern, description) = extract_bash_pattern(&command);
-        // 静态扫描：执行原语 → force_ask；越界路径 → external_directory 请求。
-        // bash 请求在前：先评估命令规则（deny 优先），allow 后才轮到越界检查。
-        let scan = bash_scan::scan(&command, work_dir);
+        let (pattern, description) = extract_shell_pattern(&command);
+        // Static scan: execution primitive → force_ask; out-of-bounds path →
+        // external_directory request.
+        // Shell request first: command rules are evaluated before the
+        // out-of-workdir check (deny wins; out-of-workdir only after allow).
+        let scan = shell_scan::scan(&command, work_dir);
         let mut requests = vec![PermissionRequest {
-            permission: "bash".to_string(),
+            permission: "shell".to_string(),
             patterns: vec![pattern.clone()],
             always_patterns: vec![pattern],
             description: description.clone(),
@@ -239,13 +261,13 @@ impl Tool for BashTool {
     fn description(&self) -> &str {
         static DESC: OnceLock<String> = OnceLock::new();
         DESC.get_or_init(|| {
-            crate::prompts::tools::BASH.replace("{SHELL_DESC}", &windows_shell_description())
+            crate::prompts::tools::SHELL.replace("{SHELL_DESC}", &windows_shell_description())
         })
     }
 
     #[cfg(not(windows))]
     fn description(&self) -> &str {
-        crate::prompts::tools::BASH
+        crate::prompts::tools::SHELL
     }
 
     fn parameters(&self) -> Value {
@@ -294,7 +316,8 @@ impl Tool for BashTool {
         let workdir = args["workdir"].as_str().map(|s| s.to_string());
         let timeout_secs = args["timeout"].as_u64().filter(|&s| s > 0).or(Some(120));
         let cmd_args = windows_shell_command_args(&command);
-        // 未指定 workdir 时也会得到会话工作目录，命令不再依赖进程 cwd
+        // Without a workdir argument the session working directory is still used,
+        // so commands no longer depend on the process cwd
         let resolved_workdir =
             Some(workdir.map_or_else(|| work_dir.to_string(), |w| resolve_tool_path(&w, work_dir)));
         Box::pin(run_shell_command(
@@ -340,17 +363,20 @@ impl Tool for BashTool {
     }
 }
 
-/// 进程退出后的管道排空窗口：尾部数据可能仍留在内核管道缓冲区；
-/// 孙进程持有写端（如常驻 daemon）时 EOF 永不到来，必须限时。
+/// Pipe drain window after process exit: tail data may still sit in the kernel
+/// pipe buffer; when a grandchild holds the write end (e.g. a resident daemon),
+/// EOF never arrives, so the drain must be time-limited.
 const PIPE_DRAIN_WINDOW: Duration = Duration::from_millis(500);
-/// 超时杀树后回收在途输出的窗口（等待 taskkill / kill 生效 + 排空）。
+/// Window for reclaiming in-flight output after a timeout kill of the tree
+/// (waiting for taskkill / kill to take effect + draining).
 const KILL_DRAIN_WINDOW: Duration = Duration::from_millis(500);
-/// 排空的硬性总上限：空闲窗口会被持续输出的孙进程无限重置，
-/// 必须叠加总 deadline 兜底，否则挂起风险回归。
+/// Hard overall cap on draining: the idle window can be reset indefinitely by a
+/// grandchild that keeps producing output, so an overall deadline is needed as
+/// a backstop, otherwise the hang risk regresses.
 pub(super) const DRAIN_HARD_CAP: Duration = Duration::from_secs(3);
 
-/// 后台读管道任务：持续读取并把字节块送入 channel，
-/// 读到 EOF / 出错 / 接收端被丢弃时结束。
+/// Background pipe-reading task: keeps reading and sends byte chunks into the
+/// channel; ends on EOF / error / dropped receiver.
 fn spawn_pipe_reader<R>(mut pipe: R, tx: tokio::sync::mpsc::Sender<Vec<u8>>)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -370,9 +396,11 @@ where
     });
 }
 
-/// 限时排空单个 channel 中残留的输出。双重保险：
-/// 空闲超时（每收到一块数据重置窗口，避免传输中的大量数据被截断）
-/// + 硬性总上限（持续低速输出的孙进程可无限重置空闲窗口，必须兜底）。
+/// Time-limited drain of output left in a single channel. Double protection:
+/// idle timeout (the window resets on every received chunk so in-transit bulk
+/// data is not truncated) plus hard overall cap (a grandchild producing slow
+/// but steady output can reset the idle window indefinitely; a backstop is
+/// mandatory).
 pub(super) async fn drain_channel_with_window(
     rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
     buf: &mut Vec<u8>,
@@ -387,8 +415,10 @@ pub(super) async fn drain_channel_with_window(
     }
 }
 
-/// Windows：taskkill 终止 pid 及其整棵进程树。直接子进程退出不代表孙进程退出——
-/// 常驻 daemon / 浏览器既继承管道写端（导致 EOF 永不到来）又驻留内存。
+/// Windows: taskkill terminates the pid and its whole process tree. A direct
+/// child exiting does not mean grandchildren exited — resident daemons /
+/// browsers both inherit the pipe write end (so EOF never arrives) and stay in
+/// memory.
 #[cfg(windows)]
 async fn kill_process_tree(pid: Option<u32>) {
     if let Some(pid) = pid {
@@ -402,7 +432,8 @@ async fn kill_process_tree(pid: Option<u32>) {
 
 #[cfg(not(windows))]
 async fn kill_process_tree(pid: Option<u32>) {
-    // Unix 无进程树语义，由调用方对直接子进程 kill + kill_on_drop 兜底
+    // Unix has no process-tree semantics; the caller backstops with a
+    // direct-child kill + kill_on_drop
     let _ = pid;
 }
 
@@ -418,7 +449,8 @@ pub(super) async fn run_shell_command(
     if let Some(dir) = &workdir {
         cmd.current_dir(dir);
     }
-    // 隐藏独立控制台 + stdin 置空，动机与副作用见 CREATE_NO_WINDOW 文档
+    // Hidden dedicated console + nulled stdin; see the CREATE_NO_WINDOW docs
+    // for motivation and side effects
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.stdin(std::process::Stdio::null());
@@ -455,8 +487,9 @@ pub(super) async fn run_shell_command(
     };
     tokio::pin!(timeout_sleep);
 
-    // 主循环：等待进程退出（cancel-safe）与读取管道并发推进；
-    // 不再要求「管道 EOF」作为完成条件，避免孙进程持写端导致永久挂起。
+    // Main loop: waiting for process exit (cancel-safe) and reading the pipes
+    // progress concurrently; pipe EOF is no longer required as the completion
+    // condition, avoiding a permanent hang when a grandchild holds the write end.
     loop {
         tokio::select! {
             res = child.wait() => {
@@ -481,7 +514,7 @@ pub(super) async fn run_shell_command(
     }
 
     if timed_out {
-        // 先杀整棵树（写端全部关闭 → 管道 EOF → 在途数据可排空）
+        // Kill the whole tree first (write ends all close → pipe EOF → in-flight data drainable)
         kill_process_tree(pid).await;
         #[cfg(not(windows))]
         {
@@ -491,8 +524,10 @@ pub(super) async fn run_shell_command(
         drain_channel_with_window(&mut stdout_rx, &mut stdout_buf, KILL_DRAIN_WINDOW).await;
         drain_channel_with_window(&mut stderr_rx, &mut stderr_buf, KILL_DRAIN_WINDOW).await;
     } else {
-        // 进程已退出：限时排空内核缓冲区中的尾部数据（空闲超时，两侧并发）。
-        // 无孙进程时 EOF 即刻到达、零额外延迟；有孙进程持写端时空闲一个窗口后放弃。
+        // Process already exited: drain tail data from the kernel buffers with a
+        // time limit (idle timeout, both sides concurrently).
+        // Without grandchildren EOF arrives immediately at zero extra cost; with
+        // a grandchild holding the write end, give up after one idle window.
         tokio::join!(
             drain_channel_with_window(&mut stdout_rx, &mut stdout_buf, PIPE_DRAIN_WINDOW),
             drain_channel_with_window(&mut stderr_rx, &mut stderr_buf, PIPE_DRAIN_WINDOW),

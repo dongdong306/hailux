@@ -60,7 +60,7 @@ pub struct SubsessionSummary {
     pub completion_tokens: i64,
 }
 
-/// 用量汇总（基于 messages 表中带 usage 的 assistant 行 = 一次 LLM 请求）
+/// Usage summary (assistant rows with usage in the messages table = one LLM request)
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct UsageSummary {
     pub requests: i64,
@@ -69,10 +69,10 @@ pub struct UsageSummary {
     pub completion_tokens: i64,
 }
 
-/// 按日聚合的用量
+/// Usage aggregated by day
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DailyUsage {
-    /// 日期（YYYY-MM-DD，本地时区）
+    /// Date (YYYY-MM-DD, local timezone)
     pub date: String,
     pub requests: i64,
     pub prompt_tokens: i64,
@@ -80,7 +80,7 @@ pub struct DailyUsage {
     pub completion_tokens: i64,
 }
 
-/// 按模型聚合的用量
+/// Usage aggregated by model
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelUsage {
     pub model: String,
@@ -90,7 +90,7 @@ pub struct ModelUsage {
     pub completion_tokens: i64,
 }
 
-/// 按项目聚合的用量
+/// Usage aggregated by project
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProjectUsage {
     pub work_dir: String,
@@ -100,16 +100,16 @@ pub struct ProjectUsage {
     pub completion_tokens: i64,
 }
 
-/// 已知项目（sessions 表 distinct work_dir，最近活跃降序）
+/// Known projects (distinct work_dir from the sessions table, most recently active first)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkDirInfo {
     pub work_dir: String,
     pub sessions: i64,
-    /// 最近活跃时间（该目录下会话的最大 updated_at，ISO 本地时间）
+    /// Last active time (max updated_at of sessions in the dir, ISO local time)
     pub last_active: String,
 }
 
-/// 最近一次请求的用量明细
+/// Usage details of recent requests
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UsageRecord {
     pub created_at: String,
@@ -130,14 +130,16 @@ pub struct StoredMessage {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub cached_tokens: Option<i64>,
-    /// 该次 LLM 请求实际使用的模型（provider/model display）；用量统计按此分组
+    /// Model actually used for this LLM request (provider/model display);
+    /// usage stats group by it
     pub model: Option<String>,
     pub runtime_meta: Option<String>,
     pub think_ms: Option<i64>,
     pub compacted: bool,
-    /// 图片附件 JSON（[{mime, data_url}]）；仅用户消息使用
+    /// Image attachments JSON ([{mime, data_url}]); used by user messages only
     pub attachments: Option<String>,
-    /// @ 提及元数据 JSON（[{start, end, kind}]，码点偏移）；仅用户消息使用
+    /// @ mention metadata JSON ([{start, end, kind}], code-point offsets);
+    /// user messages only
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mentions: Option<String>,
 }

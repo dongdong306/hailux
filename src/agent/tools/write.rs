@@ -31,7 +31,7 @@ impl Tool for WriteTool {
         };
         let canonical = resolve_permission_path(&file_path, work_dir);
 
-        // 工作目录之外 → external_directory 询问
+        // Outside the working directory → external_directory ask
         if let Some(dir) = external_dir_of(&file_path, work_dir) {
             return vec![external_dir_request(
                 &[dir],
@@ -39,7 +39,8 @@ impl Tool for WriteTool {
             )];
         }
 
-        // 工作目录内 → write 请求（默认放行，配置规则仍可 deny）
+        // Inside the working directory → write request (allowed by default;
+        // config rules may still deny)
         vec![PermissionRequest {
             permission: "write".to_string(),
             patterns: vec![canonical.display().to_string()],

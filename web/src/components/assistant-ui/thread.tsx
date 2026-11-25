@@ -30,14 +30,14 @@ import {
 } from "../../runtime/hailux-runtime";
 import { ThreadNav, USER_MSG_ATTR } from "./thread-nav";
 
-/** todo_write/ask_user/task stay ungrouped — they render dedicated cards.
+/** todo_write/question/task stay ungrouped — they render dedicated cards.
  *  Module-level so the reference stays stable and the GroupedParts tree memo holds */
 const groupBy = (part: PartState): readonly ("group-reasoning" | "group-tools")[] => {
   if (part.type === "reasoning") return ["group-reasoning"];
   if (
     part.type === "tool-call" &&
     part.toolName !== "todo_write" &&
-    part.toolName !== "ask_user" &&
+    part.toolName !== "question" &&
     part.toolName !== "task"
   )
     return ["group-tools"];
