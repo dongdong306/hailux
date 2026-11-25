@@ -87,9 +87,6 @@ pub struct ChatWidget<'a> {
     pub last_total_lines: u16,
     pub is_processing: bool,
     pub queued: Vec<String>,
-    pub cursor_row: u16,
-    pub cursor_col: u16,
-    pub cursor_blink_on: bool,
     pub model_name: &'a str,
     pub input_scroll_row: u16,
     pub input_area_height: u16,
@@ -390,9 +387,7 @@ impl<'a> ChatWidget<'a> {
     }
 
     fn render_input(&self, input_area: Rect, buf: &mut Buffer) {
-        let border_color = if self.is_processing {
-            Color::DarkGray
-        } else if self.plan_mode {
+        let border_color = if self.plan_mode {
             PLAN_BADGE
         } else {
             Color::Rgb(100, 100, 100)
@@ -408,9 +403,7 @@ impl<'a> ChatWidget<'a> {
         let prefix_w: u16 = prefix_text.width() as u16;
         let input_prefix = Span::styled(
             prefix_text,
-            if self.is_processing {
-                Style::default().fg(Color::DarkGray)
-            } else if self.plan_mode {
+            if self.plan_mode {
                 Style::default().fg(PLAN_BADGE)
             } else {
                 Style::default().fg(Color::Rgb(120, 120, 120))
@@ -418,26 +411,10 @@ impl<'a> ChatWidget<'a> {
         );
         let area_w = input_render_area.width;
 
-        let text_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(CHAT_FG)
-        };
-        let element_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(CHAT_PASTE)
-        };
-        let file_mention_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(CHAT_FILE_MENTION)
-        };
-        let image_style = if self.is_processing {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(CHAT_IMAGE)
-        };
+        let text_style = Style::default().fg(CHAT_FG);
+        let element_style = Style::default().fg(CHAT_PASTE);
+        let file_mention_style = Style::default().fg(CHAT_FILE_MENTION);
+        let image_style = Style::default().fg(CHAT_IMAGE);
 
         let mut visual_lines: Vec<Line<'static>> = Vec::new();
         let logical_lines: Vec<&str> = self.input_buffer.split('\n').collect();
@@ -538,19 +515,6 @@ impl<'a> ChatWidget<'a> {
 
         let input_paragraph = Paragraph::new(visual_lines).scroll((self.input_scroll_row, 0));
         input_paragraph.render(input_render_area, buf);
-
-        // Fake cursor: a thin bar over the cursor cell (rests after the
-        // prefix when the input is empty). The native cursor stays hidden in
-        // Chat; the blink phase flips every 500ms via the idle event loop.
-        if self.cursor_blink_on {
-            let row = self.cursor_row.saturating_sub(self.input_scroll_row);
-            let col = self.cursor_col;
-            if (row as usize) < input_render_area.height as usize
-                && (col as usize) < input_render_area.width as usize
-            {
-                buf[(input_render_area.x + col, input_render_area.y + row)].set_symbol("▏");
-            }
-        }
     }
 
     fn render_queue(&self, area: Rect, buf: &mut Buffer) {
