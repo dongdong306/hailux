@@ -321,3 +321,29 @@ fn parse_ask_user_pairs_multiple_and_legacy() {
         ]
     );
 }
+
+#[test]
+fn parse_ask_user_pairs_custom_answer_roundtrip() {
+    // format_ask_reply's [Custom input] marker survives the pair parser verbatim,
+    // including answers containing quotes/backslashes
+    use crate::agent::event::{QuestionInfo, QuestionOption};
+    let q = QuestionInfo {
+        question: "Visual style?".to_string(),
+        header: "Style".to_string(),
+        options: vec![QuestionOption {
+            label: "Minimal".to_string(),
+            description: String::new(),
+        }],
+    };
+    let reply = super::super::ask_user::format_ask_reply(
+        &[q],
+        &[Some("dark \\ \"neon\" theme".to_string())],
+    );
+    assert_eq!(
+        parse_ask_user_pairs(&reply),
+        vec![(
+            "Visual style?".to_string(),
+            "[Custom input] dark \\ \"neon\" theme".to_string(),
+        )]
+    );
+}
