@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -47,6 +48,72 @@ fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
     } else {
         format!("{}\n{}", stdout, decode_output(stderr))
     }
+}
+
+/// Strips ANSI escape sequences (CSI colors/cursor moves, OSC/DCS strings,
+/// standalone escapes incl. intermediate-byte forms like `ESC ( B`). Tools
+/// like npm emit them regardless of TTY detection; they are meaningless to
+/// the LLM and render as garbage in the TUI/Web (plain-text history cells).
+/// Text without ESC bytes is returned borrowed (zero-copy); an unterminated
+/// sequence at buffer end is dropped.
+pub(super) fn strip_ansi(input: &str) -> Cow<'_, str> {
+    if !input.contains('\u{1b}') {
+        return Cow::Borrowed(input);
+    }
+    enum State {
+        Ground,
+        Escape,   // ESC seen, next char selects the sequence kind
+        EscInter, // ESC + intermediate bytes (0x20..=0x2F) — until a final byte
+        Csi,      // ESC [ ... — until a final byte (0x40..=0x7E)
+        Str,      // ESC ]/P/X/^/_ payload — until BEL or ESC \
+        StrSlash, // ESC seen inside Str: possible ST (`ESC \`) terminator
+    }
+    let mut state = State::Ground;
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match state {
+            State::Ground => {
+                if c == '\u{1b}' {
+                    state = State::Escape;
+                } else {
+                    out.push(c);
+                }
+            }
+            State::Escape => match c {
+                '[' => state = State::Csi,
+                ']' | 'P' | 'X' | '^' | '_' => state = State::Str,
+                '\u{20}'..='\u{2F}' => state = State::EscInter,
+                _ => state = State::Ground,
+            },
+            State::EscInter => match c {
+                '\u{20}'..='\u{2F}' => {}
+                // A new ESC restarts sequence detection; any other byte is the
+                // sequence's final byte (consumed)
+                '\u{1b}' => state = State::Escape,
+                _ => state = State::Ground,
+            },
+            State::Csi => match c {
+                // Parameter (0x30..=0x3F) and intermediate (0x20..=0x2F) bytes
+                '\u{20}'..='\u{3F}' => {}
+                '\u{40}'..='\u{7E}' => state = State::Ground,
+                // A new ESC restarts sequence detection; any other stray control
+                // byte aborts the sequence silently (nothing is ever emitted)
+                '\u{1b}' => state = State::Escape,
+                _ => state = State::Ground,
+            },
+            State::Str => match c {
+                '\u{7}' => state = State::Ground,
+                '\u{1b}' => state = State::StrSlash,
+                _ => {}
+            },
+            State::StrSlash => match c {
+                '\\' => state = State::Ground,
+                '\u{1b}' => {}
+                _ => state = State::Str,
+            },
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Extracts `command_string` from shell tool arguments.
@@ -549,6 +616,7 @@ pub(super) async fn run_shell_command(
             _ => combine_output(&stdout_buf, &stderr_buf),
         }
     };
+    let raw = strip_ansi(&raw);
 
     let char_count = raw.chars().count();
     if char_count > MAX_OUTPUT_CHARS {
@@ -561,6 +629,6 @@ pub(super) async fn run_shell_command(
             char_count - MAX_OUTPUT_CHARS
         ))
     } else {
-        Ok(raw)
+        Ok(raw.into_owned())
     }
 }
