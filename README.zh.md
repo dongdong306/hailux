@@ -2,7 +2,7 @@
 
 # hailux
 
-> 一个基于终端的 AI 编程助手，让你在命令行（或浏览器）中完成代码编写、审查、重构和问题排查。基于 Rust 构建，编译为单一可执行文件，无需安装任何外部运行时（Node、Python 等），低内存占用，开箱即用。内置 Web UI，一条命令切换到浏览器中使用。
+> 一个基于终端的通用 AI 智能体，让你在命令行（或浏览器）中完成各类任务 —— 写作、调研、文件操作等。基于 Rust 构建，编译为单一可执行文件，无需安装任何外部运行时（Node、Python 等），低内存占用，开箱即用。内置 Web UI，一条命令切换到浏览器中使用。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.96.0%2B-orange.svg)](https://www.rust-lang.org)
