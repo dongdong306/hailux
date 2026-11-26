@@ -314,14 +314,17 @@ Project-level overrides: `<work_dir>/.hailux/{skills,agents,commands}/` and ance
    tool category.
 - **Shell static analysis** (`permission/shell_scan.rs`): best-effort gating, NOT a sandbox —
   documented in tool prompts and help skill. Splits sub-commands on top-level `&&`/`;`/`|`/`&`
-  (quote-aware); classifies first tokens as FileOps (`cat`, `rm`, `ln`, `tee`, ... — all
+  (quote-aware; escape model follows the platform shell like `ShellTool` does — backslash on
+  Unix, backtick-only on Windows, so a PowerShell path ending in `\` does not fuse commands);
+  classifies first tokens as FileOps (`cat`, `rm`, `ln`, `tee`, ... — all
   args scanned as path candidates) / Executor (`sudo`, `sh`, `python`, `eval`, `xargs`, ... —
   sets `force_ask` on the shell request so builtin `* allow` doesn't waive it; only explicit
   session/config rules do) / Other (redirection targets still checked). `cd X` tracks a
   per-command resolution base (updated per segment) instead of gating cd itself: the hit
   lands on the segment that actually touches files, so `cd .. && ls` is silent while
   `cd .. && cat secret` asks for the real target dir. Known vars
-  (`$HOME`/`$env:NAME`) are expanded; unknown `$var`/`$(...)`/backticks are skipped (documented
+  (`$HOME`/`$env:NAME`) and script-assigned variables (`$n = "literal"`, tracked per
+  command, case-insensitive) are expanded; unknown `$var`/`$(...)`/backticks are skipped (documented
   best-effort trade-off); `~` expands; globs resolve by their path prefix so `../x/*.pem` is
   gated while in-workdir globs pass.
 - **Plan mode** (`/plan` or Shift+Tab): filters out write/edit tools from the tool list and
