@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1](https://github.com/dongdong306/hailux/compare/v0.13.0...v0.13.1) (2026-11-26)
+
+
+### Bugfixes
+
+* **permission:** silence dead_code for PowerShell dialect on unix builds ([9515bfa](https://github.com/dongdong306/hailux/commit/9515bfa08015e1527bf0df3254a1f29b7c7d348b))
+
+
+### CI
+
+* gate release workflow on CI success via workflow_run ([b2f26a9](https://github.com/dongdong306/hailux/commit/b2f26a94a32faceaf72a1b11a474a175345a2803))
+
 ## [0.13.0](https://github.com/dongdong306/hailux/compare/v0.12.0...v0.13.0) (2026-11-26)
 
 
