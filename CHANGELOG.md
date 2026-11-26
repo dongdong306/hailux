@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/dongdong306/hailux/compare/v0.12.0...v0.13.0) (2026-11-26)
+
+
+### Improvements
+
+* **agent:** surface stream failures as system-reminder on the next turn ([3db2ac5](https://github.com/dongdong306/hailux/commit/3db2ac5c8440f6dd532b85a0adc8c9372f3ec37e))
+* **config:** discover models via /models and drive the table from user picks ([242d16c](https://github.com/dongdong306/hailux/commit/242d16c3f2ea579a9177e5742bb8302ffa067b3c))
+* **interject:** queue and inject user messages mid-run ([63f9b49](https://github.com/dongdong306/hailux/commit/63f9b49afb06e3e59d06d300ad4fc991832a7395))
+* **mention:** persist @ file mentions as message metadata with atomic rendering ([6470f99](https://github.com/dongdong306/hailux/commit/6470f9919fc2aea03274016571447f0d81c3aecf))
+* **plan:** persist plan-mode reminders in message context ([f3086b7](https://github.com/dongdong306/hailux/commit/f3086b77448331902f95a2bee666dee7ad12f4d7))
+* **prompt:** prefer better approaches over imitating flawed code ([22cb0e6](https://github.com/dongdong306/hailux/commit/22cb0e64101d64dd2db8ec2ced29646a52753ad6))
+* **question:** mark user-typed answers with [Custom input] prefix ([d125270](https://github.com/dongdong306/hailux/commit/d12527080382d6ea263e1edfa123242d543cb4a7))
+* **question:** replace modal dialog with an input-slot question panel ([021a01a](https://github.com/dongdong306/hailux/commit/021a01a4545f648d98f75b177783d99336c000c9))
+* **session:** generate LLM titles for new sessions ([7a4adb1](https://github.com/dongdong306/hailux/commit/7a4adb1e79a8b0209ee09138947eb773f3de23ba))
+* **web:** decouple run lifecycle from SSE connections ([08b3e43](https://github.com/dongdong306/hailux/commit/08b3e436d1bf9f68d0b0bce11a4b3a62946206b0))
+* **web:** show context usage percentage next to the header ring ([4c05f6a](https://github.com/dongdong306/hailux/commit/4c05f6a8f27ed64d412c2952b144661a09f1cb79))
+
+
+### Bugfixes
+
+* **shell:** respect shell dialect and script vars in path scanning ([937e7e9](https://github.com/dongdong306/hailux/commit/937e7e96d4d85e23c67a114dab03fad7459a6660))
+* **shell:** strip ANSI escape sequences from command output ([da0849e](https://github.com/dongdong306/hailux/commit/da0849e724ed79829ccb980a84d55f77f877755a))
+* **tui:** bracket frames in DEC 2026 synchronized output ([8378f57](https://github.com/dongdong306/hailux/commit/8378f57b5b5cd104a8d457432525407347b68970))
+* **web:** rework scroll-to-bottom button visibility and centering ([edea759](https://github.com/dongdong306/hailux/commit/edea75940c2e162f6a3a641ef2c2c91d375ee997))
+* **web:** sync effective session id via SessionStarted event ([56f3b9f](https://github.com/dongdong306/hailux/commit/56f3b9f5c9881385444e632d6aa03729aafd49d5))
+
+
+### Refactor
+
+* rename bash/ask modules to shell/question ([957a54d](https://github.com/dongdong306/hailux/commit/957a54dc5271235260bdccde33493eb53376a93a))
+* **tui:** drop redundant drawn caret in question custom input ([41107e2](https://github.com/dongdong306/hailux/commit/41107e281b81ec36d00eaa4e3510ada9b9c86d10))
+* **tui:** replace fake cursor with native terminal cursor ([922ea2f](https://github.com/dongdong306/hailux/commit/922ea2fbcc4ef720800ea7e567c5404600824beb))
+* update bash/ask references and translate comments to English ([f245a44](https://github.com/dongdong306/hailux/commit/f245a44fa7ea2f20e6604fd8f37477cba2891c8a))
+
+
+### Documentation
+
+* refresh AGENTS.md to match current codebase ([8072d34](https://github.com/dongdong306/hailux/commit/8072d34fae21c935a06cd1fe853ac0267c5e121a))
+* reposition hailux as a general-purpose AI agent ([49ec365](https://github.com/dongdong306/hailux/commit/49ec365258a9ab30c9427449539d73d86d2e3ef8))
+
 ## [0.12.0](https://github.com/dongdong306/hailux/compare/v0.11.0...v0.12.0) (2026-11-10)
 
 
