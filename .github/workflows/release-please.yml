@@ -2,9 +2,15 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags:
       - "v*"
+  # Gate releases on CI: only run after a successful CI run on main.
+  # Note: the workflow definition is read from the default branch for
+  # workflow_run events, so this gating takes effect as soon as it lands here.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write
@@ -12,7 +18,7 @@ permissions:
 
 jobs:
   release-please:
-    if: ${{ startsWith(github.ref, 'refs/heads/') }}
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -70,6 +76,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        # Build exactly the released commit, not whatever main HEAD is at
+        # checkout time (workflow_run events default-checkout the branch HEAD).
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
