@@ -118,6 +118,17 @@ export function createRunSink(
       }
     }
 
+    // Title refresh (view-independent): the sidebar lists every session, so
+    // a generated title applies regardless of the current view
+    if (event.type === "SessionTitleUpdated") {
+      set((s) => ({
+        sessions: s.sessions.map((x) =>
+          x.id === bound ? { ...x, title: event.title } : x,
+        ),
+      }));
+      return;
+    }
+
     // Cursor bookkeeping: write the global slot only while the owning session
     // is the current view (late events after a switch must not clobber the
     // new session's cursor)

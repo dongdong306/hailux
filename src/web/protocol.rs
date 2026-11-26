@@ -137,6 +137,14 @@ pub enum ServerEvent {
         /// Matches the queued item id / optimistic bubble marker
         client_id: String,
     },
+    /// The background title task persisted an LLM-generated session title
+    /// (see `session::title`). Publish-only: never advances the durable
+    /// watermark (the callback cannot know how much of the run's stream is
+    /// already durable); replay resends are harmless — the update is
+    /// idempotent on the frontend sidebar.
+    SessionTitleUpdated {
+        title: String,
+    },
 }
 
 pub fn status_str(status: &TaskStatus) -> &'static str {

@@ -181,23 +181,31 @@ pub(super) async fn run_chat_task(
         return;
     }
 
-    // Generate the title from the first user message when empty (align with TUI handle_user_message: take first 50 chars)
-    match session.storage().get_session_title(&session_id).await {
-        Ok(Some(title)) if !title.is_empty() => {}
-        _ => {
-            let title: String = if message.chars().count() > 50 {
-                format!("{}...", message.chars().take(50).collect::<String>())
-            } else {
-                message.chars().take(50).collect()
-            };
-            if !title.is_empty() {
-                let _ = session
-                    .storage()
-                    .update_session_title(&session_id, &title)
-                    .await;
-                bus.advance_durable(bus.last_seq());
-            }
-        }
+    // Title: truncation placeholder when the session has none (align with
+    // TUI handle_user_message; empty title = never messaged must not survive
+    // the first message), then the LLM refines it in the background. The
+    // callback publishes only — it cannot know how much of the run's event
+    // stream is already durable, so it must not advance the watermark
+    // (replay resends are harmless, the frontend update is idempotent).
+    // Best-effort: a DB failure is logged and the run proceeds — the next
+    // message retries the placeholder.
+    let bus_for_title = bus.clone();
+    let wrote_placeholder = crate::session::title::ensure_session_title(
+        session.storage(),
+        &session_id,
+        &message,
+        &resolved,
+        move |title| {
+            bus_for_title.publish(ServerEvent::SessionTitleUpdated { title });
+        },
+    )
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("[warn] Failed to write session title placeholder: {e}");
+        false
+    });
+    if wrote_placeholder {
+        bus.advance_durable(bus.last_seq());
     }
 
     // ── Start streaming ────────────────────────────────────

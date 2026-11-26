@@ -12,6 +12,7 @@ pub const TASK_TOOL_TEMPLATE: &str = include_str!("task_tool.txt");
 pub const DEFAULT_HELP_SKILL_MD: &str = include_str!("default_help_skill.md");
 pub const COMPACT: &str = include_str!("compact.txt");
 pub const INIT: &str = include_str!("init.txt");
+pub const TITLE: &str = include_str!("title.txt");
 
 pub mod tools {
     pub const QUESTION: &str = include_str!("tools/question.txt");

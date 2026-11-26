@@ -73,6 +73,12 @@ impl ThinkingConfig {
             type_: "enabled".to_string(),
         }
     }
+
+    pub fn disabled() -> Self {
+        Self {
+            type_: "disabled".to_string(),
+        }
+    }
 }
 
 /// Extended message enum: standard ChatCompletionRequestMessage plus reasoning_content support

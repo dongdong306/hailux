@@ -6,6 +6,7 @@ use crate::agent::Tool;
 use crate::agent::command_def::INIT_COMMAND_NAME;
 use crate::agent::event::CoreEvent;
 use crate::agent::subagent::{self, TaskTool};
+use crate::session::title;
 use crate::storage::{MessageRole, StoredMessage, plan_mode_runtime_meta};
 use crate::tui::command;
 use crate::tui::event::{AppEvent, CompactUsage, TaskStatus};
@@ -57,6 +58,8 @@ impl App {
             // Fetch results belong to the model picker / setup form (handle_event routes
             // them there); ignored here to keep the match exhaustive
             AppEvent::ModelsRefreshed { .. } => {}
+            // Title updates belong to the session picker (handle_event routes them there)
+            AppEvent::SessionTitleUpdated { .. } => {}
             AppEvent::MouseClick => {}
         }
         Ok(())
@@ -795,15 +798,33 @@ impl App {
         };
         self.storage.append_message(&session_id, &stored).await?;
 
-        if new_session {
-            let title: String = if input.chars().count() > 50 {
-                format!("{}...", input.chars().take(50).collect::<String>())
-            } else {
-                input.chars().take(50).collect()
-            };
-            self.storage
-                .update_session_title(&session_id, &title)
-                .await?;
+        // Title: the placeholder goes in synchronously when the session has
+        // none (empty title = never messaged must not survive the first
+        // message; also covers sessions created blank elsewhere, e.g. by the
+        // web UI), then the LLM refines it in the background; on_done reports
+        // back as AppEvent::SessionTitleUpdated for a live session-picker
+        // refresh. Idempotent: sessions with a title return immediately.
+        // Best-effort: the message is already persisted, so a title DB failure
+        // must not abort the send — the next message retries the placeholder.
+        {
+            let tx = self.events.0.clone();
+            let sid = session_id.clone();
+            if let Err(e) = title::ensure_session_title(
+                &self.storage,
+                &session_id,
+                &input,
+                &self.resolved,
+                move |t| {
+                    let _ = tx.try_send(AppEvent::SessionTitleUpdated {
+                        session_id: sid,
+                        title: t,
+                    });
+                },
+            )
+            .await
+            {
+                eprintln!("[warn] Failed to write session title placeholder: {e}");
+            }
         }
 
         if let Some((subagent_name, subagent_prompt)) = subagent::parse_subagent_input(&input)

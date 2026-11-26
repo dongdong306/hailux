@@ -61,6 +61,13 @@ export type ServerEvent =
       client_id: string;
     }
   | {
+      /** The background title task persisted an LLM-generated session title
+       * (publish-only, never advances the durable watermark; replay resends
+       * are harmless — the sidebar update is idempotent). */
+      type: "SessionTitleUpdated";
+      title: string;
+    }
+  | {
       /** An LLM request failed and will auto-retry (frontend drops trailing streamed content and notifies) */
       type: "AgentRetry";
       /** Sequence number of the upcoming retry (1-based) */

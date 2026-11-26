@@ -156,6 +156,28 @@ impl ChatStorage {
         Ok(())
     }
 
+    /// Compare-and-set a session's title: replaces it only while it still
+    /// equals `expected`. Returns whether a row was updated — `false` means
+    /// the title changed underneath the caller (e.g. a user rename), and
+    /// the caller's replacement must not win.
+    pub async fn update_session_title_if(
+        &self,
+        session_id: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool> {
+        let now = Self::now_iso();
+        let res =
+            sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ? AND title = ?")
+                .bind(title)
+                .bind(&now)
+                .bind(session_id)
+                .bind(expected)
+                .execute(&self.pool)
+                .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// List every work dir seen in session history (DISTINCT, most recently
     /// used first), with session counts and last-active times (for the
     /// project picker).
