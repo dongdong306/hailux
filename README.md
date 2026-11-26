@@ -2,7 +2,7 @@ English | [中文](README.zh.md)
 
 # hailux
 
-> A terminal-based AI coding assistant that lets you write, review, refactor, and debug code right from your command line (or browser). Built in Rust and compiled to a single binary — no external runtimes required (Node, Python, etc.), low memory footprint, ready out of the box. Ships with a built-in Web UI: one command switches you to the browser.
+> A terminal-based general-purpose AI agent that handles any task right from your command line (or browser) — writing, researching, file operations, and more. Built in Rust and compiled to a single binary — no external runtimes required (Node, Python, etc.), low memory footprint, ready out of the box. Ships with a built-in Web UI: one command switches you to the browser.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.96.0%2B-orange.svg)](https://www.rust-lang.org)

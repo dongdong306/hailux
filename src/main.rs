@@ -11,7 +11,7 @@ use hailux::{
 // ── CLI definition ─────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "hailux", version, about = "终端 AI 编程助手")]
+#[command(name = "hailux", version, about = "终端 AI 智能体")]
 struct Cli {
     /// Set the working directory
     #[arg(short = 'p', long = "path", global = true)]
