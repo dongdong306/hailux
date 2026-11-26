@@ -624,6 +624,24 @@ impl App {
             return Ok(());
         }
 
+        if let AppEvent::SessionTitleUpdated { session_id, title } = event {
+            // Live refresh only while the picker is open; other states ignore
+            // the event (the picker re-reads the DB when opened)
+            if let AppState::SessionPicker {
+                sessions,
+                filtered_indices,
+                search_query,
+                ..
+            } = &mut self.state
+                && let Some(s) = sessions.iter_mut().find(|s| s.id == session_id)
+            {
+                s.title = title;
+                *filtered_indices = Self::filter_sessions(sessions, search_query);
+                self.render.dirty = true;
+            }
+            return Ok(());
+        }
+
         // Permission requests are enqueued here regardless of the current state.
         // Must be handled first: if another dialog (e.g. AskUser) is open and the request were
         // routed to that handler, the event would be swallowed and the agent-side oneshot would never resolve, deadlocking.

@@ -45,6 +45,13 @@ pub enum AppEvent {
         provider_id: String,
         result: Result<Vec<crate::config::model_discovery::RemoteModel>, String>,
     },
+    /// LLM-generated session title persisted by the background title task
+    /// (see `session::title`). Only the session-picker refreshes live;
+    /// other states ignore it — the picker re-reads the DB when opened.
+    SessionTitleUpdated {
+        session_id: String,
+        title: String,
+    },
 }
 
 pub type EventTx = mpsc::Sender<AppEvent>;
