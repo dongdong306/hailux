@@ -9,12 +9,37 @@
 //!   feeding the `external_directory` permission request;
 //! - Dynamic expressions that cannot be expanded (`$var` / `$(...)` /
 //!   backticks) are skipped on purpose: known variables (`$HOME` /
-//!   `$env:...`) are expanded, unknown ones are unknowable — prefer false
-//!   negatives over nagging on common in-workdir usage.
+//!   `$env:...`) and script-assigned variables (`$n = "literal"`) are
+//!   expanded, unknown ones are unknowable — prefer false negatives over
+//!   nagging on common in-workdir usage.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::resolve_permission_path;
+
+/// Script-level variable assignments (`$n = "literal"`) seen so far in the
+/// scanned command, keyed by lowercased name — PowerShell variables are
+/// case-insensitive.
+type ScriptVars = HashMap<String, String>;
+
+/// Escape dialect of the shell that executes the command. POSIX shells
+/// escape with a backslash; PowerShell escapes with a backtick only — there
+/// a `\` is always literal, so `"C:\dir\"` is a complete string and not an
+/// open quote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellDialect {
+    Posix,
+    PowerShell,
+}
+
+impl ShellDialect {
+    /// Matches `ShellTool`: pwsh on Windows, bash elsewhere.
+    #[cfg(windows)]
+    const CURRENT: Self = Self::PowerShell;
+    #[cfg(not(windows))]
+    const CURRENT: Self = Self::Posix;
+}
 
 /// Shell commands with file-path semantics: all arguments are scanned as path
 /// candidates (except flags like `-x` / `+x`). Covers POSIX and PowerShell
@@ -41,9 +66,13 @@ const FILE_COMMANDS: &[&str] = &[
     "scp",
     "patch",
     "type",
-    // PowerShell full names
+    // PowerShell full names (every short alias below has its full name here)
     "get-content",
+    "get-childitem",
+    "get-item",
     "set-content",
+    "set-item",
+    "set-itemproperty",
     "add-content",
     "copy-item",
     "move-item",
@@ -54,6 +83,7 @@ const FILE_COMMANDS: &[&str] = &[
     // Frequent PowerShell short aliases
     "gc",
     "gci",
+    "gi",
     "sc",
     "ac",
     "si",
@@ -153,13 +183,23 @@ impl ShellScan {
 /// against the `/etc` base and hits as out-of-bounds; the "always" grant
 /// scope also shrinks to the specific directory actually accessed.
 pub fn scan(command: &str, work_dir: &str) -> ShellScan {
+    scan_in(command, work_dir, ShellDialect::CURRENT)
+}
+
+fn scan_in(command: &str, work_dir: &str, dialect: ShellDialect) -> ShellScan {
     let work_canonical = resolve_permission_path(work_dir, work_dir);
     let mut base_dir = work_dir.to_string();
+    // Segments execute sequentially: an assignment takes effect for the
+    // segments that follow it
+    let mut vars = ScriptVars::new();
     let mut result = ShellScan::default();
-    for seg in split_top_level(command) {
-        scan_segment(seg, &base_dir, &work_canonical, &mut result);
+    for seg in split_top_level_in(command, dialect) {
+        if let Some((name, literal)) = assignment_target(seg) {
+            vars.insert(name, literal);
+        }
+        scan_segment(seg, &base_dir, &work_canonical, &vars, &mut result);
         if let Some(target) = cd_target(seg)
-            && let Some(expanded) = expand_candidate(&target)
+            && let Some(expanded) = expand_candidate(&target, &vars)
         {
             base_dir = resolve_permission_path(&expanded, &base_dir)
                 .display()
@@ -194,7 +234,13 @@ fn classify(cmd: &str) -> CmdKind {
     }
 }
 
-fn scan_segment(seg: &str, base_dir: &str, work_canonical: &Path, result: &mut ShellScan) {
+fn scan_segment(
+    seg: &str,
+    base_dir: &str,
+    work_canonical: &Path,
+    vars: &ScriptVars,
+    result: &mut ShellScan,
+) {
     let tokens: Vec<&str> = seg.split_whitespace().collect();
     let Some(first) = tokens.first() else {
         return;
@@ -202,8 +248,8 @@ fn scan_segment(seg: &str, base_dir: &str, work_canonical: &Path, result: &mut S
     let cmd = first.trim_matches(['"', '\'']);
     match classify(cmd) {
         CmdKind::Executor => result.executor_hit = true,
-        CmdKind::FileOps => scan_tokens(&tokens[1..], base_dir, work_canonical, result, true),
-        CmdKind::Other => scan_tokens(&tokens, base_dir, work_canonical, result, false),
+        CmdKind::FileOps => scan_tokens(&tokens[1..], base_dir, work_canonical, vars, result, true),
+        CmdKind::Other => scan_tokens(&tokens, base_dir, work_canonical, vars, result, false),
     }
 }
 
@@ -217,6 +263,7 @@ fn scan_tokens(
     tokens: &[&str],
     base_dir: &str,
     work_canonical: &Path,
+    vars: &ScriptVars,
     result: &mut ShellScan,
     include_plain_args: bool,
 ) {
@@ -224,7 +271,7 @@ fn scan_tokens(
     for token in tokens {
         if redirect_next {
             redirect_next = false;
-            check_candidate(token, base_dir, work_canonical, result);
+            check_candidate(token, base_dir, work_canonical, vars, result);
             continue;
         }
         if let Some(rest) = strip_redirect_operator(token) {
@@ -232,7 +279,7 @@ fn scan_tokens(
                 // Standalone operator token: target is the next token
                 redirect_next = true;
             } else {
-                check_candidate(rest, base_dir, work_canonical, result);
+                check_candidate(rest, base_dir, work_canonical, vars, result);
             }
             continue;
         }
@@ -243,7 +290,7 @@ fn scan_tokens(
         if arg.starts_with('-') || arg.starts_with('+') {
             continue;
         }
-        check_candidate(arg, base_dir, work_canonical, result);
+        check_candidate(arg, base_dir, work_canonical, vars, result);
     }
 }
 
@@ -264,10 +311,44 @@ fn cd_target(seg: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
+/// Detects a script variable assignment of the form `$name = "literal"`
+/// (`${name}` accepted, single or double quotes). Only whole-literal values
+/// are tracked: dynamic values (`$other`, `$(...)`, concatenation) and
+/// scoped names (`$env:`, `$script:`) return None.
+/// Returns (lowercased name, literal value).
+fn assignment_target(seg: &str) -> Option<(String, String)> {
+    let (lhs, rhs) = seg.split_once('=')?;
+    let name = lhs.trim().strip_prefix('$')?;
+    let name = name
+        .strip_prefix('{')
+        .and_then(|n| n.strip_suffix('}'))
+        .unwrap_or(name);
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let rhs = rhs.trim();
+    let quote = rhs.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let inner = &rhs[1..];
+    let close = inner.find(quote)?;
+    // Text after the closing quote (`+ "b"`, `-Force`, ...) means this is
+    // not a plain literal assignment
+    if !inner[close + 1..].trim().is_empty() {
+        return None;
+    }
+    let literal = &inner[..close];
+    if literal.is_empty() || literal.contains(['$', '`', '(']) {
+        return None;
+    }
+    Some((name.to_lowercase(), literal.to_string()))
+}
+
 /// Expands `~` and known variable references in a path candidate; dynamic
 /// expressions that cannot be statically expanded (unknown `$var` / `$(...)`
 /// / backticks) return None.
-fn expand_candidate(arg: &str) -> Option<String> {
+fn expand_candidate(arg: &str, vars: &ScriptVars) -> Option<String> {
     if arg == "~" {
         return dirs::home_dir().map(|h| h.display().to_string());
     }
@@ -275,7 +356,7 @@ fn expand_candidate(arg: &str) -> Option<String> {
         return dirs::home_dir().map(|h| format!("{}\\{}", h.display(), rest));
     }
     if arg.contains(['$', '(', '`']) {
-        return expand_known_vars(arg);
+        return expand_known_vars(arg, vars);
     }
     Some(arg.to_string())
 }
@@ -284,12 +365,18 @@ fn expand_candidate(arg: &str) -> Option<String> {
 /// decides against the current resolution base whether it is out-of-bounds.
 /// Dynamic expressions that cannot be statically expanded are skipped
 /// (best effort).
-fn check_candidate(raw: &str, base_dir: &str, work_canonical: &Path, result: &mut ShellScan) {
+fn check_candidate(
+    raw: &str,
+    base_dir: &str,
+    work_canonical: &Path,
+    vars: &ScriptVars,
+    result: &mut ShellScan,
+) {
     let arg = raw.trim_matches(['"', '\'']);
     if arg.is_empty() {
         return;
     }
-    let Some(expanded) = expand_candidate(arg) else {
+    let Some(expanded) = expand_candidate(arg, vars) else {
         return;
     };
     let resolved = resolve_permission_path(&expanded, base_dir);
@@ -311,7 +398,11 @@ fn check_candidate(raw: &str, base_dir: &str, work_canonical: &Path, result: &mu
 /// newline) outside quotes and escapes.
 /// Separators inside quotes do not split; empty segments produced by
 /// consecutive separators are dropped.
-fn split_top_level(command: &str) -> Vec<&str> {
+/// The escape model follows `dialect`: a backslash escapes only in POSIX
+/// shells; PowerShell escapes with a backtick alone, so a Windows path that
+/// ends with `\` inside double quotes does not swallow the closing quote
+/// and fuse the following commands into one segment.
+fn split_top_level_in(command: &str, dialect: ShellDialect) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0usize;
     let mut in_single = false;
@@ -323,9 +414,8 @@ fn split_top_level(command: &str) -> Vec<&str> {
             continue;
         }
         match c {
-            '\\' if !in_single => escaped = true,
-            // PowerShell backtick escape (also valid inside double quotes;
-            // handled the same way, roughly)
+            '\\' if dialect == ShellDialect::Posix && !in_single => escaped = true,
+            // PowerShell backtick escape (also valid inside double quotes)
             '`' if !in_single => escaped = true,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
@@ -386,9 +476,9 @@ fn strip_redirect_operator(token: &str) -> Option<&str> {
 /// Expansion succeeds only when the argument contains exactly one variable
 /// reference and the rest is literal; unresolvable cases return None
 /// (the caller skips them).
-fn expand_known_vars(arg: &str) -> Option<String> {
+fn expand_known_vars(arg: &str, vars: &ScriptVars) -> Option<String> {
     let dollar = arg.find('$')?;
-    let (value, after) = parse_var_ref(&arg[dollar..])?;
+    let (value, after) = parse_var_ref(&arg[dollar..], vars)?;
     // No further dynamic expressions allowed after the variable reference
     if after.contains(['$', '`', '(']) {
         return None;
@@ -398,30 +488,47 @@ fn expand_known_vars(arg: &str) -> Option<String> {
 
 /// Parses a variable reference starting with `$`; returns (value, remainder
 /// after the reference).
-fn parse_var_ref(s: &str) -> Option<(String, &str)> {
+fn parse_var_ref<'a>(s: &'a str, vars: &ScriptVars) -> Option<(String, &'a str)> {
     if let Some(rest) = s.strip_prefix("${") {
         let end = rest.find('}')?;
-        let value = lookup_env(&rest[..end])?;
+        let value = lookup_var(&rest[..end], vars)?;
         return Some((value, &rest[end + 1..]));
     }
     let body = s.strip_prefix('$')?;
-    // `$env:NAME` (PowerShell) takes precedence over plain identifiers
-    let named = if body.len() >= 4 && body[..4].eq_ignore_ascii_case("env:") {
-        take_ident(&body[4..])
-    } else {
-        take_ident(body)
+    // `$env:NAME` (PowerShell) takes precedence over plain identifiers. The
+    // env scope never consults script variables — distinct PowerShell scopes.
+    // `get` is None on a non-char-boundary, so multi-byte text right after
+    // `$` cannot be sliced mid-character here.
+    let named = match body.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("env:") => {
+            let (ident, after) = take_ident(&body[4..]);
+            if ident.is_empty() {
+                return None;
+            }
+            return Some((lookup_env(&ident)?, after));
+        }
+        _ => take_ident(body),
     };
     if named.0.is_empty() {
         return None;
     }
-    Some((lookup_env(&named.0)?, named.1))
+    Some((lookup_var(&named.0, vars)?, named.1))
 }
 
 fn take_ident(s: &str) -> (String, &str) {
+    // Unicode-aware: PowerShell identifiers may contain non-ASCII letters
     let end = s
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
         .unwrap_or(s.len());
     (s[..end].to_string(), &s[end..])
+}
+
+/// Resolves a plain `$name` / `${name}` reference: script-assigned variables
+/// shadow the environment.
+fn lookup_var(name: &str, vars: &ScriptVars) -> Option<String> {
+    vars.get(&name.to_lowercase())
+        .cloned()
+        .or_else(|| lookup_env(name))
 }
 
 fn lookup_env(name: &str) -> Option<String> {
@@ -506,6 +613,7 @@ mod tests {
         for cmd in [
             "gc C:\\Windows\\win.ini",
             "gci C:\\Windows",
+            "Get-ChildItem C:\\Windows",
             "ni C:\\Users\\evil.txt",
         ] {
             let result = scan(cmd, &wd_str);
@@ -590,6 +698,103 @@ mod tests {
     }
 
     #[test]
+    fn non_ascii_after_dollar_does_not_panic() {
+        let wd = tmp_workdir("non_ascii_dollar");
+        let wd_str = wd.display().to_string();
+        // '恒' straddles byte 4 of the text after `$`; the prefix check must
+        // not slice mid-character and the unresolvable reference is skipped
+        assert!(scan(r"cat $n\恒大/file.txt", &wd_str).is_clean());
+        assert!(scan("cat ${恒}/file.txt", &wd_str).is_clean());
+        assert!(scan("cat $env:恒/file.txt", &wd_str).is_clean());
+        assert!(scan("cat 恒大/file.txt", &wd_str).is_clean());
+    }
+
+    #[test]
+    fn script_var_assignment_is_tracked() {
+        let wd = tmp_workdir("script_var");
+        let wd_str = wd.display().to_string();
+        // Trim the trailing separator: this test runs `scan` under the
+        // platform dialect, and POSIX would treat `\"` as an escaped quote
+        let outside_str = std::env::temp_dir()
+            .display()
+            .to_string()
+            .trim_end_matches(['\\', '/'])
+            .to_string();
+        // `$n = "path"` then `$n\...` resolves against the assigned literal
+        let result = scan(
+            &format!(r#"$n = "{outside_str}" && cat $n\file.txt"#),
+            &wd_str,
+        );
+        assert_eq!(result.external_dirs.len(), 1);
+        // PowerShell variables are case-insensitive
+        let result = scan(
+            &format!(r#"$n = "{outside_str}" && cat $N\file.txt"#),
+            &wd_str,
+        );
+        assert_eq!(result.external_dirs.len(), 1);
+        // `${n}` reference form
+        let result = scan(
+            &format!(r#"$n = "{outside_str}" && cat "${{n}}\file.txt""#),
+            &wd_str,
+        );
+        assert_eq!(result.external_dirs.len(), 1);
+        // In-workdir assignment stays clean
+        let result = scan(r#"$n = "sub" && cat $n\file.txt"#, &wd_str);
+        assert!(result.is_clean());
+        // Dynamic / concatenated values are not tracked
+        assert!(scan(r#"$n = "$($other)" && cat $n\file.txt"#, &wd_str).is_clean());
+        assert!(scan(r#"$n = "a" + "b" && cat $n\file.txt"#, &wd_str).is_clean());
+        // Scoped names are not tracked
+        assert!(scan(r#"$env:x = "a" && cat $env:x\file.txt"#, &wd_str).is_clean());
+    }
+
+    #[test]
+    fn powershell_move_script_with_cjk_paths() {
+        let wd = tmp_workdir("move_script");
+        let wd_str = wd.display().to_string();
+        let n = std::env::temp_dir();
+        let n_str = n
+            .display()
+            .to_string()
+            .trim_end_matches(['\\', '/'])
+            .to_string();
+        // Real agent-generated script shape (sanitized paths): a variable
+        // assignment plus multi-line Move-Item references with CJK segments.
+        // This used to panic in parse_var_ref ('恒' straddling the byte-4
+        // slice of the text after `$`).
+        let command = format!(
+            "$n = \"{n_str}\"\n\
+             Move-Item -LiteralPath \"$n\\恒大地产集团南宁有限公司破产清算一案.pdf\" -Destination \"$n\\公告\" -Force\n\
+             Move-Item -LiteralPath \"$n\\7.线上债权申报指南（如采用法院系统线上申报）.docx\" -Destination \"$n\\申报指引\" -Force\n\
+             Get-ChildItem -LiteralPath $n | Select-Object -ExpandProperty Name"
+        );
+        let result = scan(&command, &wd_str);
+        assert!(!result.executor_hit);
+        assert!(!result.external_dirs.is_empty());
+    }
+
+    #[test]
+    fn powershell_trailing_backslash_assignment_still_gates() {
+        let wd = tmp_workdir("trailing_bs");
+        let wd_str = wd.display().to_string();
+        // `$n` ends with a separator: under the PowerShell dialect the
+        // closing quote is not swallowed, the assignment is tracked and the
+        // later `$n\...` references resolve to the out-of-workdir literal
+        let n = std::env::temp_dir()
+            .display()
+            .to_string()
+            .trim_end_matches(['\\', '/'])
+            .to_string()
+            + "/";
+        let command = format!(
+            "$n = \"{n}\"\nMove-Item -LiteralPath \"$n\\公告\\x.pdf\" -Destination \"$n\\y\" -Force"
+        );
+        let result = scan_in(&command, &wd_str, ShellDialect::PowerShell);
+        assert!(!result.executor_hit);
+        assert!(!result.external_dirs.is_empty());
+    }
+
+    #[test]
     fn glob_parent_dir_still_gated() {
         let wd = tmp_workdir("glob");
         let wd_str = wd.display().to_string();
@@ -630,20 +835,53 @@ mod tests {
         assert!(scan("cd - && ls", &wd_str).is_clean());
     }
 
+    fn split_posix(c: &str) -> Vec<&str> {
+        split_top_level_in(c, ShellDialect::Posix)
+    }
+
+    fn split_pwsh(c: &str) -> Vec<&str> {
+        split_top_level_in(c, ShellDialect::PowerShell)
+    }
+
     #[test]
     fn quoted_separators_are_not_split() {
-        assert_eq!(split_top_level("echo 'a && b' && cat /etc/hosts").len(), 2);
-        assert_eq!(split_top_level("echo \"x; y\" ; ls").len(), 2);
-        assert_eq!(split_top_level("echo 'it''s fine'").len(), 1);
-        assert_eq!(split_top_level("printf '%s\\n' 'a|b'").len(), 1);
-        assert!(split_top_level("").is_empty());
-        assert!(split_top_level("   ").is_empty());
+        let sp = split_posix;
+        assert_eq!(sp("echo 'a && b' && cat /etc/hosts").len(), 2);
+        assert_eq!(sp("echo \"x; y\" ; ls").len(), 2);
+        assert_eq!(sp("echo 'it''s fine'").len(), 1);
+        assert_eq!(sp("printf '%s\\n' 'a|b'").len(), 1);
+        assert!(sp("").is_empty());
+        assert!(sp("   ").is_empty());
+        // POSIX: `\"` inside double quotes is a literal quote, the string
+        // stays open and the `;` does not split
+        assert_eq!(sp(r#"echo "a\"; cat x"#).len(), 1);
+        // POSIX: `\;` outside quotes is a literal semicolon
+        assert_eq!(sp(r"echo a\;b; cat x").len(), 2);
+    }
+
+    #[test]
+    fn powershell_backslash_is_not_an_escape() {
+        let sp = split_pwsh;
+        // `"a\"` is a complete string in PowerShell: the trailing `\` is
+        // literal, the quote closes and `;` splits
+        assert_eq!(sp(r#"echo "a\"; cat x"#).len(), 2);
+        // A Windows path ending with `\` no longer fuses the following
+        // commands into one segment
+        assert_eq!(sp("$n = \"C:\\dir\\\"; cat $n\\x").len(), 2);
+        // The backtick remains the escape, including inside double quotes
+        assert_eq!(sp(r#""a`;b"; cat x"#).len(), 2);
+        // Quoted separators still do not split
+        assert_eq!(sp("echo 'a && b' && cat x").len(), 2);
+        assert_eq!(sp(r#"echo "x; y" ; ls"#).len(), 2);
     }
 
     #[test]
     fn classify_covers_both_shells() {
         assert_eq!(classify("cat"), CmdKind::FileOps);
         assert_eq!(classify("Get-Content"), CmdKind::FileOps);
+        assert_eq!(classify("Get-ChildItem"), CmdKind::FileOps);
+        assert_eq!(classify("Get-Item"), CmdKind::FileOps);
+        assert_eq!(classify("Set-ItemProperty"), CmdKind::FileOps);
         assert_eq!(classify("git"), CmdKind::Other);
         assert_eq!(classify("sudo"), CmdKind::Executor);
         assert_eq!(classify("PYTHON3"), CmdKind::Executor);
