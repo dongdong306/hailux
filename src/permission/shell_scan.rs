@@ -30,6 +30,9 @@ type ScriptVars = HashMap<String, String>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellDialect {
     Posix,
+    // Only constructed under the Windows dialect (plus tests); silence
+    // dead_code on unix builds where clippy runs without --tests.
+    #[cfg_attr(not(windows), allow(dead_code))]
     PowerShell,
 }
 
